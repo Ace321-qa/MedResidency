@@ -25,6 +25,7 @@ export default function ProgramLayout() {
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="resident/[id]" />
       <Stack.Screen name="onboarding" />
+      <Stack.Screen name="block" />
       <Stack.Screen name="settings" />
     </Stack>
   );

@@ -82,7 +82,7 @@ export default function ProgramSettingsScreen() {
       <Card>
         <DetailRow label="Role" value="Programme coordinator" />
         <DetailRow label="Programme id" value={String(session?.programId ?? '—')} />
-        <DetailRow label="Scoped programme" value={session?.residentName ?? '—'} />
+        <DetailRow label="Scoped programme" value={session?.programLabel ?? '—'} />
       </Card>
 
       <Banner

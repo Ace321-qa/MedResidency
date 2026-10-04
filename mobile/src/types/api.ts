@@ -340,6 +340,11 @@ export interface CreateAssignmentPayload {
  * Every field is required. The controller answers 409 for a duplicate
  * `block_number` within an `academic_year`, and 400 when `end_date` precedes
  * `start_date`.
+ *
+ * `week_start_day` is intentionally absent even though the column exists and
+ * `GET /rotations/blocks` returns it: `RotationService.createBlock` does not
+ * include it in its INSERT, so sending it is accepted and discarded. Adding it
+ * here would advertise a field that cannot be saved.
  */
 export interface CreateBlockPayload {
   program_id: number;
@@ -348,7 +353,6 @@ export interface CreateBlockPayload {
   block_name: string;
   start_date: CalendarDateString;
   end_date: CalendarDateString;
-  week_start_day?: string | null;
 }
 
 /**

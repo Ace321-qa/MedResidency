@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Library } from 'lucide-react-native';
+import { router } from 'expo-router';
 
 import {
   AppHeader,
+  Button,
   Card,
   ChoiceGroup,
   EmptyState,
@@ -14,7 +16,6 @@ import {
   SectionHeader,
   SkeletonList,
   StatusBadge,
-  Text,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchRotationBlocks, fetchRotations } from '../../../services/rotations';
@@ -28,9 +29,10 @@ import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '
  * they are always read together when assigning somebody: "what rotations exist?"
  * and "which blocks do they fit into?".
  *
- * Both are read-only. Creating rotations and blocks belongs to the academic
- * office and there is no POST endpoint for them, so this screen does not offer
- * a button that could not work.
+ * Blocks can be created here; `POST /rotations/blocks` exists and the form is in
+ * `../block`. Rotation *definitions* and resident assignments still cannot be
+ * written from this app — the catalogue is seeded data, and
+ * `POST /rotations/assignments` is not wired to a screen.
  */
 
 type View2 = 'BLOCKS' | 'ROTATIONS';
@@ -124,7 +126,11 @@ export default function ProgramRotationsScreen() {
                     <ListRow
                       key={block.block_id}
                       title={`${block.block_name} · ${block.academic_year}`}
-                      subtitle={`Starts ${humanizeToken(block.week_start_day ?? 'monday')}`}
+                      subtitle={
+                        block.week_start_day
+                          ? `Week starts ${humanizeToken(block.week_start_day)}`
+                          : 'No first day of week recorded'
+                      }
                       meta={formatDateRange(block.start_date, block.end_date)}
                       trailing={
                         <StatusBadge
@@ -138,10 +144,18 @@ export default function ProgramRotationsScreen() {
                   );
                 })}
               </Card>
-              <Text variant="caption" tone="muted" style={styles.footnote}>
-                Blocks are created by the academic office. This app has no endpoint to add or edit them.
-              </Text>
             </>
+          ) : null}
+
+          {/* Shown even when the list is empty or filtered away: the programme
+              having no blocks at all is exactly when this button is needed. */}
+          {blocks.status === 'ready' && needle === '' ? (
+            <Button
+              label="Add academic block"
+              variant="secondary"
+              onPress={() => router.push('/program/block')}
+              style={styles.addButton}
+            />
           ) : null}
         </>
       ) : (
@@ -195,7 +209,7 @@ const styles = StyleSheet.create({
   search: {
     marginVertical: spacing.md,
   },
-  footnote: {
-    marginTop: spacing.sm,
+  addButton: {
+    marginTop: spacing.md,
   },
 });

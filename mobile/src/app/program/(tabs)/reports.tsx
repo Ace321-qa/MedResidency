@@ -46,7 +46,7 @@ export default function ReportsScreen() {
 
   return (
     <Screen onRefresh={report.refresh} refreshing={report.isRefreshing} bottomGutter={spacing.xxl}>
-      <AppHeader title="Reports" subtitle={session?.residentName} />
+      <AppHeader title="Reports" subtitle={session?.programLabel ?? undefined} />
 
       <Banner
         tone="warning"

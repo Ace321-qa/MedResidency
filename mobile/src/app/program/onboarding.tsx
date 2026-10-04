@@ -187,7 +187,7 @@ export default function OnboardingScreen() {
     <Screen bottomGutter={spacing.xxl}>
       <AppHeader
         title="Register a resident"
-        subtitle={`Enrolled in ${session?.residentName ?? 'this programme'}`}
+        subtitle={`Enrolled in ${session?.programLabel ?? 'this programme'}`}
         onBack={() => router.back()}
       />
 

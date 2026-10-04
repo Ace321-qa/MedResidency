@@ -67,7 +67,7 @@ export default function ProgramOverviewScreen() {
     >
       <AppHeader
         title="Programme"
-        subtitle={session?.residentName}
+        subtitle={session?.programLabel ?? undefined}
         action={
           <Button
             label="Add"
@@ -113,7 +113,11 @@ export default function ProgramOverviewScreen() {
                 <ListRow
                   key={block.block_id}
                   title={`${block.block_name} · ${block.academic_year}`}
-                  subtitle={`Week starting ${humanizeToken(block.week_start_day ?? 'monday')}`}
+                  subtitle={
+                    block.week_start_day
+                      ? `Week starting ${humanizeToken(block.week_start_day)}`
+                      : 'No first day of week recorded'
+                  }
                   meta={formatDateRange(block.start_date, block.end_date)}
                   last={index === upcoming.length - 1}
                   onPress={() => router.push('/program/rotations')}

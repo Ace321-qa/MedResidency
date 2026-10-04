@@ -27,7 +27,6 @@ import { fetchResidentList } from '../../../services/residents';
 import { colors, spacing } from '../../../theme';
 import type { LeaveRequest, LeaveStatus } from '../../../types/api';
 import { formatDateRange, formatDateTime, humanizeToken } from '../../../utils/format';
-import { residentFullName } from '../../../utils/residents';
 
 /**
  * Approvals — the coordinator's leave review queue.
@@ -72,17 +71,22 @@ export default function ApprovalsScreen() {
 
     const merged: LeaveRequest[] = [];
     /**
-     * Leave rows carry `resident_name` but no `resident_id`, so the id is
-     * captured here while the roster is still in hand. Without it a request row
-     * could not open the resident it belongs to.
+     * Leave rows carry `resident_name` but no `resident_id`, and the server's
+     * name does not match ours: it concatenates `first_name` and `last_name`
+     * only, so our "Omar K. Al-Nouri" arrives here as "Omar Al-Nouri". Joining
+     * on a name would miss and the row would open nothing. The id is recorded
+     * per row instead, while we still know which resident's response it came
+     * from. `request_id` is the primary key of the leave request table, so it
+     * keys the map uniquely.
      */
-    const residentIdByName = new Map<string, number>();
+    const residentIdByRequest: Record<number, number> = {};
     let failed = 0;
 
     settled.forEach((outcome, index) => {
-      residentIdByName.set(residentFullName(roster[index]), roster[index].resident_id);
-
       if (outcome.status === 'fulfilled') {
+        outcome.value.forEach((request) => {
+          residentIdByRequest[request.request_id] = roster[index].resident_id;
+        });
         merged.push(...outcome.value);
       } else {
         failed += 1;
@@ -95,7 +99,7 @@ export default function ApprovalsScreen() {
       requests: merged,
       failedResidents: failed,
       rosterSize: roster.length,
-      residentIdByName: Object.fromEntries(residentIdByName),
+      residentIdByRequest,
     };
   }, [programId]);
 
@@ -242,7 +246,7 @@ export default function ApprovalsScreen() {
                       />
                     }
                     onPress={() => {
-                      const id = queue.data?.residentIdByName[request.resident_name];
+                      const id = queue.data?.residentIdByRequest[request.request_id];
                       if (id) router.push(`/program/resident/${id}`);
                     }}
                     muted={request.status === 'CANCELLED'}

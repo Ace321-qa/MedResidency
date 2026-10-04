@@ -26,6 +26,16 @@ export interface Session {
   residentName: string;
   /** Program whose roster the coordinator area shows. */
   programId: number;
+  /**
+   * Human-readable programme name, set only for a coordinator session.
+   *
+   * A coordinator session also fills `residentName` with the programme label,
+   * because `residentId` has to stay a number for `useResidentId`. Reading
+   * `residentName` in the coordinator area therefore means "the programme",
+   * which is exactly the kind of thing that reads as a person's name one screen
+   * later. Use this field instead.
+   */
+  programLabel: string | null;
 }
 
 interface SessionContextValue {
@@ -51,6 +61,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       residentId: resident.id,
       residentName: resident.fullName,
       programId: resident.programId,
+      programLabel: null,
     });
   }, []);
 
@@ -62,6 +73,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       residentId: FALLBACK_RESIDENT_ID,
       residentName: programLabel,
       programId,
+      programLabel,
     });
   }, []);
 
