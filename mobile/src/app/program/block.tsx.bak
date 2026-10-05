@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState } from 'react';
 import { router } from 'expo-router';
 
 import {
@@ -9,14 +9,11 @@ import {
   DateField,
   Screen,
   SectionHeader,
-  SelectField,
   TextField,
 } from '../../components';
-import { useSession, useApiResource } from '../../hooks';
-import { createRotationBlock, fetchRotationBlocks } from '../../services/rotations';
+import { useSession } from '../../hooks';
+import { createRotationBlock } from '../../services/rotations';
 import { spacing } from '../../theme';
-import { getAcademicYears } from '../../utils/academicYear';
-import { addWeeks } from '../../utils/dateCalc';
 
 /**
  * Add an academic block — `POST /api/v1/rotations/blocks`.
@@ -48,20 +45,12 @@ import { addWeeks } from '../../utils/dateCalc';
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-const DURATION_OPTIONS = [
-  { value: '1', label: '1 week' },
-  { value: '2', label: '2 weeks' },
-  { value: '3', label: '3 weeks' },
-  { value: '4', label: '4 weeks' },
-];
-
 interface FormState {
   academicYear: string;
   blockNumber: string;
   blockName: string;
   startDate: string;
   endDate: string;
-  durationWeeks: number;
 }
 
 const INITIAL: FormState = {
@@ -70,7 +59,6 @@ const INITIAL: FormState = {
   blockName: '',
   startDate: '',
   endDate: '',
-  durationWeeks: 4,
 };
 
 export default function AddBlockScreen() {
@@ -81,25 +69,6 @@ export default function AddBlockScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: number; name: string } | null>(null);
-
-  const academicYears = useMemo(() => getAcademicYears(7, 3), []);
-  const existingBlocks = useApiResource(() => fetchRotationBlocks(programId), [programId]);
-  
-  const assignedBlockNumbers = useMemo(() => {
-    if (!form.academicYear || !existingBlocks.data) return new Set<number>();
-    return new Set(
-      existingBlocks.data
-        .filter(b => b.academic_year === form.academicYear)
-        .map(b => b.block_number)
-    );
-  }, [form.academicYear, existingBlocks.data]);
-
-  useEffect(() => {
-    if (form.startDate && DATE_PATTERN.test(form.startDate)) {
-      setForm(prev => ({ ...prev, endDate: addWeeks(form.startDate, prev.durationWeeks) }));
-    }
-  }, [form.startDate, form.durationWeeks]);
-
 
   /**
    * The date check mirrors the database's own CHECK constraint rather than
@@ -183,39 +152,26 @@ export default function AddBlockScreen() {
           placeholder="e.g. Block 3 — General Surgery"
           required
         />
-        <SelectField
+        <TextField
           label="Academic year"
           value={form.academicYear}
-          onChange={(value) => setForm((prev) => ({ ...prev, academicYear: value, blockNumber: '' }))}
-          options={academicYears.map((year) => ({ value: year, label: year }))}
+          onChangeText={(value) => setForm((prev) => ({ ...prev, academicYear: value }))}
+          placeholder="e.g. 2026/2027"
           required
         />
-        <SelectField
+        <TextField
           label="Block number"
           value={form.blockNumber}
-          onChange={(value) => setForm((prev) => ({ ...prev, blockNumber: value }))}
-          options={Array.from({ length: 13 }, (_, i) => i + 1)
-            .filter((n) => !assignedBlockNumbers.has(n))
-            .map((n) => ({ value: String(n), label: String(n) }))}
+          onChangeText={(value) => setForm((prev) => ({ ...prev, blockNumber: value }))}
+          keyboardType="number-pad"
           error={blockNumberError}
+          hint="The API treats this number as unique within an academic year."
           required
-          hint={
-            assignedBlockNumbers.size > 0
-              ? `Blocks ${[...assignedBlockNumbers].sort((a, b) => a - b).join(', ')} already exist for this year.`
-              : undefined
-          }
         />
       </Card>
 
       <SectionHeader title="Dates" />
       <Card>
-        <SelectField
-          label="Duration"
-          value={String(form.durationWeeks)}
-          onChange={(value) => setForm((prev) => ({ ...prev, durationWeeks: Number.parseInt(value, 10) }))}
-          options={DURATION_OPTIONS}
-          hint="Sets the end date from the start date. You can still edit the end date afterwards."
-        />
         <DateField
           label="Start date"
           value={form.startDate}

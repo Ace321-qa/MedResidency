@@ -140,6 +140,7 @@ export default function ProgramRotationsScreen() {
                       }
                       last={index === visibleBlocks.length - 1}
                       muted={isPast}
+                      onPress={() => router.push(`/program/block/${block.block_id}` as any)}
                     />
                   );
                 })}
@@ -150,12 +151,38 @@ export default function ProgramRotationsScreen() {
           {/* Shown even when the list is empty or filtered away: the programme
               having no blocks at all is exactly when this button is needed. */}
           {blocks.status === 'ready' && needle === '' ? (
-            <Button
-              label="Add academic block"
-              variant="secondary"
-              onPress={() => router.push('/program/block')}
-              style={styles.addButton}
-            />
+            <>
+              <Button
+                label="Add academic block"
+                variant="secondary"
+                onPress={() => router.push('/program/block')}
+                style={styles.addButton}
+              />
+              <Button
+                label="Master Grid"
+                variant="outline"
+                onPress={() => router.push('/program/master/grid' as any)}
+                style={styles.addButton}
+              />
+              <Button
+                label="Longitudinal Matrix"
+                variant="outline"
+                onPress={() => router.push('/program/longitudinal/matrix' as any)}
+                style={styles.addButton}
+              />
+              <Button
+                label="Assign Supervisor"
+                variant="outline"
+                onPress={() => router.push('/program/supervisor/assign' as any)}
+                style={styles.addButton}
+              />
+              <Button
+                label="New Assignment"
+                variant="outline"
+                onPress={() => router.push('/program/assignments/new' as any)}
+                style={styles.addButton}
+              />
+            </>
           ) : null}
         </>
       ) : (

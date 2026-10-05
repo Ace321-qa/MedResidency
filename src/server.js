@@ -108,3 +108,7 @@ if (require.main === module) {
 }
 
 module.exports = app;
+
+// Longitudinal routes
+const longitudinalRoutes = require('./routes/longitudinalRoutes');
+app.use('/api/v1/longitudinal', longitudinalRoutes);

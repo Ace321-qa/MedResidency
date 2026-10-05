@@ -400,3 +400,154 @@ export interface OnboardResidentResult {
   last_name: string;
   status: string;
 }
+
+export interface LongitudinalClinicType {
+  id: number;
+  program_id: number;
+  clinic_code: string;
+  clinic_name: string;
+  default_day_of_week: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  requires_release_letter: number;
+  is_active: number;
+}
+
+export interface LongitudinalAssignment {
+  longitudinal_assignment_id: number;
+  resident_id: number;
+  clinic_type_id: number;
+  clinic_code: string;
+  clinic_name: string;
+  site_name: string | null;
+  supervisor_name: string | null;
+  faculty_supervisor_id: number | null;
+  day_of_week: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  start_date: CalendarDateString | IsoDateString | null;
+  end_date: CalendarDateString | IsoDateString | null;
+  is_active: number;
+  requires_release_letter?: number;
+  release_letter_generated?: number;
+  notes?: string | null;
+  pgy_level?: number | null;
+  resident_name?: string;
+}
+
+export interface FacultySupervisor {
+  id: number;
+  program_id: number;
+  first_name: string;
+  last_name: string;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+  is_active: number;
+}
+
+export interface LongitudinalClinicSlot {
+  id: number;
+  clinic_type_id: number;
+  slot_number: number;
+  slot_label: string;
+  day_of_week: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  site_name: string | null;
+  notes: string | null;
+  is_active: number;
+}
+
+export interface LongitudinalSupervisorAssignment {
+  id: number;
+  program_id: number;
+  clinic_type_id: number;
+  clinic_code: string;
+  clinic_name: string;
+  longitudinal_assignment_id: number | null;
+  longitudinal_clinic_slot_id: number | null;
+  faculty_supervisor_id: number;
+  faculty_supervisor_name: string;
+  faculty_title: string | null;
+  resident_id: number | null;
+  resident_name: string | null;
+  start_date: CalendarDateString;
+  end_date: CalendarDateString;
+  rotation_period_months: number;
+  is_primary: number;
+  is_active: number;
+  notes: string | null;
+}
+
+/**
+ * `GET /rotations/assignments/cohort` — one row per resident per academic block.
+ *
+ * The query is driven from `rotation_blocks` and LEFT JOINed to assignments, so
+ * the row grain is resident/block and *every* cell is present: an unassigned cell
+ * arrives as a row whose assignment columns are null and `is_assigned` is 0.
+ * A cell can also hold more than one assignment (a partial block split across
+ * two rotations), which `assignment_count` reports so a client pivoting
+ * residents-by-blocks can tell a split block from a duplicated row.
+ *
+ * `academic_year` comes back in the canonical hyphenated form ("2026-2027")
+ * whatever shape the caller sent, so a client must never compare it against its
+ * own "2026/2027" string.
+ */
+export interface CohortGridCell {
+  resident_id: number;
+  resident_name: string;
+  /** The resident's primary identifier, i.e. their employee id. */
+  employee_id: string | null;
+  pgy_level: number | null;
+  resident_status: string;
+  program_id: number;
+  program_code: string;
+  block_id: number;
+  block_number: number;
+  block_name: string;
+  academic_year: string;
+  block_start_date: IsoDateString;
+  block_end_date: IsoDateString;
+  assignment_id: number | null;
+  rotation_id: number | null;
+  rotation_code: string | null;
+  rotation_name: string | null;
+  department_name: string | null;
+  start_date: IsoDateString | null;
+  end_date: IsoDateString | null;
+  assigned_weeks: Numeric | null;
+  assignment_type: AssignmentType | null;
+  notes: string | null;
+  /** MySQL boolean expression: 1 when the cell has an assignment, 0 when not. */
+  is_assigned: number;
+  /** How many assignments share this resident/block cell. */
+  assignment_count: number;
+}
+
+export interface RotationAssignmentDetail {
+  assignment_id: number;
+  resident_id: number;
+  resident_name: string;
+  first_name: string;
+  last_name: string;
+  middle_initial: string | null;
+  employee_id: string | null;
+  phone_mobile: string | null;
+  pgy_level: number | null;
+  block_id: number;
+  block_name: string;
+  block_number: number;
+  academic_year: string;
+  block_start_date: IsoDateString;
+  block_end_date: IsoDateString;
+  rotation_id: number;
+  rotation_name: string;
+  department_name: string | null;
+  rotation_code: string;
+  start_date: IsoDateString;
+  end_date: IsoDateString;
+  assigned_weeks: Numeric;
+  assignment_type: AssignmentType;
+  notes: string | null;
+}
