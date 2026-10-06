@@ -40,6 +40,17 @@ const palette = {
   amber50: '#FDF3E3',
   red700: '#B91C1C',
   red50: '#FDECEC',
+
+  // Categorical hues for the rota badges. Dark enough to pass AA on their own
+  // light surface, matching the semantic colours above.
+  teal800: '#0F766E',
+  teal50: '#E4FBF7',
+  indigo800: '#3730A3',
+  indigo50: '#EEF2FF',
+  purple800: '#6B21A8',
+  purple50: '#F7EBFF',
+  pink800: '#A61E4D',
+  pink50: '#FDF0F5',
 } as const;
 
 export const colors = {
@@ -97,3 +108,36 @@ export const toneColors: Record<Tone, { foreground: string; surface: string; bor
   warning: { foreground: colors.warning, surface: colors.warningSurface, border: colors.warning },
   danger: { foreground: colors.danger, surface: colors.dangerSurface, border: colors.danger },
 };
+
+/**
+ * Categorical colours for the rota badges, indexed by rotation.
+ *
+ * The semantic palette above answers "is this approved or blocked". This one
+ * answers a different question — *which rotation is this* — and that is a
+ * categorical problem with no natural order, so it needs its own set of hues
+ * rather than an abuse of `warning`/`success`.
+ *
+ * Two rules keep it honest:
+ *
+ *  1. **Colour never carries the meaning alone.** Every badge is labelled with
+ *     the rotation's code, and the grid prints a legend. The hues are there to
+ *     make a column scannable, not to be the only way to read it.
+ *  2. **The assignment is stable.** A rotation's index is derived from its code
+ *     (see `rotationBadge` in `utils/rotationBadges.ts`), so a rotation keeps
+ *     the same colour between sessions instead of shuffling on every render.
+ */
+export const categoricalColors: readonly {
+  foreground: string;
+  surface: string;
+  border: string;
+}[] = [
+  { foreground: palette.navy700, surface: palette.navy50, border: palette.navy100 },
+  { foreground: palette.teal800, surface: palette.teal50, border: '#99F6E4' },
+  { foreground: palette.purple800, surface: palette.purple50, border: '#E9D5FF' },
+  { foreground: palette.amber800, surface: palette.amber50, border: '#FDE68A' },
+  { foreground: palette.indigo800, surface: palette.indigo50, border: '#C7D2FE' },
+  { foreground: palette.green700, surface: palette.green50, border: '#BBF7D0' },
+  { foreground: palette.pink800, surface: palette.pink50, border: '#FBCFE8' },
+  { foreground: palette.red700, surface: palette.red50, border: '#FECACA' },
+  { foreground: palette.slate700, surface: palette.slate50, border: palette.slate200 },
+];

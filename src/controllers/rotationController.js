@@ -2,6 +2,21 @@ const RotationService = require('../services/rotationService');
 const LongitudinalService = require('../services/longitudinalService');
 const { isCheckConstraintViolation } = require('../utils/mysqlErrors');
 
+/**
+ * Turn a thrown error into a response.
+ *
+ * The services raise `error.statusCode` for input they reject themselves — a
+ * block window that cannot end on the right weekday, say — while MySQL failures
+ * arrive as `code`s. Both are handled here so the controller methods stay about
+ * routing rather than about error shapes.
+ */
+function respondWithError(res, error, fallbackMessage) {
+  if (error.statusCode === 400) {
+    return res.status(400).json({ success: false, error: error.message });
+  }
+  return res.status(500).json({ success: false, error: fallbackMessage, details: error.message });
+}
+
 class RotationController {
   static async getBlocks(req, res) {
     try {
@@ -17,12 +32,65 @@ class RotationController {
     }
   }
 
+  /**
+   * `GET /rotations/blocks/dates` — derive a block window.
+   *
+   * The block forms must not reimplement `weeks * 7 - 1`: the client mirror in
+   * `mobile/src/utils/dateCalc.ts` agrees with `src/utils/blockDates.js` today,
+   * but only the server knows the programme's `week_start_day`, so this endpoint
+   * is the authority for what "a 4-week block" means for the programme in
+   * question. The same derivation runs again inside the create and update paths.
+   */
+  static async getBlockDates(req, res) {
+    try {
+      const { program_id, start_date, duration_weeks, end_date } = req.query;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required query parameter: program_id' });
+      }
+
+      // With no start date the caller only wants the programme's rules — the
+      // week-start day, the day a block therefore ends on, and the default
+      // length. A form needs those before it can label its own end-date field,
+      // and asking it to send a date it has not chosen yet is a workaround.
+      if (!start_date) {
+        const calendar = await RotationService.getBlockCalendar(program_id);
+        if (!calendar) {
+          return res.status(404).json({ success: false, error: 'Programme not found' });
+        }
+        return res.status(200).json({ success: true, data: { ...calendar, start_date: null, end_date: null, duration_weeks: calendar.default_block_duration_weeks, errors: [] } });
+      }
+
+      const window = await RotationService.resolveBlockDates({
+        programId: program_id,
+        startDate: start_date,
+        durationWeeks: duration_weeks,
+        endDate: end_date,
+      });
+
+      if (window.errors.length > 0) {
+        return res.status(400).json({ success: false, error: window.errors.join(' ') });
+      }
+
+      return res.status(200).json({ success: true, data: window });
+    } catch (error) {
+      console.error('Error in getBlockDates controller:', error.message);
+      return res.status(500).json({ success: false, error: 'Failed to derive block dates', details: error.message });
+    }
+  }
+
   static async createBlock(req, res) {
     try {
-      const { program_id, academic_year, block_number, block_name, start_date, end_date } = req.body;
-      if (!program_id || !academic_year || !block_number || !block_name || !start_date || !end_date) {
-        return res.status(400).json({ success: false, error: 'Missing required fields. Required: program_id, academic_year, block_number, block_name, start_date, end_date' });
+      const { program_id, academic_year, block_number, block_name, start_date } = req.body;
+      if (!program_id || !academic_year || !block_number || !block_name || !start_date) {
+        return res.status(400).json({ success: false, error: 'Missing required fields. Required: program_id, academic_year, block_number, block_name, start_date, end_date or duration_weeks' });
       }
+      // `end_date` is no longer mandatory: a duration is enough, and the server
+      // derives the last day of the block from the programme's week-start day.
+      const hasWindow = Boolean(req.body.end_date) || Boolean(req.body.duration_weeks);
+      if (!hasWindow) {
+        return res.status(400).json({ success: false, error: 'Missing required fields: end_date or duration_weeks' });
+      }
+
       const newBlock = await RotationService.createBlock(req.body);
       return res.status(201).json({ success: true, message: 'Academic block created successfully', data: newBlock });
     } catch (error) {
@@ -33,7 +101,7 @@ class RotationController {
       if (isCheckConstraintViolation(error)) {
         return res.status(400).json({ success: false, error: 'Invalid dates. The end_date must be greater than or equal to start_date.' });
       }
-      return res.status(500).json({ success: false, error: 'Database operation failed', details: error.message });
+      return respondWithError(res, error, 'Database operation failed');
     }
   }
 
@@ -62,6 +130,9 @@ class RotationController {
       if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
         return res.status(404).json({ success: false, error: 'Invalid foreign key reference. Ensure resident_id, rotation_id, and rotation_block_id exist.' });
       }
+      if (typeof error.statusCode === 'number') {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
       if (isCheckConstraintViolation(error)) {
         return res.status(400).json({ success: false, error: 'Invalid dates. end_date must be greater than or equal to start_date.' });
       }
@@ -82,13 +153,17 @@ class RotationController {
   static async updateBlock(req, res) {
     try {
       const { block_id } = req.params;
-      const { program_id, academic_year, block_number, block_name, start_date, end_date } = req.body;
-      if (!block_id || !program_id || !academic_year || !block_number || !block_name || !start_date || !end_date) {
-        return res.status(400).json({ success: false, error: 'Missing required fields.' });
+      if (!block_id) {
+        return res.status(400).json({ success: false, error: 'Missing required fields: block_id' });
       }
       const block = await RotationService.getBlockById(block_id);
       if (!block) {
         return res.status(404).json({ success: false, error: 'Block not found' });
+      }
+      // A patch that omits a field keeps the stored one; the date window is
+      // re-derived from whatever survives, using the programme's week-start day.
+      if (req.body.start_date === undefined && req.body.end_date === undefined && req.body.duration_weeks === undefined) {
+        return res.status(400).json({ success: false, error: 'Missing required fields: start_date, end_date or duration_weeks' });
       }
       await RotationService.updateBlock(block_id, req.body);
       const updated = await RotationService.getBlockById(block_id);
@@ -100,7 +175,7 @@ class RotationController {
       if (isCheckConstraintViolation(error)) {
         return res.status(400).json({ success: false, error: 'Invalid dates. The end_date must be greater than or equal to start_date.' });
       }
-      return res.status(500).json({ success: false, error: 'Failed to update block', details: error.message });
+      return respondWithError(res, error, 'Failed to update block');
     }
   }
 

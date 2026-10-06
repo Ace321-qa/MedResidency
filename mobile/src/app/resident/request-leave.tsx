@@ -15,6 +15,7 @@ import {
   TextField,
 } from '../../components';
 import { useSession } from '../../hooks';
+import { goBack } from '../../navigation/back';
 import { submitLeaveRequest } from '../../services/leaves';
 import { spacing } from '../../theme';
 import { LEAVE_TYPES, type LeaveType } from '../../types/api';
@@ -131,7 +132,7 @@ export default function RequestLeaveScreen() {
   if (saved) {
     return (
       <Screen bottomGutter={spacing.xl}>
-        <AppHeader title="Request sent" onBack={() => router.back()} />
+        <AppHeader title="Request sent" onBack={goBack} />
         <Banner tone="success" title="Leave requested" message={saved} />
         <Button label="View my requests" onPress={() => router.replace('/resident/requests')} />
       </Screen>
@@ -143,7 +144,7 @@ export default function RequestLeaveScreen() {
       <AppHeader
         title="Request leave"
         subtitle="Goes to the chief resident for approval"
-        onBack={() => router.back()}
+        onBack={goBack}
       />
 
       {submitError ? <Banner tone="danger" title="Could not submit" message={submitError} /> : null}
@@ -180,6 +181,11 @@ export default function RequestLeaveScreen() {
           onChangeText={(value) => setForm((prev) => ({ ...prev, startDate: value }))}
           error={startError}
           required
+          // The last day cannot precede the first, so the two fields are linked:
+          // moving the first day forward pulls the last day with it when the old
+          // last day is now invalid, rather than leaving a range that only fails
+          // on submit.
+          maxDate={isCalendarDate(form.endDate) ? form.endDate : undefined}
           hint="YYYY-MM-DD, inclusive"
         />
         <DateField
@@ -188,6 +194,8 @@ export default function RequestLeaveScreen() {
           onChangeText={(value) => setForm((prev) => ({ ...prev, endDate: value }))}
           error={endError}
           required
+          minDate={isCalendarDate(form.startDate) ? form.startDate : undefined}
+          hint={isCalendarDate(form.startDate) ? `On or after ${form.startDate}.` : undefined}
         />
 
         {dayCount !== null ? (

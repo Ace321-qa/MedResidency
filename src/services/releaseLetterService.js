@@ -358,7 +358,10 @@ class ReleaseLetterService {
         letter_subject: subject.merged,
         generated_letter_body: body.merged,
         merge_values: values,
-        unresolved_placeholders: body.unresolved,
+        // Subject as well as body: a letter whose body filled in cleanly but
+        // whose subject still reads "{{PGY_LEVEL}}" is not ready to send, and the
+        // controller's warning is the only place that is said out loud.
+        unresolved_placeholders: [...new Set([...subject.unresolved, ...body.unresolved])],
       };
     } catch (error) {
       await connection.rollback();
@@ -369,7 +372,46 @@ class ReleaseLetterService {
   }
 
   /**
+   * Rebuild the merge values for a stored letter, so the *subject* can be merged
+   * on read.
+   *
+   * `generateLetter` merges the subject but never persists it — the column does
+   * not exist on `generated_release_letters` — and the list query used to return
+   * `release_letter_templates.letter_subject` verbatim. That is the raw template,
+   * so a letter whose body reads "Dr. Omar Al-Nouri (PGY-1)" opened under a
+   * subject still full of `{{RESIDENT_NAME}}`: the one line a coordinator reads
+   * first was the one line nobody merged.
+   *
+   * Every value here mirrors the map in `generateLetter`. The body is stored
+   * merged, so this only ever has to agree with the template's subject line —
+   * and if it cannot fill a token, `mergeTemplate` leaves it in place, which the
+   * preview highlights rather than hiding.
+   */
+  static buildMergeValues(row) {
+    return {
+      RESIDENT_NAME: row.resident_name,
+      PGY_LEVEL: row.year_in_program ? `PGY-${row.year_in_program}` : null,
+      HOSPITAL_DEPT: row.hospital_department_name,
+      CLINIC_NAME: row.clinic_name,
+      SITE_NAME: row.site_name,
+      RELEASE_DAY: row.day_of_week,
+      START_TIME: formatTime(row.start_time),
+      END_TIME: formatTime(row.end_time),
+      DEPT_HEAD_NAME: row.recipient_dept_head,
+      SUPERVISOR_NAME: row.supervisor_name,
+      PROGRAM_NAME: row.program_name,
+      SPECIALTY_NAME: row.specialty_name,
+      INSTITUTION_NAME: row.institution_name,
+      RELEASE_START_DATE: row.release_start_date,
+      RELEASE_END_DATE: row.release_end_date,
+    };
+  }
+
+  /**
    * Fetch every generated release letter for a resident
+   *
+   * `letter_subject` is merged here rather than read from the template: see
+   * `buildMergeValues`.
    */
   static async getLettersByResident(residentId) {
     const query = `
@@ -379,7 +421,14 @@ class ReleaseLetterService {
         grl.longitudinal_assignment_id,
         rla.site_name,
         rla.day_of_week,
+        rla.start_time,
+        rla.end_time,
+        rla.supervisor_name,
         lct.clinic_name,
+        re.year_in_program,
+        p.program_name,
+        p.specialty_name,
+        p.institution_name,
         grl.template_id,
         rlt.template_code,
         rlt.template_name,
@@ -397,11 +446,24 @@ class ReleaseLetterService {
       JOIN release_letter_templates rlt ON rlt.id = grl.template_id
       JOIN resident_longitudinal_assignments rla ON rla.id = grl.longitudinal_assignment_id
       JOIN longitudinal_clinic_types lct ON lct.id = rla.clinic_type_id
+      LEFT JOIN residency_enrollments re ON re.id = (
+        SELECT re2.id FROM residency_enrollments re2
+        WHERE re2.resident_id = r.id
+        ORDER BY re2.created_at DESC
+        LIMIT 1
+      )
+      LEFT JOIN programs p ON p.id = re.program_id
       WHERE grl.resident_id = ?
       ORDER BY grl.created_at DESC;
     `;
     const [rows] = await db.query(query, [residentId]);
-    return rows;
+
+    return rows.map((row) => ({
+      ...row,
+      letter_subject: row.letter_subject
+        ? this.mergeTemplate(row.letter_subject, this.buildMergeValues(row)).merged
+        : row.letter_subject,
+    }));
   }
 }
 

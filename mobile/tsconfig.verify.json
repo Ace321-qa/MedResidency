@@ -1,0 +1,27 @@
+{
+  "$comment": "Compiles the pure date utilities and their checks to CommonJS so they can run under plain `node`, without Metro or a React Native runtime. Kept separate from tsconfig.json because it targets Node, not the app, and must not pull React Native types into the output.",
+  "compilerOptions": {
+    "strict": true,
+    "module": "node16",
+    "moduleResolution": "node16",
+    "target": "es2020",
+    "lib": ["es2020"],
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowJs": true,
+    "checkJs": false,
+    "outDir": ".tmp/verify",
+    "rootDir": "..",
+    "types": ["node"]
+  },
+  "files": [
+    "src/utils/dateCalc.ts",
+    "src/utils/academicYear.ts",
+    "src/utils/letterPreview.ts",
+    "src/utils/cccMatrix.ts",
+    "scripts/verify-date-calc.ts",
+    "scripts/verify-letter-preview.ts",
+    "scripts/verify-ccc-matrix.ts",
+    "../scripts/date-parity-cases.js"
+  ]
+}

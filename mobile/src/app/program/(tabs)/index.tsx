@@ -22,6 +22,8 @@ import { fetchRotationBlocks } from '../../../services/rotations';
 import { spacing } from '../../../theme';
 import { formatDateRange, humanizeToken, todayCalendarDate } from '../../../utils/format';
 import { residentFullName, residentSubtitle } from '../../../utils/residents';
+import { EMPTY_ARRAY } from '../../../utils/empty';
+import type { ResidentListItem, RotationBlock } from '../../../types/api';
 
 /**
  * Programme overview — the coordinator's home screen.
@@ -39,8 +41,8 @@ export default function ProgramOverviewScreen() {
   const residents = useApiResource(() => fetchResidentList({ programId, limit: 100 }), [programId]);
   const blocks = useApiResource(() => fetchRotationBlocks(programId), [programId]);
 
-  const roster = residents.data ?? [];
-  const blockList = blocks.data ?? [];
+  const roster = residents.data ?? (EMPTY_ARRAY as ResidentListItem[]);
+  const blockList = blocks.data ?? (EMPTY_ARRAY as RotationBlock[]);
 
   const activeResidents = useMemo(
     () => roster.filter((resident) => resident.resident_status === 'ACTIVE_FULL_TIME').length,

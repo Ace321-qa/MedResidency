@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Bell, ClipboardList, LogOut, Settings } from 'lucide-react-native';
@@ -11,6 +11,7 @@ import {
   DetailRow,
   Divider,
   ErrorState,
+  LetterPreviewSheet,
   ListRow,
   ProgressBar,
   Screen,
@@ -25,7 +26,9 @@ import { fetchResident } from '../../../services/residents';
 import { fetchMockTrainingProgress } from '../../../services/mock';
 import { spacing } from '../../../theme';
 import { formatDate, formatDateRange, formatHours, humanizeToken } from '../../../utils/format';
+import { unresolvedPlaceholders } from '../../../utils/letterPreview';
 import { humanizeEnum, residentFullName } from '../../../utils/residents';
+import type { ReleaseLetter } from '../../../types/api';
 
 /**
  * Profile — who is signed in, their record, and their progress.
@@ -44,6 +47,17 @@ const LETTER_TONE = {
   ACKNOWLEDGED: 'success',
 } as const;
 
+/**
+ * Whether a stored letter still carries `{{TOKEN}}` markers.
+ *
+ * The list endpoint does not return `unresolved_placeholders`, so the body is
+ * checked for them here. A letter with one is not ready to be signed, and that
+ * has to be visible before the resident opens it — not after.
+ */
+function hasUnresolvedFields(letter: ReleaseLetter): boolean {
+  return unresolvedPlaceholders(letter.generated_letter_body).length > 0;
+}
+
 export default function ProfileScreen() {
   const router = useRouter();
   const { session, signOut } = useSession();
@@ -53,11 +67,27 @@ export default function ProfileScreen() {
   const letters = useApiResource(() => fetchReleaseLetters(residentId), [residentId]);
   const progress = useApiResource(fetchMockTrainingProgress);
 
-  const letterList = letters.data ?? [];
+  // Memoised rather than `letters.data ?? []` inline: the preview lookup below
+  // depends on it, and a fresh array each render would make that memo recompute on
+  // every keystroke of nothing at all.
+  const letterList = useMemo(() => letters.data ?? [], [letters.data]);
 
   const enrollment = useMemo(
     () => profile.data?.enrollments[0] ?? null,
     [profile.data],
+  );
+
+  /**
+   * Which letter the preview sheet is showing, or `null` for none.
+   *
+   * Held here rather than in the sheet so the sheet unmounts its content when
+   * closed, and so the rows below stay the single source of truth for which
+   * letters exist — the sheet is a view onto a selection, not a second list.
+   */
+  const [previewLetterId, setPreviewLetterId] = useState<number | null>(null);
+  const previewLetter = useMemo(
+    () => letterList.find((letter) => letter.letter_id === previewLetterId) ?? null,
+    [letterList, previewLetterId],
   );
 
   return (
@@ -167,17 +197,24 @@ export default function ProfileScreen() {
                 subtitle={letter.site_name ?? undefined}
                 meta={`${formatDateRange(letter.release_start_date, letter.release_end_date)} · to ${letter.recipient_dept_head}`}
                 trailing={
-                  <StatusBadge
-                    label={humanizeToken(letter.sent_status)}
-                    tone={LETTER_TONE[letter.sent_status] ?? 'neutral'}
-                  />
+                  <View style={styles.letterTrailing}>
+                    {hasUnresolvedFields(letter) ? <StatusBadge label="Incomplete" tone="warning" /> : null}
+                    <StatusBadge
+                      label={humanizeToken(letter.sent_status)}
+                      tone={LETTER_TONE[letter.sent_status] ?? 'neutral'}
+                    />
+                  </View>
                 }
+                onPress={() => setPreviewLetterId(letter.letter_id)}
+                accessibilityHint="Shows the full letter"
                 last={index === letterList.length - 1}
               />
             ))}
           </Card>
         </>
       ) : null}
+
+      <LetterPreviewSheet letter={previewLetter} onClose={() => setPreviewLetterId(null)} />
 
       <SectionHeader title="Progress" trailing="Sample data" />
       <Card>
@@ -250,6 +287,11 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   detailStack: {
+    gap: spacing.xs,
+  },
+  letterTrailing: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: spacing.xs,
   },
   barGap: {

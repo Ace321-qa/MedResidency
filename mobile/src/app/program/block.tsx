@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { router } from 'expo-router';
 
 import {
@@ -13,40 +13,37 @@ import {
   TextField,
 } from '../../components';
 import { useSession, useApiResource } from '../../hooks';
-import { createRotationBlock, fetchRotationBlocks } from '../../services/rotations';
+import { goBack } from '../../navigation/back';
+import { createRotationBlock, fetchBlockCalendar, fetchRotationBlocks } from '../../services/rotations';
 import { spacing } from '../../theme';
-import { getAcademicYears } from '../../utils/academicYear';
-import { addWeeks } from '../../utils/dateCalc';
+import { getAcademicYears, normalizeAcademicYear } from '../../utils/academicYear';
+import { endDateForDuration, isCalendarDate, resolveBlockWindow } from '../../utils/dateCalc';
 
 /**
  * Add an academic block — `POST /api/v1/rotations/blocks`.
  *
  * A block is the calendar a rotation is scheduled inside, so it has to exist
  * before anything can be assigned to it. The API requires every field and
- * enforces two rules in MySQL rather than in JavaScript:
+ * enforces three rules:
  *
  * - `(program_id, academic_year, block_number)` is unique, so a repeat returns
  *   409 with "Duplicate block entry".
  * - `CHECK (end_date >= start_date)`, which returns 400 with "Invalid dates".
+ * - The end date must be the day before the start date — a Sunday-start
+ *   programme ends Saturday, a Monday-start one ends Sunday — so the server
+ *   re-derives the window from `programs.week_start_day` rather than trusting
+ *   the pair typed here. See `resolveBlockWindow`.
  *
- * Both messages come back verbatim through `ApiError` and are shown as-is,
- * because they are more specific than anything this form could invent.
+ * **The end date is derived, not typed.** `RotationService.createBlock` ignores
+ * an end date that disagrees with the duration and rejects it, so the only
+ * useful thing this form can do is state the duration and show the resulting
+ * window. That is why there is a duration select and an end date that updates
+ * itself; the end field remains editable for the case where a coordinator has a
+ * fixed date from the registrar, and the mismatch is reported before submitting.
  *
  * `program_id` comes from the session, not a picker: a coordinator is scoped to
  * one programme and the API would reject a mismatch.
- *
- * **There is deliberately no first-day-of-week control.** `week_start_day` is a
- * nullable column on `rotation_blocks` and `GET /rotations/blocks` returns it,
- * but `RotationService.createBlock` inserts only `program_id`,
- * `academic_year`, `block_number`, `block_name`, `start_date` and `end_date` —
- * it accepts the field and silently discards it. A picker here would look like
- * it saved and then show a value the database never stored, so the field is left
- * out until the insert covers it. New blocks come back with a null week start,
- * which the rotations list reports as "No first day of week recorded" rather
- * than substituting a guess.
  */
-
-const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const DURATION_OPTIONS = [
   { value: '1', label: '1 week' },
@@ -82,37 +79,78 @@ export default function AddBlockScreen() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: number; name: string } | null>(null);
 
+  /**
+   * An end date the coordinator typed, or `null` while the end date is derived.
+   *
+   * Storing the override rather than syncing `form.endDate` from an effect keeps
+   * the end date a pure function of the start date and duration: there is no
+   * render in which the field shows a date derived from inputs that have already
+   * changed, and no effect that overwrites a hand-typed registrar date. The
+   * override is discarded when either derivation input moves, which are the only
+   * two changes that justify re-deriving it.
+   */
+  const [endDateOverride, setEndDateOverride] = useState<string | null>(null);
+
   const academicYears = useMemo(() => getAcademicYears(7, 3), []);
   const existingBlocks = useApiResource(() => fetchRotationBlocks(programId), [programId]);
-  
+  const calendar = useApiResource(() => fetchBlockCalendar(programId), [programId]);
+
   const assignedBlockNumbers = useMemo(() => {
     if (!form.academicYear || !existingBlocks.data) return new Set<number>();
     return new Set(
       existingBlocks.data
-        .filter(b => b.academic_year === form.academicYear)
-        .map(b => b.block_number)
+        .filter((b) => normalizeAcademicYear(b.academic_year) === normalizeAcademicYear(form.academicYear))
+        .map((b) => b.block_number)
     );
   }, [form.academicYear, existingBlocks.data]);
 
-  useEffect(() => {
-    if (form.startDate && DATE_PATTERN.test(form.startDate)) {
-      setForm(prev => ({ ...prev, endDate: addWeeks(form.startDate, prev.durationWeeks) }));
-    }
-  }, [form.startDate, form.durationWeeks]);
-
+  // The programme's own rules decide what a valid end date even is. Falling back
+  // to Sunday keeps the form usable before the request resolves, and matches
+  // every programme in the database today.
+  const weekStartDay = calendar.data?.week_start_day ?? 'SUNDAY';
+  const weekEndDayName = calendar.data?.week_end_day ?? 'Saturday';
+  const defaultWeeks = calendar.data?.default_block_duration_weeks ?? 4;
 
   /**
-   * The date check mirrors the database's own CHECK constraint rather than
-   * adding rules of its own: the only thing rejected here is end before start.
-   * `DateField` already limits input to a well-formed calendar date, so the
-   * pattern test is about shape, not about the 29 February case.
+   * The end date currently shown: the coordinator's own if they typed one,
+   * otherwise derived from the start date and duration.
+   *
+   * Derived during render rather than written into state by an effect, so the
+   * field and the validation below can never disagree — there is no intermediate
+   * render where the duration has changed but the end date still shows the old
+   * window.
    */
-  const startError = DATE_PATTERN.test(form.startDate) ? null : 'Use YYYY-MM-DD.';
-  const endError = !DATE_PATTERN.test(form.endDate)
+  const endDate = useMemo(() => {
+    if (endDateOverride !== null) return endDateOverride;
+    if (!isCalendarDate(form.startDate)) return '';
+    return endDateForDuration(form.startDate, form.durationWeeks) ?? '';
+  }, [endDateOverride, form.startDate, form.durationWeeks]);
+
+  /**
+   * Validated with the same rule the server applies, so the message a
+   * coordinator sees is the message the API would have returned: the block has
+   * to start on the programme's week-start day and end the day before it, or be
+   * a whole number of weeks.
+   */
+  const window = useMemo(
+    () =>
+      resolveBlockWindow({
+        start_date: form.startDate,
+        end_date: endDate,
+        // A hand-typed end date is validated against the duration instead of
+        // being replaced by it, so the coordinator is told they disagree rather
+        // than having their date silently discarded.
+        duration_weeks: endDateOverride === null ? form.durationWeeks : null,
+        week_start_day: weekStartDay,
+      }),
+    [form.startDate, endDate, form.durationWeeks, endDateOverride, weekStartDay],
+  );
+
+  const startError = isCalendarDate(form.startDate) ? null : 'Use YYYY-MM-DD.';
+  const endError = !isCalendarDate(endDate)
     ? 'Use YYYY-MM-DD.'
-    : form.endDate < form.startDate
-      ? 'The end date must be on or after the start date.'
-      : null;
+    : window.errors.find((message) => !message.startsWith('start_date')) ?? null;
+  const startBoundaryError = window.errors.find((message) => message.startsWith('This programme')) ?? null;
 
   const blockNumber = Number.parseInt(form.blockNumber, 10);
   const blockNumberError =
@@ -125,7 +163,9 @@ export default function AddBlockScreen() {
     form.academicYear.trim().length > 0 &&
     form.blockName.trim().length > 0 &&
     startError === null &&
+    startBoundaryError === null &&
     endError === null &&
+    window.errors.length === 0 &&
     blockNumberError === null;
 
   async function handleSubmit() {
@@ -139,7 +179,7 @@ export default function AddBlockScreen() {
         block_number: blockNumber,
         block_name: form.blockName.trim(),
         start_date: form.startDate,
-        end_date: form.endDate,
+        end_date: endDate,
       });
 
       setCreated({ id: block.block_id, name: block.block_name });
@@ -153,7 +193,7 @@ export default function AddBlockScreen() {
   if (created) {
     return (
       <Screen bottomGutter={spacing.xl}>
-        <AppHeader title="Block created" onBack={() => router.back()} />
+        <AppHeader title="Block created" onBack={goBack} />
         <Banner
           tone="success"
           title={`${created.name} added`}
@@ -169,7 +209,7 @@ export default function AddBlockScreen() {
       <AppHeader
         title="Add academic block"
         subtitle={session?.programLabel ?? 'This programme'}
-        onBack={() => router.back()}
+        onBack={goBack}
       />
 
       {submitError ? <Banner tone="danger" title="Could not create the block" message={submitError} /> : null}
@@ -212,25 +252,52 @@ export default function AddBlockScreen() {
         <SelectField
           label="Duration"
           value={String(form.durationWeeks)}
-          onChange={(value) => setForm((prev) => ({ ...prev, durationWeeks: Number.parseInt(value, 10) }))}
+          onChange={(value) => {
+            setEndDateOverride(null);
+            setForm((prev) => ({ ...prev, durationWeeks: Number.parseInt(value, 10) }));
+          }}
           options={DURATION_OPTIONS}
-          hint="Sets the end date from the start date. You can still edit the end date afterwards."
+          hint={`Sets the end date as ${form.durationWeeks} week${form.durationWeeks === 1 ? '' : 's'} from the start date.${
+            defaultWeeks !== form.durationWeeks ? ` This programme's default is ${defaultWeeks}.` : ''
+          }`}
         />
         <DateField
           label="Start date"
           value={form.startDate}
-          onChangeText={(value) => setForm((prev) => ({ ...prev, startDate: value }))}
-          error={startError}
+          onChangeText={(value) => {
+            setEndDateOverride(null);
+            setForm((prev) => ({ ...prev, startDate: value }));
+          }}
+          error={startError ?? startBoundaryError}
+          hint={`This programme's week starts on ${weekStartDay.toLowerCase()}.`}
+          weekStartDay={weekStartDay}
+          durationWeeks={form.durationWeeks}
           required
         />
         <DateField
           label="End date"
-          value={form.endDate}
-          onChangeText={(value) => setForm((prev) => ({ ...prev, endDate: value }))}
+          value={endDate}
+          onChangeText={(value) => setEndDateOverride(value)}
           error={endError}
+          hint={
+            endDateOverride !== null
+              ? `Edited by hand. A ${form.durationWeeks}-week block from ${
+                  form.startDate || 'the start date'
+                } ends ${endDateForDuration(form.startDate || '', form.durationWeeks) ?? '—'}.`
+              : `Derived: a ${form.durationWeeks}-week block ends on ${weekEndDayName.toLowerCase()}.`
+          }
+          minDate={isCalendarDate(form.startDate) ? form.startDate : undefined}
           required
         />
       </Card>
+
+      {window.errors.length > 0 && window.start_date && window.end_date ? (
+        <Banner
+          tone="warning"
+          title="Check the block window"
+          message={window.errors.join(' ')}
+        />
+      ) : null}
 
       <Button
         label={submitting ? 'Creating…' : 'Create block'}

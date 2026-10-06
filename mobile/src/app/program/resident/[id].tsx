@@ -1,6 +1,6 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { CalendarDays, Clock, TriangleAlert, UserRound } from 'lucide-react-native';
 
 import {
@@ -12,6 +12,7 @@ import {
   Divider,
   EmptyState,
   ErrorState,
+  LetterPreviewSheet,
   ListRow,
   Screen,
   SectionHeader,
@@ -21,6 +22,7 @@ import {
   Text,
 } from '../../../components';
 import { useApiResource } from '../../../hooks';
+import { goBack } from '../../../navigation/back';
 import { fetchAttendance } from '../../../services/attendance';
 import { fetchLeaves } from '../../../services/leaves';
 import { fetchReleaseLetters } from '../../../services/letters';
@@ -30,6 +32,7 @@ import { spacing } from '../../../theme';
 import { formatDate, formatDateRange, formatHours, humanizeToken } from '../../../utils/format';
 import { summarizeDutyHours, summarizeSchedule } from '../../../utils/insights';
 import { humanizeEnum, residentFullName } from '../../../utils/residents';
+import type { ReleaseLetter } from '../../../types/api';
 
 /**
  * A single resident's record, as seen by a coordinator.
@@ -54,14 +57,19 @@ export default function ResidentRecordScreen() {
   const letterList = letters.data ?? [];
   const enrollment = profile.data?.enrollments[0] ?? null;
 
+  // The letter rows used to be inert: a `Sent` badge you could not open, so a
+  // coordinator could see a letter existed but never read it. The preview is the
+  // same sheet the resident's profile opens, not a separate document view.
+  const [previewLetter, setPreviewLetter] = useState<ReleaseLetter | null>(null);
+
   if (!Number.isFinite(residentId)) {
     return (
       <Screen>
-        <AppHeader title="Resident" onBack={() => router.back()} />
+        <AppHeader title="Resident" onBack={goBack} />
         <ErrorState
           title="Unknown resident"
           message="That link did not include a valid resident id."
-          onRetry={() => router.back()}
+          onRetry={goBack}
         />
       </Screen>
     );
@@ -84,7 +92,7 @@ export default function ResidentRecordScreen() {
       <AppHeader
         title={profile.data ? residentFullName(profile.data) : 'Resident'}
         subtitle={enrollment ? `${enrollment.specialty_name} · ${enrollment.program_code}` : undefined}
-        onBack={() => router.back()}
+        onBack={goBack}
       />
 
       {profile.isLoading ? <SkeletonList rows={5} /> : null}
@@ -219,6 +227,7 @@ export default function ResidentRecordScreen() {
                     subtitle={letter.site_name ?? undefined}
                     meta={`${formatDateRange(letter.release_start_date, letter.release_end_date)} · to ${letter.recipient_dept_head}`}
                     trailing={<StatusBadge label={humanizeToken(letter.sent_status)} tone="info" />}
+                    onPress={() => setPreviewLetter(letter)}
                     last={index === letterList.length - 1}
                   />
                 ))}
@@ -227,6 +236,8 @@ export default function ResidentRecordScreen() {
           ) : null}
         </>
       ) : null}
+
+      <LetterPreviewSheet letter={previewLetter} onClose={() => setPreviewLetter(null)} />
     </Screen>
   );
 }

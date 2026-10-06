@@ -23,6 +23,8 @@ import { fetchAttendance } from '../../../services/attendance';
 import { spacing } from '../../../theme';
 import { formatDate, formatHours, formatTime, humanizeToken } from '../../../utils/format';
 import { DUTY_WINDOW_DAYS, summarizeDutyHours } from '../../../utils/insights';
+import { EMPTY_ARRAY } from '../../../utils/empty';
+import type { AttendanceLog } from '../../../types/api';
 
 /**
  * Duty hours — the attendance log.
@@ -40,7 +42,7 @@ export default function DutyHoursScreen() {
   const residentId = session?.residentId ?? 0;
 
   const attendance = useApiResource(() => fetchAttendance(residentId), [residentId]);
-  const logs = attendance.data ?? [];
+  const logs = attendance.data ?? (EMPTY_ARRAY as AttendanceLog[]);
   const duty = useMemo(() => summarizeDutyHours(logs), [logs]);
 
   const breaches = useMemo(() => logs.filter((log) => log.is_flagged_for_breach === 1), [logs]);

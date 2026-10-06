@@ -15,8 +15,21 @@ export async function fetchClinicTypes(programId: number): Promise<LongitudinalC
   return response.data ?? [];
 }
 
-export async function fetchAllLongitudinalAssignments(programId: number): Promise<LongitudinalAssignment[]> {
-  const path = `/longitudinal/assignments${queryString({ program_id: programId })}`;
+/**
+ * Longitudinal assignments for a programme.
+ *
+ * `academicYear` is optional and *filters by overlap*, not by an equality on a
+ * column: `resident_longitudinal_assignments` has no `academic_year`, so the
+ * server resolves the year to the programme's block window and keeps assignments
+ * that cover it. Omit it for a resident's own record, which spans years.
+ */
+export async function fetchAllLongitudinalAssignments(
+  programId: number,
+  academicYear?: string | null,
+): Promise<LongitudinalAssignment[]> {
+  const params: Record<string, string | number> = { program_id: programId };
+  if (academicYear) params.academic_year = academicYear;
+  const path = `/longitudinal/assignments${queryString(params)}`;
   const response = await request<ApiListResponse<LongitudinalAssignment>>(path);
   return response.data ?? [];
 }
@@ -26,8 +39,24 @@ export async function fetchResidentLongitudinalAssignments(residentId: number): 
   return response.data ?? [];
 }
 
-export async function fetchFacultySupervisors(programId: number): Promise<FacultySupervisor[]> {
-  const path = `/longitudinal/faculty-supervisors${queryString({ program_id: programId })}`;
+/**
+ * Faculty who can supervise a longitudinal clinic.
+ *
+ * `includeInactive` is a *server* filter and defaults to off, which is right for
+ * a picker that should only offer people currently employed. A screen that wants
+ * to show departed faculty — to let a coordinator find the supervisor on a
+ * posting that already ran — has to ask for them explicitly, or the client's
+ * "show inactive" control is decorative.
+ */
+export async function fetchFacultySupervisors(
+  programId: number,
+  options: { includeInactive?: boolean; clinicTypeId?: number } = {},
+): Promise<FacultySupervisor[]> {
+  const params: Record<string, string | number> = { program_id: programId };
+  if (options.includeInactive) params.include_inactive = '1';
+  if (options.clinicTypeId) params.clinic_type_id = options.clinicTypeId;
+
+  const path = `/longitudinal/faculty-supervisors${queryString(params)}`;
   const response = await request<ApiListResponse<FacultySupervisor>>(path);
   return response.data ?? [];
 }

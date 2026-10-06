@@ -5,11 +5,22 @@
 export { AppHeader } from './AppHeader';
 export { Banner } from './Banner';
 export { Button, IconButton, type ButtonVariant } from './Button';
+export { CalendarPicker } from './CalendarPicker';
 export { Card, Divider, SectionHeader } from './Card';
 export { ChoiceGroup, type ChoiceOption } from './ChoiceGroup';
-export { DateField, SearchInput, SelectField, TextField, type SelectOption } from './Form';
+export {
+  DateField,
+  SearchInput,
+  SelectField,
+  SheetSelectField,
+  TextField,
+  type SelectOption,
+} from './Form';
+export { FacultyPicker, type FacultyOption } from './FacultyPicker';
 export { Avatar, DetailRow, ListRow } from './ListRow';
+export { MatrixTable, type MatrixColumnDef, type MatrixRowDef } from './MatrixTable';
 export { Screen } from './Screen';
+export { LetterPreviewSheet } from './LetterPreviewSheet';
 export { Sheet } from './Sheet';
 export { EmptyState, ErrorState, LoadingState, SkeletonList } from './StateView';
 export { StatusBadge } from './StatusBadge';

@@ -6,6 +6,7 @@ const RotationController = require('../controllers/rotationController');
 
 // Block Routes
 router.get('/blocks', RotationController.getBlocks);
+router.get('/blocks/dates', RotationController.getBlockDates);
 router.post('/blocks', RotationController.createBlock);
 router.put('/blocks/:block_id', RotationController.updateBlock);
 router.delete('/blocks/:block_id', RotationController.deleteBlock);

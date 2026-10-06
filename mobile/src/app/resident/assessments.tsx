@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { router } from 'expo-router';
 import { ClipboardList } from 'lucide-react-native';
 
 import {
@@ -19,6 +18,7 @@ import {
   Text,
 } from '../../components';
 import { useApiResource } from '../../hooks';
+import { goBack } from '../../navigation/back';
 import {
   MOCK_ASSESSMENT_STATUS_LABEL,
   MOCK_ASSESSMENT_STATUS_TONE,
@@ -60,7 +60,7 @@ export default function AssessmentsScreen() {
       refreshing={assessments.isRefreshing}
       bottomGutter={spacing.xxl}
     >
-      <AppHeader title="Assessments" onBack={() => router.back()} />
+      <AppHeader title="Assessments" onBack={goBack} />
 
       <Banner
         tone="warning"

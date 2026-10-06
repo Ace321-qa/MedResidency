@@ -2,6 +2,9 @@ import { queryString, request } from './client';
 import type {
   ApiListResponse,
   ApiResponse,
+  BlockCalendar,
+  BlockCalendarWindow,
+  CalendarDateString,
   CohortGridCell,
   CreateAssignmentPayload,
   CreateBlockPayload,
@@ -41,12 +44,49 @@ export async function createAssignment(payload: CreateAssignmentPayload): Promis
 }
 
 /**
+ * `GET /rotations/blocks/dates` — the block calendar, from the server.
+ *
+ * Two shapes, chosen by what the form has available:
+ *
+ *  - Without `start_date` it returns the programme's rules: which day the week
+ *    starts on, which day a block therefore *ends* on, and the default length.
+ *    A form needs these to label its own fields before a date is chosen.
+ *  - With `start_date` it returns the derived window, so the end date on screen
+ *    is the one the server will store. The API runs the identical arithmetic on
+ *    write, so this is a preview rather than a client reimplementation of it.
+ *
+ * The client mirrors the same rules in `utils/dateCalc.ts` so the form stays
+ * responsive offline; this endpoint is what keeps the two from drifting.
+ */
+export async function fetchBlockCalendar(programId: number): Promise<BlockCalendar> {
+  const response = await request<ApiResponse<BlockCalendar>>(
+    `/rotations/blocks/dates${queryString({ program_id: programId })}`,
+  );
+  return response.data;
+}
+
+export async function fetchBlockDates(input: {
+  program_id: number;
+  start_date: CalendarDateString;
+  duration_weeks?: number;
+  end_date?: CalendarDateString;
+}): Promise<BlockCalendarWindow> {
+  const response = await request<ApiResponse<BlockCalendarWindow>>(
+    `/rotations/blocks/dates${queryString({ ...input })}`,
+  );
+  return response.data;
+}
+
+/**
  * `POST /rotations/blocks` — creates one academic block.
  *
  * The API rejects a duplicate `block_number` for the same `academic_year` with
- * a 409, and a block whose end date precedes its start date with a 400. Both
+ * a 409, and a window that does not end the day before it starts with a 400. Both
  * messages are surfaced by the client as `ApiError`, so the form can show them
  * verbatim rather than inventing its own wording.
+ *
+ * Send `duration_weeks` *or* `end_date`, not both: the server derives the window
+ * from the programme's week-start day and rejects a contradictory pair.
  */
 export async function createRotationBlock(payload: CreateBlockPayload): Promise<RotationBlock> {
   const response = await request<ApiResponse<RotationBlock>>('/rotations/blocks', {

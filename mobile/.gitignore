@@ -36,6 +36,9 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
+# Output of `npx tsc -p tsconfig.verify.json` (see scripts/verify-date-calc.ts)
+.tmp/
+
 # generated native folders
 /ios
 /android

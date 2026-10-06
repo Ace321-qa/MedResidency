@@ -16,6 +16,7 @@ import {
   TextField,
 } from '../../components';
 import { useSession } from '../../hooks';
+import { goBack } from '../../navigation/back';
 import { logAttendance } from '../../services/attendance';
 import { fetchResidentSchedule } from '../../services/rotations';
 import { useApiResource } from '../../hooks/useApiResource';
@@ -130,7 +131,7 @@ export default function LogShiftScreen() {
   if (result) {
     return (
       <Screen bottomGutter={spacing.xl}>
-        <AppHeader title="Shift logged" onBack={() => router.back()} />
+        <AppHeader title="Shift logged" onBack={goBack} />
         {result.flagged ? (
           <Banner
             tone="danger"
@@ -155,7 +156,7 @@ export default function LogShiftScreen() {
 
   return (
     <Screen bottomGutter={spacing.xxl}>
-      <AppHeader title="Log a shift" subtitle="Record the hours you worked" onBack={() => router.back()} />
+      <AppHeader title="Log a shift" subtitle="Record the hours you worked" onBack={goBack} />
 
       {submitError ? <Banner tone="danger" title="Could not save" message={submitError} /> : null}
 
@@ -166,7 +167,12 @@ export default function LogShiftScreen() {
           onChangeText={(value) => setForm((prev) => ({ ...prev, shiftDate: value }))}
           error={dateError}
           required
-          hint="YYYY-MM-DD"
+          // A resident records a shift they have already worked. Allowing a
+          // future date here produces duty hours that inflate the totals the
+          // programme is measured on, and the error only surfaces weeks later in
+          // a compliance report.
+          maxDate={todayCalendarDate()}
+          hint="Back-fill a past shift, or pick today."
         />
 
         <SelectField

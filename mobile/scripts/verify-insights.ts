@@ -1,5 +1,6 @@
-import { formatDate, formatHours, toNumber } from '../src/utils/format';
+import { formatDate, formatHours, toCalendarDate, toComparableDate, toNumber } from '../src/utils/format';
 import {
+  DUTY_WINDOW_DAYS,
   summarizeDutyHours,
   summarizeSchedule,
   summarizeLeaves,
@@ -33,6 +34,12 @@ import {
  * `formatDate` output ("05 Jul 2026") lexically against "2026-07-04", so every
  * shift looked like it fell outside every window. Range comparisons now go
  * through `toComparableDate`.
+ *
+ * The database behind these checks is live, so expectations are derived from
+ * the payloads and from the current local date rather than frozen to a
+ * snapshot: schedule thresholds are bounded across every block, duty-hour
+ * window metrics are recomputed for today's rolling 7-day window, and leave
+ * totals are cross-checked against the raw rows.
  */
 
 /** Trailing slash required: paths are resolved relative to this, not concatenated. */
@@ -55,6 +62,40 @@ const failures: string[] = [];
 function assert(label: string, cond: boolean, extra = '') {
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}${extra ? ' :: ' + extra : ''}`);
   if (!cond) failures.push(label);
+}
+
+/**
+ * Recompute what a rolling duty window should report, independently of
+ * `summarizeDutyHours`, so the summariser is checked against a second
+ * implementation rather than against its own output.
+ *
+ * `anchor` is the last day of the window; the window is the
+ * `DUTY_WINDOW_DAYS` calendar days ending on it, inclusive.
+ */
+function expectWindow(logs: any[], anchor: Date) {
+  const end = toCalendarDate(anchor);
+  const start = toCalendarDate(
+    new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - (DUTY_WINDOW_DAYS - 1)),
+  );
+
+  const rows = logs.filter((log) => {
+    const shiftDate = toComparableDate(log.shift_date);
+    return shiftDate !== null && shiftDate >= start && shiftDate <= end;
+  });
+
+  const counted = rows
+    .map((log) => toNumber(log.total_hours))
+    .filter((value): value is number => value !== null);
+  const hours = counted.reduce((sum, value) => sum + value, 0);
+
+  return {
+    start,
+    end,
+    shifts: rows.length,
+    hours,
+    breaches: rows.filter((log) => log.is_flagged_for_breach === 1).length,
+    average: counted.length > 0 ? Math.round((hours / counted.length) * 100) / 100 : null,
+  };
 }
 
 (async () => {
@@ -87,52 +128,160 @@ function assert(label: string, cond: boolean, extra = '') {
   assert('search miss returns 0', filterResidents(roster, 'zzzz').length === 0);
 
   // --- schedule -----------------------------------------------------------
+  const today = toCalendarDate(new Date());
   const s = summarizeSchedule(sched);
-  console.log('\nschedule:', JSON.stringify({ current: !!s.current, next: !!s.next, last: !!s.last, completed: s.completedCount, totalWeeks: s.totalWeeks }));
-  assert('no ACTIVE rotation (July block is past)', s.current === null);
-  assert('no upcoming rotation', s.next === null);
-  assert('one completed rotation', s.completedCount === 1);
-  assert('last rotation is the July block', s.last?.rotation_name === 'Family Medicine Continuity Clinic');
-  assert('assigned_weeks DECIMAL string parsed to 4', s.totalWeeks === 4, String(s.totalWeeks));
+  console.log('\nschedule:', JSON.stringify({ current: !!s.current, next: !!s.next, last: !!s.last, completed: s.completedCount, upcoming: s.upcomingCount, totalWeeks: s.totalWeeks }));
+
+  assert(`no ACTIVE rotation on ${today}`, s.current === null);
+
+  const nextStart = s.next ? toComparableDate(s.next.start_date) : null;
+  assert(
+    'upcoming rotation starts after today',
+    nextStart !== null && nextStart > today,
+    `${s.next?.rotation_name ?? '—'} from ${nextStart ?? '—'}`,
+  );
+
+  const endedBefore = (assignment: any) => {
+    const end = toComparableDate(assignment.end_date);
+    return end !== null && end < today;
+  };
+  const expectedCompleted = (sched as any[]).filter(endedBefore).length;
+  assert(
+    'completed rotations counted from end dates',
+    s.completedCount === expectedCompleted && s.completedCount === 1,
+    `${s.completedCount} vs expected ${expectedCompleted}`,
+  );
+  assert('last rotation is the July block', s.last?.rotation_name === 'Family Medicine Continuity Clinic', s.last?.rotation_name);
+
+  // DECIMAL strings must be summed across every row: the completed July block
+  // plus the repeated November rows, so the total spans multiple blocks and
+  // tops out at the 20 weeks the live database holds.
+  assert(
+    'assigned_weeks sum across all blocks (multi-block, up to 20 weeks)',
+    s.totalWeeks > 4 && s.totalWeeks <= 20,
+    String(s.totalWeeks),
+  );
+  const rawWeeks = (sched as any[]).reduce(
+    (sum: number, assignment: any) => sum + (toNumber(assignment.assigned_weeks) ?? 0),
+    0,
+  );
+  assert('totalWeeks matches the raw assigned_weeks sum', s.totalWeeks === rawWeeks, `${s.totalWeeks} vs raw ${rawWeeks}`);
+
   const blocks = groupScheduleByBlock(sched);
-  assert('one block group', blocks.length === 1, String(blocks.length));
-  assert('block phase COMPLETED', blocks[0].phase === 'COMPLETED', blocks[0].phase);
+  const distinctBlockNames = new Set((sched as any[]).map((assignment: any) => assignment.block_name)).size;
+  assert(
+    'one block group per distinct block_name',
+    blocks.length === distinctBlockNames,
+    `${blocks.length} vs ${distinctBlockNames}`,
+  );
+  assert('earliest block phase COMPLETED', blocks[0].phase === 'COMPLETED', blocks[0].phase);
+  assert(
+    'latest block phase UPCOMING',
+    blocks[blocks.length - 1].phase === 'UPCOMING',
+    blocks[blocks.length - 1].phase,
+  );
   assert('block date range formatted', /\d{1,2} \w{3} \d{4}/.test(blocks[0].dateRange), blocks[0].dateRange);
 
   // --- duty hours ---------------------------------------------------------
   const d = summarizeDutyHours(att);
-  console.log('\nduty:', JSON.stringify(d));
-  assert('DECIMAL "28.00" parsed', toNumber(att[0].total_hours) === 28);
-  assert('one breach detected', d.totalBreaches === 1, String(d.totalBreaches));
-  assert('old logs are outside the 7-day window', d.windowShifts === 0, String(d.windowShifts));
-  assert('window hours are 0, not all-time', d.windowHours === 0, String(d.windowHours));
-  assert('average is null when window empty', d.averageShiftHours === null);
-  assert('formatHours renders the DECIMAL', formatHours(att[0].total_hours) === '28 h', formatHours(att[0].total_hours));
+  const rolling = expectWindow(att, new Date());
+  console.log(`\nduty window ${rolling.start}..${rolling.end}:`, JSON.stringify(d));
+
+  // The DECIMAL row is located by its breach flag rather than by array
+  // position: the API orders logs newest first, so a newer shift can land in
+  // front of it as the resident keeps logging hours.
+  const longShift = (att as any[]).find((log: any) => log.is_flagged_for_breach === 1);
+  assert('DECIMAL "28.00" parsed', toNumber(longShift?.total_hours) === 28, String(longShift?.total_hours));
+  assert('formatHours renders the DECIMAL', formatHours(longShift?.total_hours) === '28 h', formatHours(longShift?.total_hours));
+
+  assert(
+    'recent shifts fall inside the rolling 7-day window',
+    rolling.shifts > 0,
+    `${rolling.shifts} shift(s) since ${rolling.start}`,
+  );
+  assert('window shift count matches the payload', d.windowShifts === rolling.shifts, `${d.windowShifts} vs ${rolling.shifts}`);
+  assert('window hours summed, not all-time', d.windowHours === rolling.hours, `${d.windowHours} vs ${rolling.hours}`);
+  assert('window breaches counted inside the window', d.windowBreaches === rolling.breaches, `${d.windowBreaches} vs ${rolling.breaches}`);
+  assert(
+    'all-time breaches counted across every log',
+    d.totalBreaches === ((att as any[]).filter((log: any) => log.is_flagged_for_breach === 1).length),
+    String(d.totalBreaches),
+  );
+  assert('average uses only shifts WITH hours', d.averageShiftHours === rolling.average, `${d.averageShiftHours} vs ${rolling.average}`);
+
+  // A window that predates every log must report null rather than 0, so the
+  // empty branch stays covered even as new shifts are added.
+  const empty = summarizeDutyHours(att, new Date(new Date().getFullYear() - 1, 0, 1));
+  assert('window before the earliest log is empty', empty.windowShifts === 0, String(empty.windowShifts));
+  assert('average is null when window empty', empty.averageShiftHours === null, String(empty.averageShiftHours));
 
   // window that CONTAINS the July shifts
-  const inWindow = summarizeDutyHours(att, new Date(2026, 6, 10)); // 10 Jul 2026
+  const julyAnchor = new Date(2026, 6, 10); // 10 Jul 2026
+  const inWindow = summarizeDutyHours(att, julyAnchor);
+  const julyExpected = expectWindow(att, julyAnchor);
   console.log('duty @10 Jul:', JSON.stringify(inWindow));
-  assert('window shift count correct', inWindow.windowShifts === 3, String(inWindow.windowShifts));
-  assert('window hours = 28 + 8.5 = 36.5', inWindow.windowHours === 36.5, String(inWindow.windowHours));
-  assert('breach inside window counted once', inWindow.windowBreaches === 1);
+  assert('window shift count correct', inWindow.windowShifts === 3, `${inWindow.windowShifts} vs ${julyExpected.shifts}`);
+  assert('window hours = 28 + 8.5 = 36.5', inWindow.windowHours === julyExpected.hours, `${inWindow.windowHours} vs ${julyExpected.hours}`);
+  assert('breach inside window counted once', inWindow.windowBreaches === 1 && inWindow.windowBreaches === julyExpected.breaches, String(inWindow.windowBreaches));
   assert(
     'average uses only shifts WITH hours (2, not 3)',
-    inWindow.averageShiftHours === 18.25,
+    inWindow.averageShiftHours === julyExpected.average && inWindow.averageShiftHours === 18.25,
     String(inWindow.averageShiftHours),
   );
 
   // --- leaves -------------------------------------------------------------
   const l = summarizeLeaves(lv);
+  const rawApproved = (lv as any[]).filter((row: any) => row.status === 'APPROVED');
+  const rawPending = (lv as any[]).filter((row: any) => row.status === 'PENDING' || row.status === 'APPROVED_BY_CHIEF');
+  const rawApprovedDays = rawApproved.reduce((sum: number, row: any) => sum + (row.total_days ?? 0), 0);
   console.log('\nleaves:', JSON.stringify(l));
-  assert('one pending request', l.pendingCount === 1, String(l.pendingCount));
-  assert('two approved', l.approvedCount === 2, String(l.approvedCount));
-  assert('approved days sum to 22', l.approvedDays === 22, String(l.approvedDays));
-  assert('next pending is the study leave', l.nextPending?.leave_type === 'STUDY_LEAVE', String(l.nextPending?.leave_type));
+  assert(
+    'no request awaiting a decision',
+    l.pendingCount === 0 && l.pendingCount === rawPending.length,
+    `${l.pendingCount} pending vs raw ${rawPending.length}`,
+  );
+  assert('three approved', l.approvedCount === 3 && l.approvedCount === rawApproved.length, `${l.approvedCount} approved`);
+  assert(
+    'approved days sum to 27',
+    l.approvedDays === 27 && l.approvedDays === rawApprovedDays,
+    `${l.approvedDays} vs raw ${rawApprovedDays}`,
+  );
+  assert('next pending is null', l.nextPending === null, l.nextPending === null ? 'null' : l.nextPending.leave_type);
 
   // --- date handling ------------------------------------------------------
-  console.log('\ndate: shift_date', att[0].shift_date, '->', formatDate(att[0].shift_date));
-  assert('local-date parse does not throw', formatDate(att[0].shift_date) !== '—');
+  const shiftDate = formatDate(att[0].shift_date);
+  console.log('\ndate: shift_date', att[0].shift_date, '->', shiftDate);
+  assert('local-date parse does not throw', /^\d{2} \w{3} \d{4}$/.test(shiftDate), shiftDate);
   assert('leave date is already YYYY-MM-DD', formatDate(lv[0].start_date) === '10 Aug 2026', formatDate(lv[0].start_date));
+
+  // --- release letters ------------------------------------------------------
+  // The preview modal is only useful if the API hands it a *finished* letter, so
+  // both halves of the mail merge are checked: the body is stored merged, and the
+  // subject is merged on read out of the template the body came from.
+  const letters = (await get('letters/resident/1')) as any[];
+  console.log('\nletters:', JSON.stringify(letters.map((letter: any) => letter.letter_subject)));
+
+  assert('resident 1 has a generated release letter', letters.length > 0, String(letters.length));
+  assert(
+    'letter subject is merged on read, not the raw template',
+    letters.every(
+      (letter: any) =>
+        typeof letter.letter_subject === 'string' &&
+        letter.letter_subject.includes('Omar Al-Nouri') &&
+        letter.letter_subject.includes('PGY-1') &&
+        !/\{\{[A-Z0-9_]+\}\}/.test(letter.letter_subject),
+    ),
+    letters.map((letter: any) => letter.letter_subject).join(' | '),
+  );
+  assert(
+    'letter body carries no unresolved placeholders',
+    letters.every(
+      (letter: any) =>
+        typeof letter.generated_letter_body === 'string' &&
+        letter.generated_letter_body.includes('Omar Al-Nouri') &&
+        !/\{\{[A-Z0-9_]+\}\}/.test(letter.generated_letter_body),
+    ),
+  );
 
   // Throwing rather than setting an exit code, so this script needs no Node
   // type definitions to compile standalone.

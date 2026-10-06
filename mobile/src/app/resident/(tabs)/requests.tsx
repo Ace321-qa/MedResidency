@@ -21,6 +21,8 @@ import { fetchLeaves } from '../../../services/leaves';
 import { spacing } from '../../../theme';
 import { formatDateRange, humanizeToken } from '../../../utils/format';
 import { summarizeLeaves } from '../../../utils/insights';
+import { EMPTY_ARRAY } from '../../../utils/empty';
+import type { LeaveRequest } from '../../../types/api';
 
 /**
  * Requests — the resident's leave requests.
@@ -56,7 +58,7 @@ export default function RequestsScreen() {
   const residentId = session?.residentId ?? 0;
 
   const leaves = useApiResource(() => fetchLeaves(residentId), [residentId]);
-  const requests = leaves.data ?? [];
+  const requests = leaves.data ?? (EMPTY_ARRAY as LeaveRequest[]);
   const summary = useMemo(() => summarizeLeaves(requests), [requests]);
 
   return (

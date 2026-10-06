@@ -21,6 +21,8 @@ import { fetchHealth } from '../services/health';
 import { fetchResidentList } from '../services/residents';
 import { colors, dimensions, radius, spacing } from '../theme';
 import { deriveProgramsFromResidents, filterResidents, residentFullName, residentSubtitle } from '../utils/residents';
+import { EMPTY_ARRAY } from '../utils/empty';
+import type { ResidentListItem } from '../types/api';
 
 /**
  * Sign-in.
@@ -52,7 +54,7 @@ export default function SignInScreen() {
   const roster = useApiResource(() => fetchResidentList({ limit: 50 }));
   const health = useApiResource(fetchHealth);
 
-  const residents = roster.data ?? [];
+  const residents = roster.data ?? (EMPTY_ARRAY as ResidentListItem[]);
   const programs = useMemo(() => deriveProgramsFromResidents(residents), [residents]);
   const visibleResidents = useMemo(() => filterResidents(residents, query), [residents, query]);
 

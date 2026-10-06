@@ -15,10 +15,12 @@ import {
   TextField,
 } from '../../components';
 import { useApiResource, useSession } from '../../hooks';
+import { goBack } from '../../navigation/back';
 import { fetchResidentList, onboardResident } from '../../services/residents';
 import { spacing } from '../../theme';
 import type { ResidentListItem } from '../../types/api';
-import { humanizeToken } from '../../utils/format';
+import { humanizeToken, todayCalendarDate } from '../../utils/format';
+import { isCalendarDate } from '../../utils/dateCalc';
 
 /**
  * Register a resident — `POST /api/v1/residents/onboard`.
@@ -103,8 +105,30 @@ export default function OnboardingScreen() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: number; name: string } | null>(null);
 
-  const dobError = DATE_PATTERN.test(form.dateOfBirth) ? null : 'Use YYYY-MM-DD.';
+  const dobError = isCalendarDate(form.dateOfBirth)
+    ? form.dateOfBirth > todayCalendarDate()
+      ? 'Nobody is born in the future.'
+      : null
+    : 'Use a real date in YYYY-MM-DD.';
   const identifierError = form.identifierValue.trim().length === 0 ? 'The API requires one identifier.' : null;
+
+  /**
+   * Programme window ordering.
+   *
+   * Both dates are optional, so this only fires when the coordinator has typed
+   * both. An expected completion before the start is not a warning worth
+   * suppressing: it makes every PGY calculation downstream meaningless, and it
+   * is the kind of error only noticed a year later.
+   */
+  const programmeWindowError = useMemo(() => {
+    const start = isCalendarDate(form.startDate) ? form.startDate : null;
+    const end = isCalendarDate(form.expectedCompletion) ? form.expectedCompletion : null;
+
+    return {
+      start: null as string | null,
+      end: start && end && end < start ? 'Completion cannot precede the programme start.' : null,
+    };
+  }, [form.startDate, form.expectedCompletion]);
 
   const canSubmit =
     !submitting &&
@@ -115,7 +139,13 @@ export default function OnboardingScreen() {
     form.sex !== null &&
     form.citizenship !== null &&
     dobError === null &&
-    identifierError === null;
+    identifierError === null &&
+    // `programmeWindowError` is always an object — `{ start, end }` — so this
+    // used to read `programmeWindowError === null`, which is never true and left
+    // "Create resident" permanently disabled. The condition that actually matters
+    // is whether either message is set.
+    programmeWindowError.start === null &&
+    programmeWindowError.end === null;
 
   async function handleSubmit() {
     if (form.sex === null || form.citizenship === null) return;
@@ -169,7 +199,7 @@ export default function OnboardingScreen() {
   if (created) {
     return (
       <Screen bottomGutter={spacing.xl}>
-        <AppHeader title="Resident registered" onBack={() => router.back()} />
+        <AppHeader title="Resident registered" onBack={goBack} />
         <Banner
           tone="success"
           title={`${created.name} added`}
@@ -188,7 +218,7 @@ export default function OnboardingScreen() {
       <AppHeader
         title="Register a resident"
         subtitle={`Enrolled in ${session?.programLabel ?? 'this programme'}`}
-        onBack={() => router.back()}
+        onBack={goBack}
       />
 
       {submitError ? <Banner tone="danger" title="Could not register" message={submitError} /> : null}
@@ -222,6 +252,12 @@ export default function OnboardingScreen() {
           onChangeText={(value) => setForm((prev) => ({ ...prev, dateOfBirth: value }))}
           error={dobError}
           required
+          // Nobody is born in the future. This is the one date on this form with
+          // an unambiguous bound, and it is checked here rather than by the API
+          // because a wrong DOB quietly corrupts PGY placement and every
+          // age-dependent rule that reads it afterwards.
+          maxDate={todayCalendarDate()}
+          hint={`YYYY-MM-DD, on or before ${todayCalendarDate()}.`}
         />
         <TextField
           label="Nationality"
@@ -295,13 +331,19 @@ export default function OnboardingScreen() {
           label="Programme start date"
           value={form.startDate}
           onChangeText={(value) => setForm((prev) => ({ ...prev, startDate: value }))}
-          hint="Optional. YYYY-MM-DD."
+          error={programmeWindowError?.start}
+          hint="Optional. Defaults to the programme's first block when omitted."
+          maxDate={
+            isCalendarDate(form.expectedCompletion) ? form.expectedCompletion : undefined
+          }
         />
         <DateField
           label="Expected completion date"
           value={form.expectedCompletion}
           onChangeText={(value) => setForm((prev) => ({ ...prev, expectedCompletion: value }))}
-          hint="Optional. YYYY-MM-DD."
+          error={programmeWindowError?.end}
+          hint="Optional. Leave blank and it is derived from the programme length."
+          minDate={isCalendarDate(form.startDate) ? form.startDate : undefined}
         />
         <Text variant="caption" tone="muted">
           Enrolled into programme #{programId} — the programme you signed in to.

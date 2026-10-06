@@ -45,6 +45,12 @@ export class ApiError extends Error {
   }
 }
 
+// `axios.create` and `axios.isAxiosError` are the documented axios entry points.
+// `import/no-named-as-default-member` flags both, but axios's named exports
+// (`create`, `isAxiosError`) were only added in v1.x and are absent from the
+// bundled type definitions this app resolves against, so switching would either
+// fail to compile or pin the client to a minimum axios version for no benefit.
+// eslint-disable-next-line import/no-named-as-default-member
 export const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: REQUEST_TIMEOUT_MS,
@@ -77,6 +83,9 @@ function messageFromBody(body: unknown): string | null {
 export function toApiError(rejection: unknown): ApiError {
   if (rejection instanceof ApiError) return rejection;
 
+  // See the note on `axios.create` above: documented usage, and the named export
+  // is not available across the axios versions this client supports.
+  // eslint-disable-next-line import/no-named-as-default-member
   if (axios.isAxiosError(rejection)) {
     const error = rejection as AxiosError<ApiErrorBody>;
 

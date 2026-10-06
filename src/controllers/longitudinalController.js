@@ -26,24 +26,35 @@ class LongitudinalController {
 
   static async getAllLongitudinalAssignments(req, res) {
     try {
-      const { program_id } = req.query;
+      const { program_id, academic_year } = req.query;
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      const data = await LongitudinalService.getAllLongitudinalAssignments(program_id);
+      // Optional: the CCC matrix scopes by year, a resident's profile wants the
+      // whole longitudinal record.
+      const data = await LongitudinalService.getAllLongitudinalAssignments(program_id, academic_year || null);
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
   }
 
+  /**
+   * `GET /longitudinal/faculty-supervisors`
+   *
+   * `include_inactive=1` widens the list to departed faculty, which a
+   * coordinator needs when editing an assignment that has already run.
+   */
   static async getFacultySupervisors(req, res) {
     try {
-      const { program_id } = req.query;
+      const { program_id, include_inactive, clinic_type_id } = req.query;
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      const data = await LongitudinalService.getFacultySupervisors(program_id);
+      const data = await LongitudinalService.getFacultySupervisors(program_id, {
+        includeInactive: include_inactive === '1' || include_inactive === 'true',
+        clinicTypeId: clinic_type_id || undefined,
+      });
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
@@ -78,15 +89,20 @@ class LongitudinalController {
 
   static async createSupervisorAssignment(req, res) {
     try {
-      const required = ['program_id', 'clinic_type_id', 'faculty_supervisor_id', 'start_date', 'end_date'];
+      const required = ['program_id', 'clinic_type_id', 'faculty_supervisor_id', 'start_date'];
       for (const k of required) {
         if (!req.body[k]) {
           return res.status(400).json({ success: false, error: `Missing required field: ${k}` });
         }
       }
+      // `end_date` is derived from the start date and `rotation_period_months`,
+      // so it is optional here; when it is sent it must agree.
       const data = await LongitudinalService.createSupervisorAssignment(req.body);
       return res.status(201).json({ success: true, data });
     } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
       return res.status(500).json({ success: false, error: error.message });
     }
   }

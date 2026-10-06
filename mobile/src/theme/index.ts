@@ -5,7 +5,7 @@
  * should contain a raw hex value, an arbitrary font size or a magic number for
  * padding — that is what keeps the interface consistent when it grows.
  */
-import { colors, toneColors, type Tone } from './colors';
+import { categoricalColors, colors, toneColors, type Tone } from './colors';
 import { dimensions, scrollBottomInset } from './dimensions';
 import { radius } from './radius';
 import { shadow } from './shadow';
@@ -13,6 +13,7 @@ import { spacing } from './spacing';
 import { typography, type TypographyVariant } from './typography';
 
 export {
+  categoricalColors,
   colors,
   toneColors,
   dimensions,

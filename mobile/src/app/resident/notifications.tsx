@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { router } from 'expo-router';
 import { BellOff } from 'lucide-react-native';
 
 import {
@@ -19,6 +18,7 @@ import {
   Text,
 } from '../../components';
 import { useApiResource } from '../../hooks';
+import { goBack } from '../../navigation/back';
 import {
   MOCK_NOTIFICATION_CATEGORY_LABEL,
   MOCK_NOTIFICATION_TONE,
@@ -27,6 +27,7 @@ import {
 } from '../../services/mock';
 import { spacing } from '../../theme';
 import { formatDateTime } from '../../utils/format';
+import { EMPTY_ARRAY } from '../../utils/empty';
 
 /**
  * Notifications — **entirely sample data**.
@@ -44,7 +45,7 @@ export default function NotificationsScreen() {
   const [readIds, setReadIds] = useState<string[]>([]);
   const [query, setQuery] = useState('');
 
-  const all = notifications.data ?? [];
+  const all = notifications.data ?? (EMPTY_ARRAY as MockNotification[]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -66,7 +67,7 @@ export default function NotificationsScreen() {
       refreshing={notifications.isRefreshing}
       bottomGutter={spacing.xxl}
     >
-      <AppHeader title="Notifications" onBack={() => router.back()} />
+      <AppHeader title="Notifications" onBack={goBack} />
 
       <Banner
         tone="warning"

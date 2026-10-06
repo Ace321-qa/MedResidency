@@ -80,7 +80,24 @@ export interface RotationBlock {
   block_name: string;
   start_date: IsoDateString;
   end_date: IsoDateString;
+  /**
+   * `start_date`/`end_date` re-formatted as `YYYY-MM-DD`.
+   *
+   * The `*_date` fields above are raw MySQL DATE values, which arrive as JS
+   * `Date` objects and are rendered in the device's timezone. A block that ends
+   * "on Saturday" then prints as Friday for anyone west of UTC. The `_iso`
+   * fields are formatted in SQL and are safe to compare and display directly.
+   */
+  start_date_iso: CalendarDateString | null;
+  end_date_iso: CalendarDateString | null;
+  /** `DAYNAME` of the real start date, e.g. "Sunday". */
   actual_start_day: string;
+  /** `DAYNAME` of the real end date, e.g. "Saturday". */
+  actual_end_day: string;
+  /** Inclusive length in days; 28 for a four-week block. */
+  block_days: number;
+  /** Whole weeks the window spans; `null` when the window is not a clean block. */
+  block_weeks: number | null;
 }
 
 /** `GET /rotations?program_id=` — the catalogue of possible rotations. */
@@ -335,16 +352,53 @@ export interface CreateAssignmentPayload {
 }
 
 /**
- * `POST /rotations/blocks` — creates one academic block.
+ * `GET /rotations/blocks/dates` without a `start_date` — the programme's rules.
  *
- * Every field is required. The controller answers 409 for a duplicate
- * `block_number` within an `academic_year`, and 400 when `end_date` precedes
- * `start_date`.
+ * These are what a form needs before a date has been chosen: which day the week
+ * starts, therefore which day a block ends, and the length a block defaults to.
+ */
+export interface BlockCalendar {
+  program_id: number;
+  /** Canonical day name, e.g. "SUNDAY"; `null` when the programme records none. */
+  week_start_day: string | null;
+  /** The day before `week_start_day`: "Saturday" for a Sunday-start programme. */
+  week_end_day: string | null;
+  default_block_duration_weeks: number | null;
+}
+
+/**
+ * `GET /rotations/blocks/dates` with a `start_date` — the derived window.
  *
- * `week_start_day` is intentionally absent even though the column exists and
- * `GET /rotations/blocks` returns it: `RotationService.createBlock` does not
- * include it in its INSERT, so sending it is accepted and discarded. Adding it
- * here would advertise a field that cannot be saved.
+ * `duration_weeks` is `null` when the window is not a whole number of weeks,
+ * which is also what `errors` explains; the write is rejected with the same
+ * wording, so a form can show the server's own sentence.
+ */
+export interface BlockCalendarWindow extends BlockCalendar {
+  start_date: CalendarDateString | null;
+  end_date: CalendarDateString | null;
+  duration_weeks: number | null;
+  starts_on: string | null;
+  ends_on: string | null;
+  /** `Sun 05 Jul - Sat 01 Aug 2026`, ready to show under a date field. */
+  window_label: string | null;
+  errors: string[];
+}
+
+/**
+ * `POST /rotations/blocks` and `PUT /rotations/blocks/:id` — one academic block.
+ *
+ * Send **either** `end_date` **or** `duration_weeks`, never both: the server
+ * re-derives the window from `programs.week_start_day` so that a block always
+ * ends the day before its start (Sunday-start programmes end Saturday,
+ * Monday-start programmes end Sunday) and rejects a window that contradicts the
+ * duration it was asked for.
+ *
+ * `week_start_day` is intentionally absent: it belongs to the programme, not the
+ * block, and the API reads it from `programs` rather than trusting a client to
+ * restate it.
+ *
+ * On `PUT` only `start_date` is required to be supplied if a duration or end
+ * date is also given; an omitted field keeps its stored value.
  */
 export interface CreateBlockPayload {
   program_id: number;
@@ -352,7 +406,10 @@ export interface CreateBlockPayload {
   block_number: number;
   block_name: string;
   start_date: CalendarDateString;
-  end_date: CalendarDateString;
+  /** Derives the end date. Omit when sending `duration_weeks`. */
+  end_date?: CalendarDateString;
+  /** Derives the end date as `start + weeks * 7 - 1`. Omit when sending `end_date`. */
+  duration_weeks?: number;
 }
 
 /**
@@ -497,18 +554,35 @@ export interface LongitudinalSupervisorAssignment {
 export interface CohortGridCell {
   resident_id: number;
   resident_name: string;
+  first_name: string;
+  last_name: string;
   /** The resident's primary identifier, i.e. their employee id. */
   employee_id: string | null;
+  /**
+   * The resident's contact number, when one is recorded.
+   *
+   * `residents` has no phone column; this resolves the first identifier whose
+   * type looks like a phone number and is `null` for every resident until that
+   * data exists. The grid renders "Not recorded" rather than hiding the column.
+   */
+  contact_number: string | null;
   pgy_level: number | null;
   resident_status: string;
   program_id: number;
   program_code: string;
+  week_start_day: string | null;
   block_id: number;
   block_number: number;
   block_name: string;
   academic_year: string;
   block_start_date: IsoDateString;
   block_end_date: IsoDateString;
+  /** Timezone-safe `YYYY-MM-DD` copies of the block window. */
+  block_start_date_iso: CalendarDateString;
+  block_end_date_iso: CalendarDateString;
+  block_start_day: string;
+  block_end_day: string;
+  block_days: number;
   assignment_id: number | null;
   rotation_id: number | null;
   rotation_code: string | null;
@@ -516,6 +590,8 @@ export interface CohortGridCell {
   department_name: string | null;
   start_date: IsoDateString | null;
   end_date: IsoDateString | null;
+  assignment_start_date_iso: CalendarDateString | null;
+  assignment_end_date_iso: CalendarDateString | null;
   assigned_weeks: Numeric | null;
   assignment_type: AssignmentType | null;
   notes: string | null;

@@ -26,6 +26,7 @@ import { fetchLeaves, updateLeaveStatus } from '../../../services/leaves';
 import { fetchResidentList } from '../../../services/residents';
 import { colors, spacing } from '../../../theme';
 import type { LeaveRequest, LeaveStatus } from '../../../types/api';
+import { EMPTY_ARRAY } from '../../../utils/empty';
 import { formatDateRange, formatDateTime, humanizeToken } from '../../../utils/format';
 
 /**
@@ -103,7 +104,7 @@ export default function ApprovalsScreen() {
     };
   }, [programId]);
 
-  const requests = queue.data?.requests ?? [];
+  const requests = queue.data?.requests ?? (EMPTY_ARRAY as LeaveRequest[]);
   const openCount = requests.filter((request) => OPEN_STATUSES.includes(request.status)).length;
 
   const visible = useMemo(() => {

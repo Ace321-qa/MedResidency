@@ -30,9 +30,9 @@ import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '
  * and "which blocks do they fit into?".
  *
  * Blocks can be created here; `POST /rotations/blocks` exists and the form is in
- * `../block`. Rotation *definitions* and resident assignments still cannot be
- * written from this app — the catalogue is seeded data, and
- * `POST /rotations/assignments` is not wired to a screen.
+ * `../block`. Assigning a resident to a rotation lives in `../assignments/new`,
+ * so this screen links rather than writes; the rotation *definitions* themselves
+ * stay seeded data.
  */
 
 type View2 = 'BLOCKS' | 'ROTATIONS';

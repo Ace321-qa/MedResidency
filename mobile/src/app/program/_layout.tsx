@@ -15,6 +15,17 @@ export default function ProgramLayout() {
     return <Redirect href="/sign-in" />;
   }
 
+  /**
+   * Every nested route is declared explicitly.
+   *
+   * `headerShown: false` above means the native header — and therefore its back
+   * button — is off, and each screen draws its own `AppHeader` chevron, wired to
+   * `goBack` rather than to `router.back()` directly, so a screen reached with no
+   * history behind it still lands somewhere sensible. Listing the routes keeps
+   * that contract checkable: a screen added here without a `Stack.Screen` still
+   * works, but a screen *removed* from this list is no longer type-checked
+   * against the navigator it is pushed onto.
+   */
   return (
     <Stack
       screenOptions={{
@@ -26,7 +37,12 @@ export default function ProgramLayout() {
       <Stack.Screen name="resident/[id]" />
       <Stack.Screen name="onboarding" />
       <Stack.Screen name="block" />
+      <Stack.Screen name="block/[id]" />
+      <Stack.Screen name="assignments/new" />
+      <Stack.Screen name="longitudinal/matrix" />
+      <Stack.Screen name="master/grid" />
       <Stack.Screen name="settings" />
+      <Stack.Screen name="supervisor/assign" />
     </Stack>
   );
 }

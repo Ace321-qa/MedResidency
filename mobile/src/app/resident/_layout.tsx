@@ -19,6 +19,13 @@ export default function ResidentLayout() {
     return <Redirect href="/sign-in" />;
   }
 
+  /**
+   * The guard above decides *who* may enter; this list decides *what* they see
+   * once they are in. `headerShown: false` means every nested screen supplies its
+   * own `AppHeader` back chevron, so a route added here without one has no way
+   * back out of it — declaring the screens explicitly is what keeps that visible
+   * at review time rather than on a device.
+   */
   return (
     <Stack
       screenOptions={{
@@ -27,10 +34,10 @@ export default function ResidentLayout() {
       }}
     >
       <Stack.Screen name="(tabs)" />
-      <Stack.Screen name="log-shift" />
-      <Stack.Screen name="request-leave" />
       <Stack.Screen name="assessments" />
+      <Stack.Screen name="log-shift" />
       <Stack.Screen name="notifications" />
+      <Stack.Screen name="request-leave" />
       <Stack.Screen name="settings" />
     </Stack>
   );

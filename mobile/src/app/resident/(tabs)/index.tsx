@@ -29,8 +29,8 @@ import {
   MOCK_ASSESSMENT_STATUS_LABEL,
   MOCK_ASSESSMENT_STATUS_TONE,
   fetchMockAssessments,
+  fetchMockTrainingProgress,
 } from '../../../services/mock';
-import { fetchMockTrainingProgress } from '../../../services/mock';
 import { spacing } from '../../../theme';
 import { formatHours, formatDateRange, formatShortDate } from '../../../utils/format';
 import { describeRotation, summarizeDutyHours, summarizeLeaves, summarizeSchedule } from '../../../utils/insights';

@@ -1,5 +1,4 @@
 import { StyleSheet, View } from 'react-native';
-import { router } from 'expo-router';
 import { Database, LogOut, Server } from 'lucide-react-native';
 
 import {
@@ -14,6 +13,7 @@ import {
 } from '../../components';
 import { useApiResource, useSession } from '../../hooks';
 import { API_BASE_URL, DEFAULT_PROGRAM_ID } from '../../config/env';
+import { goBack } from '../../navigation/back';
 import { fetchHealth } from '../../services/health';
 import { colors, spacing } from '../../theme';
 import { formatDateTime } from '../../utils/format';
@@ -34,7 +34,7 @@ export default function ProgramSettingsScreen() {
 
   return (
     <Screen onRefresh={health.refresh} refreshing={health.isRefreshing} bottomGutter={spacing.xxl}>
-      <AppHeader title="Settings" onBack={() => router.back()} />
+      <AppHeader title="Settings" onBack={goBack} />
 
       <SectionHeader title="Connection" />
       <Card>
