@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Alert, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
+import * as DocumentPicker from 'expo-document-picker';
 import { UserPlus, Users } from 'lucide-react-native';
 
 import {
@@ -18,6 +19,7 @@ import {
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchResidentList } from '../../../services/residents';
+import { downloadRosterTemplate, uploadRoster } from '../../../services/rosterImport';
 import { spacing } from '../../../theme';
 import { humanizeToken } from '../../../utils/format';
 import { filterResidents, residentFullName, residentSubtitle } from '../../../utils/residents';
@@ -34,6 +36,8 @@ export default function RosterScreen() {
   const { session } = useSession();
   const programId = session?.programId ?? 0;
   const [query, setQuery] = useState('');
+  const [uploading, setUploading] = useState(false);
+
 
   const residents = useApiResource(() => fetchResidentList({ programId, limit: 100 }), [programId]);
 
@@ -42,9 +46,39 @@ export default function RosterScreen() {
     [residents.data, query],
   );
 
+
+  async function handleDownloadTemplate() {
+    try {
+      await downloadRosterTemplate();
+      Alert.alert('Template downloaded', 'roster_template.xlsx ready');
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    }
+  }
+
+  async function handleUpload() {
+    try {
+      setUploading(true);
+      const res = await DocumentPicker.getDocumentAsync({ type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      if (res.canceled) return;
+      const file = res.assets[0] as any;
+      const result = await uploadRoster(file);
+      if (result.success) {
+        Alert.alert('Imported', `${result.added?.length || 0} residents added`);
+        residents.refresh();
+      } else {
+        Alert.alert('Import failed', result.error || JSON.stringify(result.errors));
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <Screen onRefresh={residents.refresh} refreshing={residents.isRefreshing} bottomGutter={spacing.xxl}>
-      <AppHeader title="Roster" subtitle="Residents enrolled in this programme" />
+      <AppHeader title="Roster" subtitle="Enrolled into Family Medicine Program (Code: 1207800001)" />
 
       {residents.isLoading ? <SkeletonList rows={6} /> : null}
 
@@ -69,6 +103,10 @@ export default function RosterScreen() {
 
           <SectionHeader title={`${visible.length} resident${visible.length === 1 ? '' : 's'}`} />
 
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: spacing.md }}>
+            <Button label="Download Template (.xlsx)" variant="outline" onPress={handleDownloadTemplate} style={{ flex: 1 }} />
+            <Button label="Upload Excel Roster" onPress={handleUpload} loading={uploading} style={{ flex: 1 }} />
+          </View>
           {visible.length === 0 ? (
             <Card>
               <EmptyState

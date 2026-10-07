@@ -112,3 +112,13 @@ module.exports = app;
 // Longitudinal routes
 const longitudinalRoutes = require('./routes/longitudinalRoutes');
 app.use('/api/v1/longitudinal', longitudinalRoutes);
+
+const rosterImportRoutes = require('./routes/rosterImportRoutes');
+const letterTemplateRoutes = require('./routes/letterTemplateRoutes');
+const rotationImportRoutes = require('./routes/rotationImportRoutes');
+const rotationRequestRoutes = require('./routes/rotationRequestRoutes');
+
+app.use('/api/v1/roster', rosterImportRoutes);
+app.use('/api/v1/letters/templates', letterTemplateRoutes);
+app.use('/api/v1/rotations/import', rotationImportRoutes);
+app.use('/api/v1/requests/rotation', rotationRequestRoutes);

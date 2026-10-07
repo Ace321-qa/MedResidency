@@ -305,9 +305,8 @@ export default function MasterGridScreen() {
                 ? `No academic blocks or enrolled residents were found for ${academicYear}. Add a block, then assign residents to it.`
                 : `No residents are enrolled at PGY-${pgyFilter} for ${academicYear}. Clear the cohort filter to see the whole programme.`
             }
-            {...(pgyFilter === 'ALL'
-              ? {}
-              : { actionLabel: 'Show all cohorts', onActionPress: () => setPgyFilter('ALL') })}
+            actionLabel={pgyFilter === 'ALL' ? 'Download Grid Template' : 'Show all cohorts'}
+            onActionPress={pgyFilter === 'ALL' ? () => {} : () => setPgyFilter('ALL')}
           />
         </Card>
       ) : null}
