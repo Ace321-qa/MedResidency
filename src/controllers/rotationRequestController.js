@@ -1,4 +1,4 @@
-const db = require('../db');
+const db = require('../config/db');
 
 class RotationRequestController {
   static async create(req, res) {

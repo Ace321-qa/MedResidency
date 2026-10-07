@@ -1,4 +1,4 @@
-const db = require('../db');
+const db = require('../config/db');
 const { generateMasterGridTemplate, parseMasterGrid, generateCccTemplate, parseCcc } = require('../utils/excel/grid');
 
 class RotationImportController {

@@ -1,4 +1,4 @@
-const db = require('../db');
+const db = require('../config/db');
 
 class LetterTemplateController {
   static async list(req, res) {

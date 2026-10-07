@@ -1,4 +1,4 @@
-const db = require('../db');
+const db = require('../config/db');
 const { generateRosterTemplate, parseRosterFile } = require('../utils/excel/roster');
 
 class RosterImportController {
