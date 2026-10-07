@@ -20,17 +20,29 @@ import {
   StatTile,
   StatusBadge,
   TextField,
+  Text,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchLeaves, updateLeaveStatus } from '../../../services/leaves';
 import { fetchResidentList } from '../../../services/residents';
+import {
+  fetchRotationRequests,
+  updateRotationRequest,
+} from '../../../services/rotationRequests';
+import { useInAppNotifications } from '../../../services/inAppNotifications';
 import { colors, spacing } from '../../../theme';
-import type { LeaveRequest, LeaveStatus } from '../../../types/api';
+import type { LeaveRequest, LeaveStatus, RotationRequest } from '../../../types/api';
 import { EMPTY_ARRAY } from '../../../utils/empty';
 import { formatDateRange, formatDateTime, humanizeToken } from '../../../utils/format';
 
 /**
- * Approvals — the coordinator's leave review queue.
+ * Approvals — the coordinator's decision queue.
+ *
+ * Two queues share this tab because they are cleared in the same sitting: leave
+ * requests (a resident away from the rota) and rotation requests (a resident
+ * asking to move within it). Rotation requests are read straight from
+ * `GET /requests/rotation?program_id=`, so anything submitted on the resident's
+ * Rotations tab appears here on refresh.
  *
  * **There is no `GET /api/v1/leaves` endpoint.** The API only serves leave
  * requests one resident at a time (`GET /leaves/resident/:id`), so this queue is
@@ -54,6 +66,7 @@ const OPEN_STATUSES: LeaveStatus[] = ['PENDING', 'APPROVED_BY_CHIEF'];
 
 export default function ApprovalsScreen() {
   const { session } = useSession();
+  const { notify } = useInAppNotifications();
   const programId = session?.programId ?? 0;
 
   const [filter, setFilter] = useState<Filter>('PENDING');
@@ -62,6 +75,18 @@ export default function ApprovalsScreen() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<LeaveRequest | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
+
+  // Rotation requests are a separate queue from leave: a resident asking to
+  // move rota, not to be away from it. Same tab, because a coordinator clears
+  // both in the same sitting.
+  const rotationQueue = useApiResource(
+    () => fetchRotationRequests({ program_id: programId }),
+    [programId],
+  );
+  const [rejectingRotation, setRejectingRotation] = useState<RotationRequest | null>(null);
+  const [rotationReason, setRotationReason] = useState('');
+  const [rotationBusyId, setRotationBusyId] = useState<number | null>(null);
+  const [rotationError, setRotationError] = useState<string | null>(null);
 
   const queue = useApiResource(async () => {
     const roster = await fetchResidentList({ programId, limit: 100 });
@@ -156,11 +181,66 @@ export default function ApprovalsScreen() {
     setRejectionReason('');
   }
 
+  const rotations = rotationQueue.data ?? (EMPTY_ARRAY as RotationRequest[]);
+  const openRotations = rotations.filter((request) => request.status === 'PENDING').length;
+
+  async function decideRotation(
+    request: RotationRequest,
+    status: 'APPROVED' | 'REJECTED',
+    decisionReason?: string,
+  ) {
+    setRotationBusyId(request.request_id);
+    setRotationError(null);
+
+    try {
+      const updated = await updateRotationRequest(request.request_id, {
+        status,
+        ...(decisionReason ? { decision_reason: decisionReason } : {}),
+      });
+
+      rotationQueue.setData((current) =>
+        current
+          ? current.map((item) => (item.request_id === updated.request_id ? updated : item))
+          : current,
+      );
+
+      notify({
+        title: status === 'APPROVED' ? 'Rotation request approved' : 'Rotation request rejected',
+        message: `${request.resident_name ?? 'Resident'} · ${request.request_type.toLowerCase()} · ${request.department_clinic}`,
+        tone: status === 'APPROVED' ? 'success' : 'warning',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not record this decision.';
+      setRotationError(message);
+      notify({ title: 'Decision failed', message, tone: 'danger' });
+    } finally {
+      setRotationBusyId(null);
+    }
+  }
+
+  function submitRotationRejection() {
+    if (!rejectingRotation) return;
+    const reason = rotationReason.trim();
+    if (reason.length === 0) return;
+
+    void decideRotation(rejectingRotation, 'REJECTED', reason);
+    setRejectingRotation(null);
+    setRotationReason('');
+  }
+
   const busy = busyId !== null;
+  const rotationBusy = rotationBusyId !== null;
 
   return (
-    <Screen onRefresh={queue.refresh} refreshing={queue.isRefreshing} bottomGutter={spacing.xxl}>
-      <AppHeader title="Approvals" subtitle="Leave requests awaiting a decision" />
+    <Screen
+      onRefresh={() => {
+        queue.refresh();
+        rotationQueue.refresh();
+      }}
+      refreshing={queue.isRefreshing || rotationQueue.isRefreshing}
+      bottomGutter={spacing.xxl}
+    >
+      <AppHeader title="Approvals" subtitle="Leave and rotation requests awaiting a decision" />
 
       {queue.isLoading ? <SkeletonList rows={5} /> : null}
 
@@ -189,6 +269,11 @@ export default function ApprovalsScreen() {
             <StatTile value={String(requests.length)} label="Total on record" />
             <StatTile value={String(queue.data?.rosterSize ?? 0)} label="Residents checked" />
           </View>
+
+          {rotationQueue.error ? (
+            <Banner tone="warning" title="Rotation requests unavailable" message={rotationQueue.error.message} />
+          ) : null}
+          {rotationError ? <Banner tone="danger" title="Decision failed" message={rotationError} /> : null}
 
           <ChoiceGroup
             label="Filter requests"
@@ -281,6 +366,79 @@ export default function ApprovalsScreen() {
               ))}
             </Card>
           )}
+
+          <SectionHeader
+            title={`Rotation requests (${openRotations} awaiting)`}
+            trailing={`${rotations.length} total`}
+          />
+
+          {rotationQueue.isLoading ? <SkeletonList rows={2} /> : null}
+
+          {rotations.length === 0 && !rotationQueue.isLoading ? (
+            <Card>
+              <EmptyState
+                icon={Inbox}
+                title="No rotation requests"
+                message="When a resident taps “Request a Hospital Rotation” or “Request a Clinic Rotation” on their Rotations tab, it lands here."
+              />
+            </Card>
+          ) : (
+            <Card padded={false}>
+              {rotations.map((request, index) => (
+                <View key={request.request_id} style={styles.requestWrap}>
+                  <ListRow
+                    title={request.resident_name ?? `Resident #${request.resident_id}`}
+                    subtitle={`${request.request_type === 'CLINIC' ? 'Clinic' : 'Hospital'} · ${request.department_clinic} · ${formatDateRange(request.start_date, request.end_date)}`}
+                    meta={`${request.reason ?? 'No reason given'} · requested ${formatDateTime(request.created_at)}`}
+                    trailing={
+                      <StatusBadge
+                        label={humanizeToken(request.status)}
+                        tone={
+                          request.status === 'APPROVED'
+                            ? 'success'
+                            : request.status === 'REJECTED'
+                              ? 'danger'
+                              : 'warning'
+                        }
+                      />
+                    }
+                    onPress={() => router.push(`/program/resident/${request.resident_id}`)}
+                    muted={request.status !== 'PENDING'}
+                  />
+
+                  {request.status === 'PENDING' ? (
+                    <View style={styles.actions}>
+                      <Button
+                        label="Approve"
+                        variant="outline"
+                        icon={CircleCheck}
+                        fullWidth={false}
+                        disabled={rotationBusy}
+                        onPress={() => void decideRotation(request, 'APPROVED')}
+                      />
+                      <Button
+                        label="Reject"
+                        variant="danger"
+                        icon={CircleX}
+                        fullWidth={false}
+                        disabled={rotationBusy}
+                        onPress={() => {
+                          setRejectingRotation(request);
+                          setRotationReason('');
+                        }}
+                      />
+                    </View>
+                  ) : request.decision_reason ? (
+                    <Text variant="caption" tone="muted" style={styles.decisionReason}>
+                      Decision: {request.decision_reason}
+                    </Text>
+                  ) : null}
+
+                  {index === rotations.length - 1 ? null : <View style={styles.divider} />}
+                </View>
+              ))}
+            </Card>
+          )}
         </>
       ) : null}
 
@@ -315,6 +473,38 @@ export default function ApprovalsScreen() {
           hint="The API requires a reason when rejecting, and the resident sees this text on their request."
         />
       </Sheet>
+
+      <Sheet
+        visible={rejectingRotation !== null}
+        onClose={() => setRejectingRotation(null)}
+        title="Reject this rotation request"
+        subtitle={
+          rejectingRotation
+            ? `${rejectingRotation.resident_name ?? 'Resident'} · ${rejectingRotation.department_clinic} · ${formatDateRange(rejectingRotation.start_date, rejectingRotation.end_date)}`
+            : undefined
+        }
+        footer={
+          <>
+            <Button
+              label="Confirm rejection"
+              variant="danger"
+              disabled={rotationReason.trim().length === 0 || rotationBusy}
+              onPress={submitRotationRejection}
+            />
+            <Button label="Cancel" variant="ghost" onPress={() => setRejectingRotation(null)} />
+          </>
+        }
+      >
+        <TextField
+          label="Reason for rejection"
+          value={rotationReason}
+          onChangeText={setRotationReason}
+          multiline
+          placeholder="e.g. that slot is already filled by another resident"
+          required
+          hint="The resident sees this on their Rotations tab, so say what would change their mind."
+        />
+      </Sheet>
     </Screen>
   );
 }
@@ -341,5 +531,9 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: colors.border,
     marginHorizontal: spacing.lg,
+  },
+  decisionReason: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.md,
   },
 });

@@ -33,9 +33,11 @@ export interface Session {
    * because `residentId` has to stay a number for `useResidentId`. Reading
    * `residentName` in the coordinator area therefore means "the programme",
    * which is exactly the kind of thing that reads as a person's name one screen
-   * later. Use this field instead.
-   */
+* later. Use this field instead.
+    */
   programLabel: string | null;
+  /** Short programme code (`FM-PROG-1`), for labels that need to disambiguate. */
+  programCode: string | null;
 }
 
 interface SessionContextValue {
@@ -43,7 +45,7 @@ interface SessionContextValue {
   /** True once someone has chosen who they are in this app session. */
   isSignedIn: boolean;
   signInAsResident: (resident: { id: number; fullName: string; programId: number }) => void;
-  signInAsCoordinator: (programId: number, programLabel: string) => void;
+  signInAsCoordinator: (programId: number, programLabel: string, programCode?: string | null) => void;
   signOut: () => void;
 }
 
@@ -62,20 +64,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       residentName: resident.fullName,
       programId: resident.programId,
       programLabel: null,
+      programCode: null,
     });
   }, []);
 
-  const signInAsCoordinator = useCallback((programId: number, programLabel: string) => {
-    setSession({
-      role: 'coordinator',
-      // A coordinator is not a resident; screens that need a resident id guard
-      // on `session.role === 'resident'` before reading this.
-      residentId: FALLBACK_RESIDENT_ID,
-      residentName: programLabel,
-      programId,
-      programLabel,
-    });
-  }, []);
+  const signInAsCoordinator = useCallback(
+    (programId: number, programLabel: string, programCode: string | null = null) => {
+      setSession({
+        role: 'coordinator',
+        // A coordinator is not a resident; screens that need a resident id guard
+        // on `session.role === 'resident'` before reading this.
+        residentId: FALLBACK_RESIDENT_ID,
+        residentName: programLabel,
+        programId,
+        programLabel,
+        programCode,
+      });
+    },
+    [],
+  );
 
   const signOut = useCallback(() => setSession(null), []);
 

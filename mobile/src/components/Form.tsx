@@ -79,6 +79,16 @@ interface TextFieldProps {
   editable?: boolean;
   /** Right-hand affordance, e.g. a clear button. */
   trailing?: React.ReactNode;
+  /**
+   * Controlled caret position, paired with `onSelectionChange`.
+   *
+   * Exposed so a screen that offers "insert this token" can put it where the
+   * user is actually typing instead of at the end of the document.
+   */
+  selection?: { start: number; end?: number };
+  onSelectionChange?: (event: {
+    nativeEvent: { selection: { start: number; end: number } };
+  }) => void;
 }
 
 export function TextField({
@@ -94,6 +104,8 @@ export function TextField({
   multiline = false,
   editable = true,
   trailing,
+  selection,
+  onSelectionChange,
 }: TextFieldProps) {
   const [focused, setFocused] = useState(false);
 
@@ -126,6 +138,8 @@ export function TextField({
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
             underlineColorAndroid="transparent"
+            selection={selection}
+            onSelectionChange={onSelectionChange}
           />
           {trailing}
         </View>

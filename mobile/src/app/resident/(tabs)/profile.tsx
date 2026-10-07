@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Bell, ClipboardList, LogOut, Settings } from 'lucide-react-native';
+import { Bell, ClipboardCheck, LogOut, Settings, Timer, TriangleAlert } from 'lucide-react-native';
 
 import {
   AppHeader,
@@ -13,19 +13,21 @@ import {
   ErrorState,
   LetterPreviewSheet,
   ListRow,
-  ProgressBar,
   Screen,
   SectionHeader,
   SkeletonList,
+  StatTile,
   StatusBadge,
   Text,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
+import { fetchAttendance } from '../../../services/attendance';
 import { fetchReleaseLetters } from '../../../services/letters';
 import { fetchResident } from '../../../services/residents';
-import { fetchMockTrainingProgress } from '../../../services/mock';
+import { fetchResidentSchedule } from '../../../services/rotations';
 import { spacing } from '../../../theme';
 import { formatDate, formatDateRange, formatHours, humanizeToken } from '../../../utils/format';
+import { summarizeMonth } from '../../../utils/insights';
 import { unresolvedPlaceholders } from '../../../utils/letterPreview';
 import { humanizeEnum, residentFullName } from '../../../utils/residents';
 import type { ReleaseLetter } from '../../../types/api';
@@ -65,7 +67,13 @@ export default function ProfileScreen() {
 
   const profile = useApiResource(() => fetchResident(residentId), [residentId]);
   const letters = useApiResource(() => fetchReleaseLetters(residentId), [residentId]);
-  const progress = useApiResource(fetchMockTrainingProgress);
+  const attendance = useApiResource(() => fetchAttendance(residentId), [residentId]);
+  const schedule = useApiResource(() => fetchResidentSchedule(residentId), [residentId]);
+
+  const month = useMemo(
+    () => summarizeMonth(attendance.data ?? [], schedule.data ?? []),
+    [attendance.data, schedule.data],
+  );
 
   // Memoised rather than `letters.data ?? []` inline: the preview lookup below
   // depends on it, and a fresh array each render would make that memo recompute on
@@ -95,8 +103,15 @@ export default function ProfileScreen() {
       onRefresh={() => {
         profile.refresh();
         letters.refresh();
+        attendance.refresh();
+        schedule.refresh();
       }}
-      refreshing={profile.isRefreshing || letters.isRefreshing}
+      refreshing={
+        profile.isRefreshing ||
+        letters.isRefreshing ||
+        attendance.isRefreshing ||
+        schedule.isRefreshing
+      }
       bottomGutter={spacing.xxl}
     >
       <AppHeader title="Profile" subtitle={session?.residentName ?? undefined} />
@@ -166,14 +181,8 @@ export default function ProfileScreen() {
       <SectionHeader title="Shortcuts" />
       <Card padded={false}>
         <ListRow
-          title="Assessments"
-          subtitle="Sample data — the API has no assessments endpoint"
-          leadingIcon={ClipboardList}
-          onPress={() => router.push('/resident/assessments')}
-        />
-        <ListRow
           title="Notifications"
-          subtitle="Sample data — the API has no notifications endpoint"
+          subtitle="Requests, decisions and duty-hour alerts"
           leadingIcon={Bell}
           onPress={() => router.push('/resident/notifications')}
         />
@@ -188,7 +197,7 @@ export default function ProfileScreen() {
 
       {letterList.length > 0 ? (
         <>
-          <SectionHeader title="Release letters" />
+          <SectionHeader title="Dispatched release letters" trailing={`${letterList.length} on record`} />
           <Card padded={false}>
             {letterList.map((letter, index) => (
               <ListRow
@@ -216,40 +225,35 @@ export default function ProfileScreen() {
 
       <LetterPreviewSheet letter={previewLetter} onClose={() => setPreviewLetterId(null)} />
 
-      <SectionHeader title="Progress" trailing="Sample data" />
+      <SectionHeader title="Progress" trailing={month.monthLabel} />
       <Card>
-        {progress.data ? (
-          <>
-            <Text variant="bodySmall" tone="secondary">
-              {formatHours(progress.data.annualHours)} of {formatHours(progress.data.annualCap)} annual duty hours
-            </Text>
-            <View style={styles.barGap}>
-              <ProgressBar
-                value={Math.round((progress.data.annualHours / progress.data.annualCap) * 100)}
-                label="Annual duty hours against the programme cap"
-              />
-            </View>
-            {progress.data.milestones.map((milestone) => (
-              <View key={milestone.id} style={styles.milestone}>
-                <View style={styles.milestoneHead}>
-                  <Text variant="bodySmall">{milestone.label}</Text>
-                  <Text variant="caption" tone="muted">
-                    {milestone.percent}%
-                  </Text>
-                </View>
-                <ProgressBar
-                  value={milestone.percent}
-                  tone={milestone.state === 'achieved' ? 'success' : 'info'}
-                  label={`${milestone.label}: ${milestone.percent}%`}
-                />
-              </View>
-            ))}
-          </>
-        ) : (
-          <Text variant="bodySmall" tone="muted">
-            Loading…
-          </Text>
-        )}
+        <View style={styles.progressStats}>
+          <StatTile
+            value={formatHours(month.hoursLogged)}
+            label="Hours logged this month"
+            icon={Timer}
+            tone={month.breaches > 0 ? 'warning' : 'neutral'}
+          />
+          <StatTile
+            value={String(month.rotationsCompleted)}
+            label="Rotations completed this month"
+            icon={ClipboardCheck}
+            tone={month.rotationsCompleted > 0 ? 'success' : 'neutral'}
+          />
+        </View>
+        <View style={styles.progressStats}>
+          <StatTile value={String(month.shifts)} label="Shifts this month" />
+          <StatTile
+            value={String(month.breaches)}
+            label="Breaches this month"
+            icon={TriangleAlert}
+            tone={month.breaches > 0 ? 'danger' : 'success'}
+          />
+        </View>
+        <Text variant="caption" tone="muted">
+          {month.monthLabel}: day {month.daysElapsed} of {month.daysInMonth}. Counts come from your
+          attendance log and rotation assignments, not a sample.
+        </Text>
       </Card>
 
       <Divider />
@@ -294,17 +298,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs,
   },
-  barGap: {
-    marginVertical: spacing.sm,
-  },
-  milestone: {
-    marginTop: spacing.sm,
-    gap: spacing.xxs,
-  },
-  milestoneHead: {
+  progressStats: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
   },
   signOut: {
     gap: spacing.sm,

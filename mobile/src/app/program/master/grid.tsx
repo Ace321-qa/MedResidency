@@ -9,6 +9,7 @@ import {
   Card,
   EmptyState,
   ErrorState,
+  ImportTools,
   MatrixTable,
   Screen,
   SectionHeader,
@@ -22,6 +23,7 @@ import {
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchCohortGrid } from '../../../services/rotations';
+import { uploadMasterGrid } from '../../../services/excelTemplates';
 import { ACADEMIC_DAYS, academicDayForPgy, getAcademicYears } from '../../../utils/academicYear';
 import { describeWindow } from '../../../utils/dateCalc';
 import { rotationBadgeLabel, rotationCellDescription, rotationPalette } from '../../../utils/rotationBadges';
@@ -283,6 +285,14 @@ export default function MasterGridScreen() {
             ? undefined
             : 'PGY level is applied by the server, so the grid shows one cohort.'
         }
+      />
+
+      <ImportTools
+        template="master"
+        uploadLabel="Upload Master Grid"
+        upload={(file) => uploadMasterGrid(file, { program_id: programId, academic_year: academicYear })}
+        onImported={() => grid.refresh()}
+        hint="One row per resident: Corporate ID, name, then the rotation for each block."
       />
 
       {grid.isLoading ? <SkeletonList rows={4} /> : null}

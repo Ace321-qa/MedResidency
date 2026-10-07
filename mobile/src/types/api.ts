@@ -278,6 +278,42 @@ export interface LeaveRequest {
   updated_at: IsoDateString | null;
 }
 
+/** `GET/POST/PUT/DELETE /letters/templates` — release-letter templates. */
+export interface LetterTemplate {
+  id: number;
+  program_id: number;
+  template_code: string;
+  template_name: string;
+  letter_subject: string;
+  letter_body: string;
+  is_active: number;
+  created_at: IsoDateString | null;
+  updated_at: IsoDateString | null;
+}
+
+/** `POST/GET/PATCH /requests/rotation` — a resident asking to move rota. */
+export type RotationRequestType = 'HOSPITAL' | 'CLINIC';
+
+export type RotationRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
+
+export interface RotationRequest {
+  request_id: number;
+  resident_id: number;
+  program_id: number;
+  request_type: RotationRequestType;
+  /** Department name for a hospital request, clinic name for a clinic one. */
+  department_clinic: string;
+  start_date: CalendarDateString;
+  end_date: CalendarDateString;
+  reason: string | null;
+  status: RotationRequestStatus;
+  decision_reason: string | null;
+  created_at: IsoDateString | null;
+  decided_at: IsoDateString | null;
+  /** Joined from `residents` by the API. */
+  resident_name: string | null;
+}
+
 /** Mirrors the `sent_status` enum on generated_release_letters. */
 export const LETTER_SENT_STATUSES = [
   'DRAFT',

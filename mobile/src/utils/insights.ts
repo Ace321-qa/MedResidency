@@ -216,6 +216,136 @@ export function formatPgy(yearInProgram: number | null | undefined): string {
   return yearInProgram === null || yearInProgram === undefined ? 'PGY—' : `PGY-${yearInProgram}`;
 }
 
+/**
+ * The continuous-duty limit a shift is judged against.
+ *
+ * The ACGME-style rule the app can actually observe is the 24-hour continuous
+ * limit: a single logged shift longer than this is a breach whether or not the
+ * server flagged it, and the calendar marks it in red for that reason.
+ */
+export const CONTINUOUS_DUTY_LIMIT_HOURS = 24;
+
+/** True when one logged shift runs past the continuous-duty limit. */
+export function isContinuousDutyBreach(log: AttendanceLog): boolean {
+  if (log.is_flagged_for_breach === 1) return true;
+  const hours = toNumber(log.total_hours);
+  return hours !== null && hours > CONTINUOUS_DUTY_LIMIT_HOURS;
+}
+
+export interface MonthlyProgress {
+  /** `October 2026`. */
+  monthLabel: string;
+  /** `YYYY-MM`, the key every log is matched on. */
+  monthKey: string;
+  daysInMonth: number;
+  /** Day of month, 1-based, including today. */
+  daysElapsed: number;
+  /** Hours logged on shifts dated inside this month. */
+  hoursLogged: number;
+  shifts: number;
+  /** Shifts that broke the continuous-duty limit or were flagged by the server. */
+  breaches: number;
+  /** Assignments whose end date falls inside this month. */
+  rotationsCompleted: number;
+}
+
+/**
+ * Month-scoped progress.
+ *
+ * The dashboard used to show annual totals, which are the least useful possible
+ * number to a resident on 7 October: they move slowly enough to look broken and
+ * they say nothing about the block they are in. Everything here is counted
+ * against the *calendar month of* `today`, from the same rows the 7-day window
+ * used — only the boundary changed.
+ */
+export function summarizeMonth(
+  logs: AttendanceLog[],
+  assignments: RotationAssignment[],
+  today = new Date(),
+): MonthlyProgress {
+  const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+
+  let hoursLogged = 0;
+  let shifts = 0;
+  let breaches = 0;
+
+  for (const log of logs) {
+    const shiftDate = toComparableDate(log.shift_date);
+    if (!shiftDate || !shiftDate.startsWith(monthKey)) continue;
+
+    shifts += 1;
+    if (isContinuousDutyBreach(log)) breaches += 1;
+
+    const hours = toNumber(log.total_hours);
+    if (hours !== null) hoursLogged += hours;
+  }
+
+  let rotationsCompleted = 0;
+  for (const assignment of assignments) {
+    const endDate = toComparableDate(assignment.end_date);
+    if (endDate && endDate.startsWith(monthKey)) rotationsCompleted += 1;
+  }
+
+  const monthLabel = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(today);
+
+  return {
+    monthLabel,
+    monthKey,
+    daysInMonth,
+    daysElapsed: today.getDate(),
+    hoursLogged,
+    shifts,
+    breaches,
+    rotationsCompleted,
+  };
+}
+
+/** One calendar day on the duty-hours month grid. */
+export interface CalendarDayLog {
+  /** 1-based day of month. */
+  day: number;
+  /** `YYYY-MM-DD`. */
+  iso: string;
+  hours: number;
+  /** Every log recorded for the day, in the order the API returned them. */
+  logs: AttendanceLog[];
+  /** True when the day carries a continuous-duty breach. */
+  breach: boolean;
+}
+
+/** Indexes a resident's attendance by the day of the month it happened on. */
+export function calendarDaysForMonth(
+  logs: AttendanceLog[],
+  year: number,
+  monthIndex: number,
+): Map<number, CalendarDayLog> {
+  const prefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+  const days = new Map<number, CalendarDayLog>();
+
+  for (const log of logs) {
+    const shiftDate = toComparableDate(log.shift_date);
+    if (!shiftDate || !shiftDate.startsWith(prefix)) continue;
+
+    const day = Number(shiftDate.slice(8, 10));
+    if (!Number.isFinite(day)) continue;
+
+    const existing =
+      days.get(day) ??
+      ({ day, iso: shiftDate, hours: 0, logs: [], breach: false } satisfies CalendarDayLog);
+
+    existing.logs.push(log);
+    const hours = toNumber(log.total_hours);
+    if (hours !== null) existing.hours += hours;
+    if (isContinuousDutyBreach(log)) existing.breach = true;
+
+    days.set(day, existing);
+  }
+
+  return days;
+}
+
+
 /** One-line summary of a rotation, used on the dashboard and in lists. */
 export function describeRotation(assignment: RotationAssignment): string {
   const department = assignment.department_name ?? 'Department not assigned';

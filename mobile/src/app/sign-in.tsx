@@ -72,7 +72,7 @@ export default function SignInScreen() {
 
   const handleProgram = (programId: number) => {
     const program = programs.find((item) => item.programId === programId);
-    signInAsCoordinator(programId, program?.programName ?? DEFAULT_PROGRAM.label);
+    signInAsCoordinator(programId, program?.programName ?? DEFAULT_PROGRAM.label, program?.programCode ?? null);
     router.replace('/program');
   };
 

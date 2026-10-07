@@ -3,6 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { SessionProvider } from '../hooks';
+import { InAppNotificationProvider } from '../services/inAppNotifications';
 import { colors } from '../theme';
 
 /**
@@ -27,18 +28,20 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <SessionProvider>
-        <StatusBar style="dark" />
-        <Stack
-          screenOptions={{
-            headerShown: false,
-            contentStyle: { backgroundColor: colors.background },
-          }}
-        >
-          <Stack.Screen name="index" />
-          <Stack.Screen name="sign-in" />
-          <Stack.Screen name="resident" />
-          <Stack.Screen name="program" />
-        </Stack>
+        <InAppNotificationProvider>
+          <StatusBar style="dark" />
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: colors.background },
+            }}
+          >
+            <Stack.Screen name="index" />
+            <Stack.Screen name="sign-in" />
+            <Stack.Screen name="resident" />
+            <Stack.Screen name="program" />
+          </Stack>
+        </InAppNotificationProvider>
       </SessionProvider>
     </SafeAreaProvider>
   );

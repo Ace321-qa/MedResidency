@@ -346,7 +346,9 @@ export default function OnboardingScreen() {
           minDate={isCalendarDate(form.startDate) ? form.startDate : undefined}
         />
         <Text variant="caption" tone="muted">
-          Enrolled into programme #{programId} — the programme you signed in to.
+          {session?.programCode
+            ? `Enrolled into ${session.programLabel ?? 'this'} Program (Code: ${session.programCode}).`
+            : `Enrolled into ${session?.programLabel ?? `programme #${programId}`} — the programme you signed in to.`}
         </Text>
       </Card>
 

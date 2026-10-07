@@ -1,14 +1,22 @@
 import { useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Bell, CalendarPlus, ClipboardCheck, FilePlus2, Timer, TriangleAlert } from 'lucide-react-native';
+import {
+  Bell,
+  CalendarPlus,
+  ClipboardCheck,
+  FilePlus2,
+  Hospital,
+  Stethoscope,
+  Timer,
+  TriangleAlert,
+} from 'lucide-react-native';
 
 import {
   AppHeader,
   Banner,
   Button,
   Card,
-  Divider,
   EmptyState,
   ErrorState,
   IconButton,
@@ -25,28 +33,48 @@ import {
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchAttendance } from '../../../services/attendance';
 import { fetchLeaves } from '../../../services/leaves';
+import { fetchResidentLongitudinalAssignments } from '../../../services/longitudinal';
 import { fetchResidentSchedule } from '../../../services/rotations';
-import {
-  MOCK_ASSESSMENT_STATUS_LABEL,
-  MOCK_ASSESSMENT_STATUS_TONE,
-  fetchMockAssessments,
-  fetchMockTrainingProgress,
-} from '../../../services/mock';
 import { spacing } from '../../../theme';
-import { formatHours, formatDateRange, formatShortDate } from '../../../utils/format';
-import { describeRotation, summarizeDutyHours, summarizeLeaves, summarizeSchedule } from '../../../utils/insights';
+import { formatHours, formatDateRange, formatShortDate, toCalendarDate } from '../../../utils/format';
+import {
+  describeRotation,
+  summarizeDutyHours,
+  summarizeLeaves,
+  summarizeMonth,
+  summarizeSchedule,
+} from '../../../utils/insights';
+import type { LongitudinalAssignment } from '../../../types/api';
 
 /**
  * Today — the resident's home screen.
  *
- * One question drives the order of this screen: *is anything wrong right now?*
- * So a duty-hour breach sits at the top in red, before any of the pleasant
- * content. Then the current rotation, then the numbers, then the things to do.
+ * The order answers one question: *what am I doing right now?*
  *
- * Everything on this screen is derived from real endpoints — attendance,
- * assignments, leave requests — with one clearly-labelled mock panel at the
- * bottom for training progress, which the API cannot yet provide.
+ *  1. The live clock and calendar, so the answer is anchored in the moment.
+ *  2. The hospital rotation (top card) and the clinic rotation (bottom card) —
+ *     the two things a resident is actually "on" today.
+ *  3. This month's numbers, because annual totals never move.
+ *
+ * Assessments are not here, and deliberately so: there is no assessment
+ * endpoint, and a sample card that never changes is worse than no card.
  */
+
+/** True when a longitudinal clinic assignment covers today. */
+function coversToday(assignment: LongitudinalAssignment, today: string): boolean {
+  if (assignment.is_active === 0) return false;
+  const start = assignment.start_date ? toCalendarDate(new Date(assignment.start_date)) : null;
+  const end = assignment.end_date ? toCalendarDate(new Date(assignment.end_date)) : null;
+  if (start && today < start) return false;
+  if (end && today > end) return false;
+  return true;
+}
+
+/** `Wednesday ANC` style prefix: the clinic day the resident attends. */
+function clinicDayLabel(assignment: LongitudinalAssignment): string {
+  return assignment.day_of_week ? `${assignment.day_of_week}` : 'Clinic day not set';
+}
+
 export default function TodayScreen() {
   const router = useRouter();
   const { session } = useSession();
@@ -55,23 +83,30 @@ export default function TodayScreen() {
   const attendance = useApiResource(() => fetchAttendance(residentId), [residentId]);
   const schedule = useApiResource(() => fetchResidentSchedule(residentId), [residentId]);
   const leaves = useApiResource(() => fetchLeaves(residentId), [residentId]);
-  const assessments = useApiResource(fetchMockAssessments);
-  const progress = useApiResource(fetchMockTrainingProgress);
+  const clinics = useApiResource(() => fetchResidentLongitudinalAssignments(residentId), [residentId]);
 
   const duty = useMemo(() => summarizeDutyHours(attendance.data ?? []), [attendance.data]);
   const rotations = useMemo(() => summarizeSchedule(schedule.data ?? []), [schedule.data]);
   const leaveSummary = useMemo(() => summarizeLeaves(leaves.data ?? []), [leaves.data]);
+  const month = useMemo(
+    () => summarizeMonth(attendance.data ?? [], schedule.data ?? []),
+    [attendance.data, schedule.data],
+  );
 
-  const openAssessments = (assessments.data ?? [])
-    .filter((item) => item.status !== 'COMPLETED')
-    .slice(0, 3);
+  const today = toCalendarDate(new Date());
+  const currentClinic = useMemo(
+    () => (clinics.data ?? []).find((assignment) => coversToday(assignment, today)) ?? null,
+    [clinics.data, today],
+  );
 
   // The most serious unacknowledged breach, if there is one.
   const latestBreach = (attendance.data ?? []).find((log) => log.is_flagged_for_breach === 1);
 
   const isFirstLoad =
-    attendance.isLoading || schedule.isLoading || leaves.isLoading;
-  const firstError = attendance.error ?? schedule.error ?? leaves.error;
+    attendance.isLoading || schedule.isLoading || leaves.isLoading || clinics.isLoading;
+  const firstError = attendance.error ?? schedule.error ?? leaves.error ?? clinics.error;
+
+  const monthProgressPercent = Math.round((month.daysElapsed / Math.max(month.daysInMonth, 1)) * 100);
 
   return (
     <Screen
@@ -79,9 +114,11 @@ export default function TodayScreen() {
         attendance.refresh();
         schedule.refresh();
         leaves.refresh();
-        assessments.refresh();
+        clinics.refresh();
       }}
-      refreshing={attendance.isRefreshing || schedule.isRefreshing || leaves.isRefreshing}
+      refreshing={
+        attendance.isRefreshing || schedule.isRefreshing || leaves.isRefreshing || clinics.isRefreshing
+      }
       bottomGutter={spacing.xxl}
     >
       <AppHeader
@@ -95,6 +132,8 @@ export default function TodayScreen() {
           />
         }
       />
+
+      <LiveClockCard />
 
       {latestBreach ? (
         <Banner
@@ -123,62 +162,160 @@ export default function TodayScreen() {
             attendance.refresh();
             schedule.refresh();
             leaves.refresh();
+            clinics.refresh();
           }}
         />
       ) : null}
 
       {!isFirstLoad && !firstError ? (
         <>
-          <SectionHeader title="Current rotation" />
-          {rotations.current ? (
-            <Card>
-              <Text variant="h2">{rotations.current.rotation_name}</Text>
-              <Text variant="bodySmall" tone="secondary">
-                {describeRotation(rotations.current)}
-              </Text>
-              <View style={styles.tagRow}>
-                <StatusBadge label={rotations.current.assignment_type === 'FULL_BLOCK' ? 'Full block' : 'Partial block'} tone="info" />
-                <StatusBadge label={`${rotations.current.block_name}`} tone="neutral" />
+          <SectionHeader title="Current rotations" />
+
+          {/* Card 1 — hospital. */}
+          <Card>
+            <View style={styles.cardHead}>
+              <View style={styles.cardIcon} accessibilityElementsHidden importantForAccessibility="no">
+                <Hospital color="#FFFFFF" size={18} strokeWidth={2.2} />
               </View>
-            </Card>
-          ) : rotations.next ? (
-            <Card>
-              <Text variant="bodySmall" tone="secondary">
-                You are not on a rotation today.
+              <View style={styles.cardHeadText}>
+                <Text variant="label" tone="secondary" uppercase>
+                  Hospital rotation
+                </Text>
+                {rotations.current ? (
+                  <Text variant="h3">
+                    {rotations.current.block_name}: {rotations.current.rotation_name}
+                  </Text>
+                ) : (
+                  <Text variant="h3">
+                    {rotations.next ? `Next: ${rotations.next.rotation_name}` : 'No hospital rotation today'}
+                  </Text>
+                )}
+              </View>
+            </View>
+
+            {rotations.current ? (
+              <>
+                <Text variant="bodySmall" tone="secondary">
+                  {describeRotation(rotations.current)}
+                </Text>
+                <View style={styles.tagRow}>
+                  <StatusBadge
+                    label={
+                      rotations.current.assignment_type === 'FULL_BLOCK' ? 'Full block' : 'Partial block'
+                    }
+                    tone="info"
+                  />
+                  <StatusBadge label={rotations.current.block_name} tone="neutral" />
+                </View>
+              </>
+            ) : rotations.next ? (
+              <Text variant="bodySmall" tone="secondary" style={styles.gapTop}>
+                {formatDateRange(rotations.next.start_date, rotations.next.end_date)} ·{' '}
+                {rotations.next.block_name}
               </Text>
-              <Text variant="h3" style={styles.gapTop}>
-                Next: {rotations.next.rotation_name}
-              </Text>
-              <Text variant="bodySmall" tone="secondary">
-                {formatDateRange(rotations.next.start_date, rotations.next.end_date)}
-              </Text>
-            </Card>
-          ) : (
-            <Card>
+            ) : (
               <EmptyState
                 icon={CalendarPlus}
                 title="No rotation scheduled"
                 message="You have no active or upcoming rotation assignments. If that is unexpected, ask your programme coordinator to publish a schedule."
               />
-            </Card>
-          )}
+            )}
+          </Card>
 
-          <SectionHeader title="This month" />
+          {/* Card 2 — clinic, always under the hospital card. */}
+          <Card>
+            <View style={styles.cardHead}>
+              <View style={styles.cardIcon} accessibilityElementsHidden importantForAccessibility="no">
+                <Stethoscope color="#FFFFFF" size={18} strokeWidth={2.2} />
+              </View>
+              <View style={styles.cardHeadText}>
+                <Text variant="label" tone="secondary" uppercase>
+                  Clinic rotation
+                </Text>
+                {currentClinic ? (
+                  <Text variant="h3">
+                    {clinicDayLabel(currentClinic)} · {currentClinic.clinic_name}
+                  </Text>
+                ) : (
+                  <Text variant="h3">No clinic session today</Text>
+                )}
+              </View>
+            </View>
+
+            {currentClinic ? (
+              <>
+                <Text variant="bodySmall" tone="secondary">
+                  {currentClinic.start_time && currentClinic.end_time
+                    ? `${currentClinic.start_time} – ${currentClinic.end_time}`
+                    : 'Time not recorded'}
+                  {currentClinic.site_name ? ` · ${currentClinic.site_name}` : ''}
+                  {currentClinic.supervisor_name ? ` · with ${currentClinic.supervisor_name}` : ''}
+                </Text>
+                <View style={styles.tagRow}>
+                  <StatusBadge label={currentClinic.clinic_code} tone="success" />
+                  {currentClinic.pgy_level ? (
+                    <StatusBadge label={`PGY-${currentClinic.pgy_level}`} tone="neutral" />
+                  ) : null}
+                </View>
+              </>
+            ) : (
+              <Text variant="bodySmall" tone="secondary" style={styles.gapTop}>
+                {clinics.data && clinics.data.length > 0
+                  ? `No clinic session falls on ${formatShortDate(today)}. Your next assigned clinic is listed under Rotations.`
+                  : 'No longitudinal clinic has been assigned to you yet.'}
+              </Text>
+            )}
+          </Card>
+
+          <SectionHeader title="This month" trailing={month.monthLabel} />
+
           <View style={styles.statRow}>
             <StatTile
-              value={formatHours(duty.windowHours)}
-              label="Hours logged"
+              value={formatHours(month.hoursLogged)}
+              label="Hours logged this month"
               icon={Timer}
-              tone={duty.windowBreaches > 0 ? 'warning' : 'neutral'}
+              tone={month.breaches > 0 ? 'warning' : 'neutral'}
             />
-            <StatTile value={String(duty.windowShifts)} label="Shifts" icon={ClipboardCheck} />
             <StatTile
-              value={String(duty.totalBreaches)}
-              label="Breaches ever"
-              icon={TriangleAlert}
-              tone={duty.totalBreaches > 0 ? 'danger' : 'success'}
+              value={String(month.rotationsCompleted)}
+              label="Rotations completed this month"
+              icon={ClipboardCheck}
+              tone={month.rotationsCompleted > 0 ? 'success' : 'neutral'}
             />
           </View>
+
+          <View style={styles.statRow}>
+            <StatTile value={String(month.shifts)} label="Shifts this month" icon={ClipboardCheck} />
+            <StatTile
+              value={String(month.breaches)}
+              label="Duty-hour breaches this month"
+              icon={TriangleAlert}
+              tone={month.breaches > 0 ? 'danger' : 'success'}
+            />
+            <StatTile
+              value={String(leaveSummary.pendingCount)}
+              label="Requests pending"
+              tone={leaveSummary.pendingCount > 0 ? 'warning' : 'success'}
+            />
+          </View>
+
+          <Card>
+            <Text variant="h3">{month.monthLabel}</Text>
+            <Text variant="caption" tone="muted" style={styles.progressCaption}>
+              {month.daysElapsed} of {month.daysInMonth} days elapsed · {formatHours(month.hoursLogged)}{' '}
+              logged across {month.shifts} shift{month.shifts === 1 ? '' : 's'}
+            </Text>
+            <View style={styles.progressWrap}>
+              <ProgressBar
+                value={monthProgressPercent}
+                label={`${month.monthLabel}: day ${month.daysElapsed} of ${month.daysInMonth}`}
+              />
+            </View>
+            <Text variant="caption" tone="muted">
+              Rolling 7-day total: {formatHours(duty.windowHours)} across {duty.windowShifts} shift
+              {duty.windowShifts === 1 ? '' : 's'}.
+            </Text>
+          </Card>
 
           <SectionHeader title="Quick actions" />
           <View style={styles.actionStack}>
@@ -212,38 +349,6 @@ export default function TodayScreen() {
               </Card>
             </>
           ) : null}
-
-          <SectionHeader
-            title="Training progress"
-            trailing="Sample data"
-          />
-          <Card>
-            {progress.data ? (
-              <>
-                <View style={styles.progressHead}>
-                  <Text variant="h3">
-                    {formatHours(progress.data.annualHours)} of {formatHours(progress.data.annualCap)}
-                  </Text>
-                  <Text variant="caption" tone="muted">
-                    annual duty-hour cap
-                  </Text>
-                </View>
-                <ProgressBar
-                  value={Math.round((progress.data.annualHours / progress.data.annualCap) * 100)}
-                  label={`${progress.data.weeksElapsed} weeks elapsed, averaging ${progress.data.averageWeeklyHours} hours per week`}
-                />
-                <Text variant="caption" tone="muted" style={styles.progressCaption}>
-                  {progress.data.weeksElapsed} weeks elapsed · {progress.data.averageWeeklyHours} h/week average
-                </Text>
-              </>
-            ) : (
-              <Text variant="bodySmall" tone="muted">
-                Loading…
-              </Text>
-            )}
-          </Card>
-
-
         </>
       ) : null}
     </Screen>
@@ -254,22 +359,42 @@ const styles = StyleSheet.create({
   statRow: {
     flexDirection: 'row',
     gap: spacing.sm,
+    marginBottom: spacing.sm,
   },
   actionStack: {
     gap: spacing.sm,
   },
   tagRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.xs,
     marginTop: spacing.sm,
   },
   gapTop: {
     marginTop: spacing.xs,
   },
-  progressHead: {
+  cardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
     marginBottom: spacing.sm,
   },
+  cardHeadText: {
+    flex: 1,
+    gap: spacing.xxs,
+  },
+  cardIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#0E4573',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   progressCaption: {
-    marginTop: spacing.xs,
+    marginTop: spacing.xxs,
+  },
+  progressWrap: {
+    marginVertical: spacing.sm,
   },
 });

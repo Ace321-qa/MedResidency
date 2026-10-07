@@ -20,6 +20,7 @@ export { FacultyPicker, type FacultyOption } from './FacultyPicker';
 export { Avatar, DetailRow, ListRow } from './ListRow';
 export { MatrixTable, type MatrixColumnDef, type MatrixRowDef } from './MatrixTable';
 export { Screen } from './Screen';
+export { ImportTools } from './ImportTools';
 export { LetterPreviewSheet } from './LetterPreviewSheet';
 export { Sheet } from './Sheet';
 export { EmptyState, ErrorState, LoadingState, SkeletonList } from './StateView';

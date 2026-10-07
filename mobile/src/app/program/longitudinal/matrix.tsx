@@ -9,6 +9,7 @@ import {
   Card,
   EmptyState,
   ErrorState,
+  ImportTools,
   MatrixTable,
   Screen,
   SectionHeader,
@@ -27,6 +28,7 @@ import {
   fetchClinicTypes,
   fetchSupervisorAssignments,
 } from '../../../services/longitudinal';
+import { uploadCccMatrix } from '../../../services/excelTemplates';
 import { getAcademicYears } from '../../../utils/academicYear';
 import {
   CCC_FALLBACK_SLOTS,
@@ -380,6 +382,20 @@ export default function LongitudinalMatrixScreen() {
         onChange={setClinicFilter}
         options={clinicOptions}
         hint="Filters the rows. The columns are always the slot list of the selected slot clinic."
+      />
+
+      <ImportTools
+        template="ccc"
+        uploadLabel="Upload CCC Matrix"
+        upload={(file) =>
+          uploadCccMatrix(file, { program_id: programId, academic_year: academicYear })
+        }
+        onImported={() => {
+          void clinicTypes.refresh();
+          void assignments.refresh();
+          void supervisors.refresh();
+          void slots.refresh();
+        }}
       />
 
       {loading ? <SkeletonList rows={4} /> : null}

@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
-import { Alert, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import * as DocumentPicker from 'expo-document-picker';
 import { UserPlus, Users } from 'lucide-react-native';
 
 import {
@@ -10,6 +9,7 @@ import {
   Card,
   EmptyState,
   ErrorState,
+  ImportTools,
   ListRow,
   Screen,
   SearchInput,
@@ -19,7 +19,7 @@ import {
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchResidentList } from '../../../services/residents';
-import { downloadRosterTemplate, uploadRoster } from '../../../services/rosterImport';
+import { uploadRoster } from '../../../services/excelTemplates';
 import { spacing } from '../../../theme';
 import { humanizeToken } from '../../../utils/format';
 import { filterResidents, residentFullName, residentSubtitle } from '../../../utils/residents';
@@ -29,6 +29,11 @@ import { filterResidents, residentFullName, residentSubtitle } from '../../../ut
  *
  * Search covers name, programme code, specialty and PGY level, because a
  * coordinator looking for "the PGY-2" is as likely to type that as a name.
+ *
+ * The import path is deliberately two independent buttons rather than one
+ * ambiguous "Import": downloading the template must work even when the API is
+ * down, and a failed upload has to say *which row* broke instead of a generic
+ * error alert.
  */
 
 export default function RosterScreen() {
@@ -36,8 +41,6 @@ export default function RosterScreen() {
   const { session } = useSession();
   const programId = session?.programId ?? 0;
   const [query, setQuery] = useState('');
-  const [uploading, setUploading] = useState(false);
-
 
   const residents = useApiResource(() => fetchResidentList({ programId, limit: 100 }), [programId]);
 
@@ -46,39 +49,21 @@ export default function RosterScreen() {
     [residents.data, query],
   );
 
+  // The header has to name the *programme*, and there is no GET /programs, so
+  // it is derived from the roster itself — every row carries the code and name.
+  const programme = useMemo(() => {
+    const first = (residents.data ?? []).find((row) => row.program_code);
+    if (!first) return null;
+    return { name: first.specialty_name, code: first.program_code };
+  }, [residents.data]);
 
-  async function handleDownloadTemplate() {
-    try {
-      await downloadRosterTemplate();
-      Alert.alert('Template downloaded', 'roster_template.xlsx ready');
-    } catch (e: any) {
-      Alert.alert('Error', e.message);
-    }
-  }
-
-  async function handleUpload() {
-    try {
-      setUploading(true);
-      const res = await DocumentPicker.getDocumentAsync({ type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      if (res.canceled) return;
-      const file = res.assets[0] as any;
-      const result = await uploadRoster(file);
-      if (result.success) {
-        Alert.alert('Imported', `${result.added?.length || 0} residents added`);
-        residents.refresh();
-      } else {
-        Alert.alert('Import failed', result.error || JSON.stringify(result.errors));
-      }
-    } catch (e: any) {
-      Alert.alert('Error', e.message);
-    } finally {
-      setUploading(false);
-    }
-  }
+  const headerSubtitle = programme?.code
+    ? `Enrolled into ${programme.name ?? 'Programme'} Program (Code: ${programme.code})`
+    : (session?.programLabel ?? 'Residents enrolled in this programme');
 
   return (
     <Screen onRefresh={residents.refresh} refreshing={residents.isRefreshing} bottomGutter={spacing.xxl}>
-      <AppHeader title="Roster" subtitle="Enrolled into Family Medicine Program (Code: 1207800001)" />
+      <AppHeader title="Roster" subtitle={headerSubtitle} />
 
       {residents.isLoading ? <SkeletonList rows={6} /> : null}
 
@@ -101,12 +86,15 @@ export default function RosterScreen() {
             />
           </View>
 
+          <ImportTools
+            template="roster"
+            uploadLabel="Upload Excel Roster"
+            upload={(file) => uploadRoster(file, programId)}
+            onImported={() => residents.refresh()}
+          />
+
           <SectionHeader title={`${visible.length} resident${visible.length === 1 ? '' : 's'}`} />
 
-          <View style={{ flexDirection: 'row', gap: 8, marginBottom: spacing.md }}>
-            <Button label="Download Template (.xlsx)" variant="outline" onPress={handleDownloadTemplate} style={{ flex: 1 }} />
-            <Button label="Upload Excel Roster" onPress={handleUpload} loading={uploading} style={{ flex: 1 }} />
-          </View>
           {visible.length === 0 ? (
             <Card>
               <EmptyState
@@ -115,7 +103,7 @@ export default function RosterScreen() {
                 message={
                   query
                     ? `No resident in this programme matches “${query}”.`
-                    : 'Register the first resident to build the roster.'
+                    : 'Register the first resident, or upload the roster template with the rows you already have.'
                 }
                 actionLabel={query ? undefined : 'Register a resident'}
                 onActionPress={query ? undefined : () => router.push('/program/onboarding')}

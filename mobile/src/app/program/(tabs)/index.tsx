@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Settings, TriangleAlert, UserPlus, Users } from 'lucide-react-native';
+import { FileSignature, Settings, TriangleAlert, UserPlus, Users } from 'lucide-react-native';
 
 import {
   AppHeader,
@@ -169,8 +169,14 @@ export default function ProgramOverviewScreen() {
             />
           ) : null}
 
-          <SectionHeader title="Settings" />
+          <SectionHeader title="Release letters" />
           <Card padded={false}>
+            <ListRow
+              title="Letter templates"
+              subtitle="View, edit and create the templates letters are merged from"
+              leadingIcon={FileSignature}
+              onPress={() => router.push('/program/letters')}
+            />
             <ListRow
               title="Connection and session"
               subtitle="API address, database check, sign out"
