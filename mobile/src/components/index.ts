@@ -25,4 +25,5 @@ export { Sheet } from './Sheet';
 export { EmptyState, ErrorState, LoadingState, SkeletonList } from './StateView';
 export { StatusBadge } from './StatusBadge';
 export { ProgressBar, StatTile } from './StatTile';
+export { LiveClockCard } from './LiveClockCard';
 export { Text, type TextTone } from './Text';

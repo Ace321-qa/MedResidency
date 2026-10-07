@@ -20,6 +20,7 @@ import {
   StatTile,
   StatusBadge,
   Text,
+  LiveClockCard,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchAttendance } from '../../../services/attendance';
@@ -162,7 +163,7 @@ export default function TodayScreen() {
             </Card>
           )}
 
-          <SectionHeader title="Last 7 days" />
+          <SectionHeader title="This month" />
           <View style={styles.statRow}>
             <StatTile
               value={formatHours(duty.windowHours)}
@@ -242,32 +243,7 @@ export default function TodayScreen() {
             )}
           </Card>
 
-          {openAssessments.length > 0 ? (
-            <>
-              <SectionHeader
-                title="Assessments"
-                trailing="Sample data"
-              />
-              <Card padded={false}>
-                {openAssessments.map((item, index) => (
-                  <ListRow
-                    key={item.id}
-                    title={item.title}
-                    subtitle={`${item.context} · due ${formatShortDate(item.dueDate)}`}
-                    trailing={
-                      <StatusBadge
-                        label={MOCK_ASSESSMENT_STATUS_LABEL[item.status]}
-                        tone={MOCK_ASSESSMENT_STATUS_TONE[item.status]}
-                      />
-                    }
-                    onPress={() => router.push('/resident/assessments')}
-                    last={index === openAssessments.length - 1}
-                  />
-                ))}
-              </Card>
-              <Divider />
-            </>
-          ) : null}
+
         </>
       ) : null}
     </Screen>

@@ -1,6 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { CalendarPlus } from 'lucide-react-native';
+import { Alert, Modal, ScrollView, TouchableOpacity } from 'react-native';
+import { CalendarPlus, Grid3x3, FileText } from 'lucide-react-native';
 
 import {
   AppHeader,
@@ -13,9 +14,12 @@ import {
   SkeletonList,
   StatusBadge,
   Text,
+  Button,
+  SearchInput,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchResidentSchedule } from '../../../services/rotations';
+import { createRotationRequest } from '../../../services/rotationRequests';
 import { spacing } from '../../../theme';
 import { formatDateRange, formatWeeks } from '../../../utils/format';
 import { groupScheduleByBlock, type RotationPhase } from '../../../utils/insights';
@@ -47,10 +51,19 @@ export default function RotationsScreen() {
 
   const schedule = useApiResource(() => fetchResidentSchedule(residentId), [residentId]);
   const blocks = useMemo(() => groupScheduleByBlock(schedule.data ?? []), [schedule.data]);
+  const [showGrid, setShowGrid] = useState(false);
+  const [showHospitalReq, setShowHospitalReq] = useState(false);
+  const [showClinicReq, setShowClinicReq] = useState(false);
 
   return (
     <Screen onRefresh={schedule.refresh} refreshing={schedule.isRefreshing} bottomGutter={spacing.xxl}>
       <AppHeader title="Rotations" subtitle="Your schedule by academic block" />
+
+      <View style={{ flexDirection: 'row', gap: 8, marginBottom: spacing.md }}>
+        <Button label="Master Grid" variant="outline" icon={Grid3x3} onPress={() => setShowGrid(!showGrid)} style={{ flex: 1 }} />
+        <Button label="+ Request Hospital" variant="outline" icon={FileText} onPress={() => setShowHospitalReq(true)} style={{ flex: 1 }} />
+        <Button label="+ Request Clinic" variant="outline" icon={FileText} onPress={() => setShowClinicReq(true)} style={{ flex: 1 }} />
+      </View>
 
       {schedule.isLoading ? <SkeletonList rows={5} /> : null}
 
