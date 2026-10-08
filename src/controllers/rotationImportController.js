@@ -6,6 +6,12 @@ const {
   parseCcc,
 } = require('../utils/excel/grid');
 const { academicYearMatchValues } = require('../utils/academicYear');
+const {
+  WEEKS_PER_BLOCK,
+  clampWindow,
+  weekWindow,
+  weeksSpanned,
+} = require('../utils/masterGridCalendar');
 
 const DAYS = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
 
@@ -26,11 +32,32 @@ function tokens(value) {
     .filter((token) => token !== '');
 }
 
-/** Whole weeks between two `YYYY-MM-DD` dates, to two decimals. */
-function weeksBetween(startDate, endDate) {
-  const days = (Date.parse(endDate) - Date.parse(startDate)) / 864e5;
-  if (!Number.isFinite(days)) return 4;
-  return Math.round(((days + 1) / 7) * 100) / 100 || 4;
+/**
+ * Consecutive weeks carrying the same rotation, inside one block.
+ *
+ * `[{1,MED},{2,MED},{3,NICU},{4,NICU}]` becomes two runs — the shape a split
+ * block has — while `[{1,MED},{2,MED},{3,MED},{4,MED}]` stays one run of four,
+ * which is what makes a full-block rotation a single `FULL_BLOCK` row instead of
+ * four. Gaps (`week 1` and `week 3` only) break the run deliberately: two
+ * separate postings are two separate windows.
+ *
+ * @param {{week:number, rotation:{id:number}}[]} entries Sorted by week.
+ */
+function runsOf(entries) {
+  const runs = [];
+  for (const entry of entries) {
+    const current = runs[runs.length - 1];
+    if (
+      current &&
+      current.rotation.id === entry.rotation.id &&
+      entry.week === current.weeks[current.weeks.length - 1] + 1
+    ) {
+      current.weeks.push(entry.week);
+      continue;
+    }
+    runs.push({ rotation: entry.rotation, weeks: [entry.week] });
+  }
+  return runs;
 }
 
 async function resolveProgram(conn, requestedId) {
@@ -71,11 +98,21 @@ class RotationImportController {
   /**
    * Import the cohort master grid.
    *
-   * One row per resident, one column per block, the cell naming a rotation. The
-   * block supplies the dates and the rotation supplies the identity; every cell
-   * is validated before anything is written, and a cell names a rotation that
-   * does not exist it comes back as a row/column error rather than being
-   * skipped. A silently skipped block is a resident with no rota.
+   * One row per resident, one column per week — 52 weeks across 13 blocks,
+   * starting Sunday 28/06/2026. A 4-week rotation is one run of four weeks and
+   * becomes one `FULL_BLOCK` assignment; a split block (2 weeks here, 2 there)
+   * becomes one `PARTIAL_BLOCK` assignment per run, each carrying its own
+   * date window, which is exactly how the grid draws it back.
+   *
+   * Every cell is validated before anything is written: an unknown Corporate ID
+   * or an unrecognised rotation aborts the whole file with a `Row N:` message
+   * rather than importing the rows that happened to be valid. A partially
+   * imported grid is worse than a rejected one — the coordinator cannot tell
+   * which half landed.
+   *
+   * Sample rows shipped with the template (`SAMPLE-001`, …) are skipped, so a
+   * workbook uploaded untouched imports nothing instead of failing on two
+   * residents who do not exist.
    */
   static async importMaster(req, res) {
     if (!req.file) {
@@ -94,6 +131,7 @@ class RotationImportController {
     const academicYear = String(req.body.academic_year ?? '').trim();
 
     const conn = await db.getConnection();
+    let inTransaction = false;
     try {
       const program = await resolveProgram(conn, req.body.program_id);
       if (!program) {
@@ -110,7 +148,9 @@ class RotationImportController {
 
       const yearValues = academicYearMatchValues(academicYear);
       const [blocks] = await conn.query(
-        `SELECT id, block_number, start_date, end_date
+        `SELECT id, block_number, block_name,
+                DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date_iso,
+                DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date_iso
            FROM rotation_blocks
           WHERE program_id = ? AND is_active = 1 AND academic_year IN (?)
           ORDER BY block_number ASC`,
@@ -129,6 +169,25 @@ class RotationImportController {
       }
       const blocksByNumber = new Map(blocks.map((block) => [block.block_number, block]));
 
+      /**
+       * Which block a week lands in.
+       *
+       * The date window wins, because that is what the workbook's column heads
+       * say; a programme whose block dates have drifted off the 28/06 grid falls
+       * back to the block number, which is what the merged "Block N" heading in
+       * the file means.
+       *
+       * @returns {typeof blocks[number]|null}
+       */
+      const blockForWeek = (week) => {
+        const window = weekWindow(week);
+        if (!window) return null;
+        const contained = blocks.find(
+          (block) => block.start_date_iso <= window.start && window.start <= block.end_date_iso,
+        );
+        return contained ?? blocksByNumber.get(Math.ceil(week / WEEKS_PER_BLOCK)) ?? null;
+      };
+
       const [rotations] = await conn.query(
         `SELECT id, rotation_code, rotation_name
            FROM rotations
@@ -146,7 +205,12 @@ class RotationImportController {
         issues.push({ field: 'File', message: 'no resident rows were found under the header' });
       }
 
-      const corporateIds = [...new Set(parsed.cells.map((cell) => cell.corporateId))].filter(
+      const residentCells = parsed.cells.filter(
+        (cell) => !/^sample/i.test(String(cell.corporateId ?? '')),
+      );
+      const sampleRows = parsed.cells.length - residentCells.length;
+
+      const corporateIds = [...new Set(residentCells.map((cell) => cell.corporateId))].filter(
         (id) => id !== '',
       );
       const residentsByCorporateId = new Map();
@@ -167,7 +231,7 @@ class RotationImportController {
       }
 
       const planned = [];
-      for (const cell of parsed.cells) {
+      for (const cell of residentCells) {
         if (cell.corporateId === '') {
           issues.push({ row: cell.row, field: 'Corporate ID', message: 'is required' });
           continue;
@@ -177,69 +241,123 @@ class RotationImportController {
           issues.push({
             row: cell.row,
             field: 'Corporate ID',
-            message: `${cell.corporateId} is not an enrolled resident in ${program.program_name}`,
+            message: `${cell.corporateId} not found`,
           });
           continue;
         }
-        for (const [numberText, rotationName] of Object.entries(cell.rotations)) {
-          const blockNumber = Number(numberText);
-          const block = blocksByNumber.get(blockNumber);
+
+        const weeks = Object.keys(cell.weeks)
+          .map(Number)
+          .sort((left, right) => left - right);
+        if (weeks.length === 0) continue;
+
+        // Resolve every week first, so one bad cell reports its own row/column
+        // instead of failing halfway through a write.
+        const byBlock = new Map();
+        for (const week of weeks) {
+          const block = blockForWeek(week);
           if (!block) {
             issues.push({
               row: cell.row,
-              field: `Block ${blockNumber}`,
+              field: `Week ${week}`,
               message: `has no rotation block in ${academicYear}`,
             });
             continue;
           }
-          const rotation = rotationsByName.get(rotationName.trim().toLowerCase());
+          const rotationName = cell.weeks[week];
+          const rotation = rotationsByName.get(String(rotationName).trim().toLowerCase());
           if (!rotation) {
             issues.push({
               row: cell.row,
-              field: `Block ${blockNumber}`,
+              field: `Week ${week}`,
               message: `"${rotationName}" is not a rotation in this programme`,
             });
             continue;
           }
-          planned.push({ residentId, block, rotation });
+          if (!byBlock.has(block)) byBlock.set(block, []);
+          byBlock.get(block).push({ week, rotation });
+        }
+
+        for (const [block, entries] of byBlock) {
+          for (const run of runsOf(entries)) {
+            const first = weekWindow(run.weeks[0]);
+            const last = weekWindow(run.weeks[run.weeks.length - 1]);
+            const window = clampWindow(first.start, last.end, block.start_date_iso, block.end_date_iso);
+            if (!window) {
+              issues.push({
+                row: cell.row,
+                field: `Week ${run.weeks[0]}`,
+                message: `falls outside ${block.block_name} (${block.start_date_iso} to ${block.end_date_iso})`,
+              });
+              continue;
+            }
+            planned.push({ residentId, block, rotation: run.rotation, window });
+          }
         }
       }
 
       if (issues.length > 0) {
         return res.status(400).json({ success: false, issues });
       }
+      if (planned.length === 0) {
+        return res.status(400).json({
+          success: false,
+          issues: [{ field: 'File', message: 'no rotation cells were filled in under the header' }],
+        });
+      }
 
       await conn.beginTransaction();
+      inTransaction = true;
+
+      // The sheet is authoritative for a block it fills: replace whatever was
+      // there rather than layering a second set of rows over it.
+      const wiped = new Set();
       for (const entry of planned) {
+        const key = `${entry.residentId}:${entry.block.id}`;
+        if (wiped.has(key)) continue;
+        wiped.add(key);
         await conn.query(
           'DELETE FROM resident_rotation_assignments WHERE resident_id = ? AND rotation_block_id = ?',
           [entry.residentId, entry.block.id],
         );
+      }
+
+      for (const entry of planned) {
+        const coversWholeBlock =
+          entry.window.start === entry.block.start_date_iso &&
+          entry.window.end === entry.block.end_date_iso;
         await conn.query(
           `INSERT INTO resident_rotation_assignments
              (resident_id, rotation_id, rotation_block_id, start_date, end_date, assigned_weeks, assignment_type)
-           VALUES (?, ?, ?, ?, ?, ?, 'FULL_BLOCK')`,
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             entry.residentId,
             entry.rotation.id,
             entry.block.id,
-            entry.block.start_date,
-            entry.block.end_date,
-            weeksBetween(entry.block.start_date, entry.block.end_date),
+            entry.window.start,
+            entry.window.end,
+            weeksSpanned(entry.window.start, entry.window.end),
+            coversWholeBlock ? 'FULL_BLOCK' : 'PARTIAL_BLOCK',
           ],
         );
       }
-      await conn.commit();
 
+      await conn.commit();
+      inTransaction = false;
+
+      const rows = residentCells.length;
+      const sampleNote = sampleRows > 0 ? ` ${sampleRows} sample row${sampleRows === 1 ? '' : 's'} ignored.` : '';
       return res.json({
         success: true,
         updated: planned.length,
-        summary: `${planned.length} block assignment${planned.length === 1 ? '' : 's'} saved across ${
-          parsed.cells.length
-        } resident row${parsed.cells.length === 1 ? '' : 's'}.`,
+        summary: `${planned.length} weekly assignment${planned.length === 1 ? '' : 's'} saved across ${rows} resident row${
+          rows === 1 ? '' : 's'
+        }.${sampleNote}`,
       });
     } catch (error) {
-      await conn.rollback();
+      if (inTransaction) {
+        await conn.rollback().catch(() => {});
+      }
       return res.status(400).json({ success: false, error: error.message });
     } finally {
       conn.release();

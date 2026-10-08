@@ -26,6 +26,13 @@ import { Text } from './Text';
  * drift after a screen rotation.
  */
 
+export interface ColumnGroup {
+  key: string;
+  label: string;
+  startColumnIndex: number;
+  columnCount: number;
+}
+
 export interface MatrixColumnDef {
   key: string;
   /** Bold first line, e.g. "Block 3". */
@@ -35,6 +42,7 @@ export interface MatrixColumnDef {
   /** Wider for a date window than for a single slot number. */
   width?: number;
   align?: 'left' | 'center' | 'right';
+  pinned?: boolean;
 }
 
 export interface MatrixRowDef {
@@ -72,6 +80,8 @@ export interface MatrixTableProps {
   emptyMessage?: string;
   /** Rendered above the table, inside the scroll area. */
   caption?: ReactNode;
+  /** Optional two-tier header groups (e.g. Block 1 over weeks 1-4) */
+  columnGroups?: ColumnGroup[];
 }
 
 const DEFAULT_FROZEN_WIDTH = 168;
@@ -87,6 +97,7 @@ export function MatrixTable({
   emptyTitle = 'Nothing to show yet',
   emptyMessage,
   caption,
+  columnGroups,
 }: MatrixTableProps) {
   if (columns.length === 0 || rows.length === 0) {
     return (
@@ -138,13 +149,33 @@ export function MatrixTable({
 
         <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.scroller}>
           <View>
+            {columnGroups && columnGroups.length > 0 ? (
+              <View style={styles.groupRow}>
+                {columnGroups.map((group) => (
+                  <View
+                    key={group.key}
+                    style={[
+                      styles.groupCell,
+                      {
+                        width: group.columnCount * (columns[group.startColumnIndex]?.width ?? DEFAULT_COLUMN_WIDTH),
+                        left: group.startColumnIndex * (columns[group.startColumnIndex]?.width ?? DEFAULT_COLUMN_WIDTH),
+                      },
+                    ]}
+                  >
+                    <Text variant="label" numberOfLines={1} align="center">
+                      {group.label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
             <View style={styles.headerRow}>
               {columns.map((column) => (
                 <View
                   key={column.key}
                   style={[
                     styles.headerCell,
-                    { width: column.width ?? DEFAULT_COLUMN_WIDTH, minHeight: HEADER_HEIGHT },
+                    { width: column.width ?? DEFAULT_COLUMN_WIDTH, minHeight: HEADER_HEIGHT / 2 },
                     column.align === 'right' ? styles.alignRight : null,
                   ]}
                 >
@@ -240,6 +271,23 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceMuted,
     borderBottomWidth: 1,
     borderBottomColor: colors.borderStrong,
+  },
+  groupRow: {
+    flexDirection: 'row',
+    position: 'relative',
+    backgroundColor: colors.surfaceMuted,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  groupCell: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: spacing.sm,
+    borderRightWidth: 1,
+    borderRightColor: colors.border,
   },
   headerCell: {
     justifyContent: 'flex-end',
