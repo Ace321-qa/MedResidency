@@ -1,4 +1,5 @@
 import * as DocumentPicker from 'expo-document-picker';
+import { Platform } from 'react-native';
 
 import { API_BASE_URL } from '../config/env';
 import { buildXlsx, type XlsxCellValue } from '../utils/xlsx';
@@ -521,6 +522,47 @@ export async function pickSpreadsheet(): Promise<DocumentPicker.DocumentPickerAs
 }
 
 /**
+ * Put the picked file on `form` under `field` as a real multipart file part.
+ *
+ * The two platforms disagree about what a "file" is, and sending the wrong
+ * shape is invisible on the client: the request goes out, and the API answers
+ * `No file was uploaded` because Multer never saw a part with a filename.
+ *
+ * - **Web** hands back a `DocumentPickerAsset`, a plain object. The browser's
+ *   `FormData.append` only accepts `string | Blob`, so appending the object
+ *   itself stringifies it to `[object Object]` and the server receives a text
+ *   field. The asset's own `file` — the `File` the `<input type="file">`
+ *   produced — is the blob that must be sent, named so the part carries the
+ *   `.xlsx` filename.
+ * - **iOS/Android** have no `File`; React Native's `FormData` is the one that
+ *   understands `{ uri, name, type }` and streams the bytes from the copy the
+ *   picker wrote to the cache directory.
+ */
+async function appendPickedFile(
+  form: FormData,
+  field: string,
+  file: DocumentPicker.DocumentPickerAsset,
+): Promise<void> {
+  if (Platform.OS === 'web') {
+    let blob: Blob | null = file.file ?? null;
+    if (!blob) {
+      // The asset still knows where the bytes are; read them back if the
+      // picker ever stops attaching the `File` itself.
+      const response = await fetch(file.uri);
+      blob = await response.blob();
+    }
+    form.append(field, blob, file.name);
+    return;
+  }
+
+  form.append(field, {
+    uri: file.uri,
+    name: file.name,
+    type: file.mimeType ?? 'application/octet-stream',
+  } as any);
+}
+
+/**
  * POST a picked file to `endpoint`, with extra form fields (`program_id`, …).
  *
  * Failures are never thrown at the screen as a raw error: the server's
@@ -537,7 +579,15 @@ export async function uploadSpreadsheet(
   for (const [key, value] of Object.entries(fields)) {
     form.append(key, String(value));
   }
-  form.append('file', file as unknown as Blob);
+  try {
+    await appendPickedFile(form, 'file', file);
+  } catch {
+    return {
+      success: false,
+      issues: [`The file "${file.name}" could not be read for upload — try picking it again.`],
+      unreachable: true,
+    };
+  }
 
   let body: any;
   try {
