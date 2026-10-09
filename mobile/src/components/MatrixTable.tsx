@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View, type TextStyle } from 'react-native';
 
 import { colors, radius, spacing, type Tone } from '../theme';
 import { Text } from './Text';
@@ -24,6 +24,14 @@ import { Text } from './Text';
  * Alignment relies on one more thing: **every row is `rowHeight` tall**, on both
  * panes. Fixed heights mean no measurement, no `onLayout` bookkeeping, and no
  * drift after a screen rotation.
+ *
+ * The header is the one place with variable height, and it is variable by
+ * design: `columnGroups` adds a **tier 1** row (`Block 1` merged over four
+ * sub-weeks) above the normal **tier 2** row, and `verticalSubtitle` rotates a
+ * column's subtitle top-to-bottom so a date window like `28/06–04/07` fits a
+ * narrow sub-column instead of being clipped. The frozen pane's header is
+ * always the *sum* of the tiers the scrolling pane draws, so the first data row
+ * starts at the same y on both panes whatever the header is made of.
  */
 
 export interface ColumnGroup {
@@ -39,6 +47,12 @@ export interface MatrixColumnDef {
   title: string;
   /** Second line, e.g. "Sun 05 Jul - Sat 01 Aug 2026". */
   subtitle?: string;
+  /**
+   * Draw the subtitle rotated (top-to-bottom) so a long string — a sub-week
+   * date window — fits a narrow column without being ellipsised. Columns that
+   * ask for it grow the header row to `VERTICAL_HEADER_HEIGHT`.
+   */
+  verticalSubtitle?: boolean;
   /** Wider for a date window than for a single slot number. */
   width?: number;
   align?: 'left' | 'center' | 'right';
@@ -114,6 +128,13 @@ export function MatrixTable({
     );
   }
 
+  // Header geometry: the tiers the scrolling pane draws are exactly what the
+  // frozen pane's header must span, or the two panes' rows drift apart.
+  const hasGroups = (columnGroups?.length ?? 0) > 0;
+  const hasVerticalSubtitles = columns.some((column) => column.verticalSubtitle && column.subtitle);
+  const headerHeight = hasVerticalSubtitles ? VERTICAL_HEADER_HEIGHT : HEADER_HEIGHT;
+  const frozenHeaderHeight = (hasGroups ? GROUP_HEADER_HEIGHT : 0) + headerHeight;
+
   return (
     <ScrollView
       style={styles.viewport}
@@ -127,7 +148,7 @@ export function MatrixTable({
           row headers level with the columns as the user scrolls down. */}
       <View style={styles.table}>
         <View style={[styles.frozenPane, { width: frozenWidth }]}>
-          <View style={[styles.frozenHeader, { height: HEADER_HEIGHT }]}>
+          <View style={[styles.frozenHeader, { height: frozenHeaderHeight }]}>
             <Text variant="label" tone="secondary" numberOfLines={2}>
               {frozenHeader}
             </Text>
@@ -149,16 +170,16 @@ export function MatrixTable({
 
         <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.scroller}>
           <View>
-            {columnGroups && columnGroups.length > 0 ? (
-              <View style={styles.groupRow}>
-                {columnGroups.map((group) => (
+            {hasGroups ? (
+              <View style={[styles.groupRow, { height: GROUP_HEADER_HEIGHT }]}>
+                {columnGroups!.map((group) => (
                   <View
                     key={group.key}
                     style={[
                       styles.groupCell,
                       {
-                        width: group.columnCount * (columns[group.startColumnIndex]?.width ?? DEFAULT_COLUMN_WIDTH),
-                        left: group.startColumnIndex * (columns[group.startColumnIndex]?.width ?? DEFAULT_COLUMN_WIDTH),
+                        width: columnsWidth(columns, group.startColumnIndex, group.columnCount),
+                        left: columnsWidth(columns, 0, group.startColumnIndex),
                       },
                     ]}
                   >
@@ -169,23 +190,30 @@ export function MatrixTable({
                 ))}
               </View>
             ) : null}
-            <View style={styles.headerRow}>
+            <View style={[styles.headerRow, { height: headerHeight }]}>
               {columns.map((column) => (
                 <View
                   key={column.key}
                   style={[
                     styles.headerCell,
-                    { width: column.width ?? DEFAULT_COLUMN_WIDTH, minHeight: HEADER_HEIGHT / 2 },
+                    { width: column.width ?? DEFAULT_COLUMN_WIDTH },
                     column.align === 'right' ? styles.alignRight : null,
+                    column.verticalSubtitle && column.subtitle ? styles.verticalHeaderCell : null,
                   ]}
                 >
                   <Text variant="label" numberOfLines={1}>
                     {column.title}
                   </Text>
                   {column.subtitle ? (
-                    <Text variant="caption" tone="secondary" numberOfLines={1}>
-                      {column.subtitle}
-                    </Text>
+                    column.verticalSubtitle ? (
+                      <Text variant="caption" tone="secondary" numberOfLines={1} style={verticalDateStyle}>
+                        {column.subtitle}
+                      </Text>
+                    ) : (
+                      <Text variant="caption" tone="secondary" numberOfLines={1}>
+                        {column.subtitle}
+                      </Text>
+                    )
                   ) : null}
                 </View>
               ))}
@@ -215,6 +243,49 @@ export function MatrixTable({
 }
 
 const HEADER_HEIGHT = 56;
+/** Tier 1 of a two-tier header: the merged `Block N` bar over its sub-weeks. */
+const GROUP_HEADER_HEIGHT = 28;
+/**
+ * Header height for columns whose subtitle is rotated top-to-bottom, e.g. the
+ * weekly sub-columns' `28/06–04/07`. The rotated run itself needs ~70px of
+ * vertical space plus the sub-week label above it, so the row grows past
+ * `HEADER_HEIGHT` instead of clipping the date.
+ */
+const VERTICAL_HEADER_HEIGHT = 116;
+/** Minimum height of a cell carrying a rotated date, so the run never overflows. */
+const VERTICAL_DATE_MIN_HEIGHT = 110;
+
+/** Total pixel width of `count` columns starting at `startIndex`. */
+function columnsWidth(columns: MatrixColumnDef[], startIndex: number, count: number): number {
+  let width = 0;
+  for (let index = startIndex; index < startIndex + count; index += 1) {
+    width += columns[index]?.width ?? DEFAULT_COLUMN_WIDTH;
+  }
+  return width;
+}
+
+/**
+ * The CSS that turns `28/06–04/07` into a top-to-bottom run inside a column
+ * that is far too narrow to hold it horizontally.
+ *
+ * `writingMode: 'vertical-rl'` stacks the glyphs down the column and
+ * `rotate(180deg)` flips the run so it reads downward rather than upward —
+ * the "rotate top down" orientation spreadsheet headers use. `whiteSpace` and
+ * `writingMode` are web-style names React Native's `TextStyle` does not
+ * declare, but react-native-web forwards them to the DOM verbatim, which is
+ * exactly where they are needed; the cast keeps TypeScript out of that
+ * arrangement.
+ */
+const verticalDateStyle = {
+  writingMode: 'vertical-rl',
+  transform: [{ rotate: '180deg' }],
+  textTransform: 'uppercase',
+  whiteSpace: 'nowrap',
+  fontSize: 10,
+  fontWeight: '600',
+  paddingVertical: 6,
+  alignSelf: 'center',
+} as TextStyle;
 
 const accentColors: Record<Tone, string> = {
   neutral: colors.textMuted,
@@ -295,6 +366,11 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     borderRightWidth: 1,
     borderRightColor: colors.border,
+  },
+  verticalHeaderCell: {
+    minHeight: VERTICAL_DATE_MIN_HEIGHT,
+    alignItems: 'center',
+    gap: spacing.xs,
   },
   row: {
     flexDirection: 'row',

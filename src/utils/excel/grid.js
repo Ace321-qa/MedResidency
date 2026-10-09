@@ -330,6 +330,38 @@ function masterBlockColumns(headers) {
 }
 
 /**
+ * Cell values that say "no rotation here" in words.
+ *
+ * A coordinator writes `Off`, `Unassigned` or a bare dash into a week they
+ * mean to leave vacant. Those are *not* rotation names — auto-cataloguing
+ * them would put a rotation called "-" in the programme's catalogue — so the
+ * parser reads them as an explicit empty week (`null`) instead.
+ *
+ * A truly blank cell is different: blank is how a merged cell looks after
+ * SheetJS reads it, so blank keeps the forward-fill rule below.
+ */
+const UNASSIGNED_MARKERS = new Set([
+  'unassigned',
+  'un assigned',
+  'off',
+  'vacant',
+  'vacancy',
+  'none',
+  'n/a',
+  'na',
+  'free',
+  'tbd',
+  '-',
+  '–',
+  '—',
+]);
+
+/** True when a filled cell means "leave this week unassigned". */
+function isUnassignedMarker(value) {
+  return UNASSIGNED_MARKERS.has(String(value ?? '').trim().toLowerCase());
+}
+
+/**
  * Carry a rotation forward across the empty weeks of its block.
  *
  * A 4-week rotation is entered once — often as a merged cell, which SheetJS
@@ -340,14 +372,20 @@ function masterBlockColumns(headers) {
  * empty rather than inheriting its predecessor's rota, because "no rotation
  * here" is a gap a coordinator needs to see.
  *
- * @param {Record<number, string>} weeks
+ * An explicit vacancy marker (`null`) is neither a value nor a gap: it stays
+ * empty *and* ends the run, so the blanks after an "Off" week do not inherit
+ * the rotation from before it.
+ *
+ * @param {Record<number, string|null|undefined>} weeks
  */
 function forwardFillWeeks(weeks) {
   for (let blockNumber = 1; blockNumber <= BLOCK_COUNT; blockNumber += 1) {
     let last = null;
     for (const week of blockWeeks(blockNumber)) {
       const value = weeks[week.weekNumber];
-      if (value) {
+      if (value === null) {
+        last = null;
+      } else if (value) {
         last = value;
       } else if (last !== null) {
         weeks[week.weekNumber] = last;
@@ -365,7 +403,7 @@ function forwardFillWeeks(weeks) {
  *   layout: 'dates'|'headings',
  *   weekColumns: {week:number, columnIndex:number}[],
  *   cells: {row:number, corporateId:string, name:string, level:string,
- *           mobile:string, email:string, weeks:Record<number,string>}[],
+ *           mobile:string, email:string, weeks:Record<number,string|null>}[],
  * }}
  */
 function parseMasterGrid(buffer) {
@@ -451,7 +489,11 @@ function parseMasterGrid(buffer) {
     const weeks = {};
     for (const { week, columnIndex } of weekColumns) {
       const value = String(source[columnIndex] ?? '').trim();
-      if (value !== '') weeks[week] = value;
+      if (value === '') continue;
+      // "Off"/"Unassigned"/"-" is an explicit vacancy, not a rotation name:
+      // store it as `null` so it survives as an empty week below instead of
+      // being auto-catalogued as a rotation.
+      weeks[week] = isUnassignedMarker(value) ? null : value;
     }
     forwardFillWeeks(weeks);
 

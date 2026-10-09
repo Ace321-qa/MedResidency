@@ -633,11 +633,16 @@ export async function uploadSpreadsheet(
   }
 
   if (body.success === true) {
+    // The server knows how many cells it skipped and which rotations it had
+    // to catalogue, so its summary ("412 assignments saved … 3 rotations
+    // catalogued. 140 cells left unassigned.") is what the banner should
+    // show. Only endpoints that send no summary fall back to a count line.
+    const serverSummary = typeof body.summary === 'string' ? body.summary.trim() : '';
     const count = body.added?.length ?? body.updated ?? body.count;
     return {
       success: true,
       issues: [],
-      summary: typeof count === 'number' ? `${count} row${count === 1 ? '' : 's'} imported.` : 'Import complete.',
+      summary: serverSummary || (typeof count === 'number' ? `${count} row${count === 1 ? '' : 's'} imported.` : 'Import complete.'),
     };
   }
 

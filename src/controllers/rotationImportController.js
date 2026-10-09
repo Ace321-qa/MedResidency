@@ -6,6 +6,7 @@ const {
   parseCcc,
 } = require('../utils/excel/grid');
 const { academicYearMatchValues } = require('../utils/academicYear');
+const { MAX_ABBREVIATION_LENGTH, MAX_NAME_LENGTH } = require('../utils/excel/catalogue');
 const {
   WEEKS_PER_BLOCK,
   clampWindow,
@@ -41,7 +42,12 @@ function tokens(value) {
  * four. Gaps (`week 1` and `week 3` only) break the run deliberately: two
  * separate postings are two separate windows.
  *
- * @param {{week:number, rotation:{id:number}}[]} entries Sorted by week.
+ * Runs compare `rotation.identity` rather than `rotation.id`: a rotation the
+ * import is about to catalogue has no id yet, and every pending week of it must
+ * still group into the same run. The identity is `id:<n>` for a stored rotation
+ * and `new:<key>` for one being created.
+ *
+ * @param {{week:number, rotation:{identity:string}}[]} entries Sorted by week.
  */
 function runsOf(entries) {
   const runs = [];
@@ -49,7 +55,7 @@ function runsOf(entries) {
     const current = runs[runs.length - 1];
     if (
       current &&
-      current.rotation.id === entry.rotation.id &&
+      current.rotation.identity === entry.rotation.identity &&
       entry.week === current.weeks[current.weeks.length - 1] + 1
     ) {
       current.weeks.push(entry.week);
@@ -58,6 +64,35 @@ function runsOf(entries) {
     runs.push({ rotation: entry.rotation, weeks: [entry.week] });
   }
   return runs;
+}
+
+/**
+ * How many warnings a single import carries into the response before the rest
+ * are counted but not listed — a spreadsheet with a 52-week hole in every row
+ * should still return a readable payload.
+ */
+const MAX_WARNINGS = 50;
+
+/**
+ * The key a rotation name or abbreviation matches on: lower-cased, with
+ * punctuation collapsed to single spaces, so `Medicine Inpatient`,
+ * `medicine  inpatient` and `MEDICINE-INPATIENT` are all one rotation.
+ */
+function rotationMatchKey(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * The looser key behind the contains-fallback: no spaces either, so `PHC Clinic`
+ * and `PHCCLINIC` line up. Only used after the exact key has missed.
+ */
+function rotationLooseKey(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
 }
 
 async function resolveProgram(conn, requestedId) {
@@ -104,11 +139,19 @@ class RotationImportController {
    * becomes one `PARTIAL_BLOCK` assignment per run, each carrying its own
    * date window, which is exactly how the grid draws it back.
    *
-   * Every cell is validated before anything is written: an unknown Corporate ID
-   * or an unrecognised rotation aborts the whole file with a `Row N:` message
-   * rather than importing the rows that happened to be valid. A partially
-   * imported grid is worse than a rejected one — the coordinator cannot tell
-   * which half landed.
+   * Validation is strict about *who* (an unknown Corporate ID aborts the file,
+   * because a half-imported roster cannot be untangled) and forgiving about
+   * *what*: a rotation name this programme has never catalogued is matched
+   * case- and punctuation-insensitively against the catalogue by name and code,
+   * and anything still unknown is catalogued as a new active rotation for the
+   * programme — the grid is the institution's source of truth for its own
+   * rota — so a workbook typed one abbreviation at a time imports cleanly.
+   *
+   * A week the file leaves blank stays blank (the merged-cell forward-fill has
+   * already run in the parser), a week marked `Off`/`Unassigned` is an explicit
+   * vacancy, and a week whose block calendar does not exist yet is skipped with
+   * a warning — none of them fail the file, because the remaining weeks are
+   * still exactly what the coordinator entered.
    *
    * Sample rows shipped with the template (`SAMPLE-001`, …) are skipped, so a
    * workbook uploaded untouched imports nothing instead of failing on two
@@ -194,16 +237,85 @@ class RotationImportController {
           WHERE program_id = ? AND is_active = 1`,
         [program.id],
       );
-      const rotationsByName = new Map();
+      // Every code the programme has ever used, active or not, so an
+      // auto-catalogued abbreviation cannot collide with a retired one.
+      const [codeRows] = await conn.query(
+        'SELECT rotation_code FROM rotations WHERE program_id = ?',
+        [program.id],
+      );
+      const takenCodes = new Set(
+        codeRows.map((row) => String(row.rotation_code ?? '').trim().toLowerCase()).filter(Boolean),
+      );
+
+      // rotation key -> rotation. Stored rotations carry their id; a rotation
+      // this import is about to catalogue carries `id: null` until the
+      // transaction inserts it. Both live in the same maps so the same cell
+      // spelling always resolves to the same object (and thus the same run).
+      const exactByKey = new Map();
+      const looseByKey = new Map();
+      const registerKeys = (rotation, name, code) => {
+        const exact = rotationMatchKey(name);
+        if (exact && !exactByKey.has(exact)) exactByKey.set(exact, rotation);
+        const loose = rotationLooseKey(name);
+        if (loose && !looseByKey.has(loose)) looseByKey.set(loose, rotation);
+        if (code === undefined || code === null) return;
+        const codeExact = rotationMatchKey(code);
+        if (codeExact && !exactByKey.has(codeExact)) exactByKey.set(codeExact, rotation);
+        const codeLoose = rotationLooseKey(code);
+        if (codeLoose && !looseByKey.has(codeLoose)) looseByKey.set(codeLoose, rotation);
+      };
       for (const rotation of rotations) {
-        rotationsByName.set(rotation.rotation_name.trim().toLowerCase(), rotation);
-        rotationsByName.set(rotation.rotation_code.trim().toLowerCase(), rotation);
+        rotation.identity = `id:${rotation.id}`;
+        registerKeys(rotation, rotation.rotation_name, rotation.rotation_code);
       }
+
+      /**
+       * The rotation a cell names — never a rejection.
+       *
+       * Exact key first (`medicine inpatient` = `MEDICINE INPATIENT`), then the
+       * no-punctuation key (`PHCC` = `PHC-CC`), then a contains match between
+       * 4-character keys (`Cardio` finds `Cardiology`) as a deliberate
+       * near-miss fallback. Anything left over is catalogued as a new rotation
+       * for this programme and registered in the maps, so the next cell with
+       * the same spelling joins its run instead of cataloguing twice.
+       *
+       * Returns `null` only when the cell carries no name at all.
+       */
+      const resolveRotation = (value) => {
+        const name = String(value)
+          .trim()
+          .slice(0, MAX_NAME_LENGTH);
+        const exact = exactByKey.get(rotationMatchKey(name));
+        if (exact) return exact;
+        const loose = rotationLooseKey(name);
+        if (!loose) return null;
+        const near = looseByKey.get(loose);
+        if (near) return near;
+        if (loose.length >= 4) {
+          for (const [key, rotation] of looseByKey) {
+            if (key.length >= 4 && (key.includes(loose) || loose.includes(key))) return rotation;
+          }
+        }
+        const pending = { id: null, rotation_name: name, rotation_code: null, identity: `new:${loose}` };
+        registerKeys(pending, name);
+        return pending;
+      };
 
       const issues = [];
       if (parsed.cells.length === 0) {
         issues.push({ field: 'File', message: 'no resident rows were found under the header' });
       }
+
+      // Non-fatal: cells the import cannot place. The file still succeeds —
+      // a missing block in week 40 must not throw away weeks 1-39 — but the
+      // coordinator is told exactly what was left unassigned.
+      const warnings = [];
+      let skippedCells = 0;
+      let vacantCells = 0;
+      const warn = (row, field, message) => {
+        skippedCells += 1;
+        if (warnings.length < MAX_WARNINGS) warnings.push({ row, field, message });
+      };
 
       const residentCells = parsed.cells.filter(
         (cell) => !/^sample/i.test(String(cell.corporateId ?? '')),
@@ -255,23 +367,22 @@ class RotationImportController {
         // instead of failing halfway through a write.
         const byBlock = new Map();
         for (const week of weeks) {
-          const block = blockForWeek(week);
-          if (!block) {
-            issues.push({
-              row: cell.row,
-              field: `Week ${week}`,
-              message: `has no rotation block in ${academicYear}`,
-            });
+          const rotationName = cell.weeks[week];
+          if (rotationName == null) {
+            // An explicit `Off`/`Unassigned`/`-` marker (the parser stores
+            // those as null): a vacancy the coordinator asked for, not a
+            // missing rotation.
+            vacantCells += 1;
             continue;
           }
-          const rotationName = cell.weeks[week];
-          const rotation = rotationsByName.get(String(rotationName).trim().toLowerCase());
+          const block = blockForWeek(week);
+          if (!block) {
+            warn(cell.row, `Week ${week}`, `has no rotation block in ${academicYear} — left unassigned`);
+            continue;
+          }
+          const rotation = resolveRotation(rotationName);
           if (!rotation) {
-            issues.push({
-              row: cell.row,
-              field: `Week ${week}`,
-              message: `"${rotationName}" is not a rotation in this programme`,
-            });
+            warn(cell.row, `Week ${week}`, `"${rotationName}" does not name a rotation — left unassigned`);
             continue;
           }
           if (!byBlock.has(block)) byBlock.set(block, []);
@@ -284,11 +395,11 @@ class RotationImportController {
             const last = weekWindow(run.weeks[run.weeks.length - 1]);
             const window = clampWindow(first.start, last.end, block.start_date_iso, block.end_date_iso);
             if (!window) {
-              issues.push({
-                row: cell.row,
-                field: `Week ${run.weeks[0]}`,
-                message: `falls outside ${block.block_name} (${block.start_date_iso} to ${block.end_date_iso})`,
-              });
+              warn(
+                cell.row,
+                `Week ${run.weeks[0]}`,
+                `falls outside ${block.block_name} (${block.start_date_iso} to ${block.end_date_iso}) — left unassigned`,
+              );
               continue;
             }
             planned.push({ residentId, block, rotation: run.rotation, window });
@@ -300,14 +411,48 @@ class RotationImportController {
         return res.status(400).json({ success: false, issues });
       }
       if (planned.length === 0) {
+        const detail =
+          skippedCells > 0
+            ? `no week could be placed against the ${academicYear} block calendar (${skippedCells} cell${
+                skippedCells === 1 ? '' : 's'
+              } left unassigned)`
+            : 'no rotation cells were filled in under the header';
         return res.status(400).json({
           success: false,
-          issues: [{ field: 'File', message: 'no rotation cells were filled in under the header' }],
+          issues: [{ field: 'File', message: detail }],
         });
       }
 
       await conn.beginTransaction();
       inTransaction = true;
+
+      // Auto-catalogue: rotations the workbook named that this programme did
+      // not have. Inserted inside the transaction, after planning and before
+      // any assignment references them, so a later failure — or a request that
+      // never reaches here — leaves no catalogue rows behind.
+      const createdRotations = [];
+      for (const entry of planned) {
+        if (entry.rotation.id != null) continue;
+        const name = String(entry.rotation.rotation_name).trim();
+        const base = name.toUpperCase().slice(0, MAX_ABBREVIATION_LENGTH);
+        let code = base;
+        let suffix = 2;
+        while (takenCodes.has(code.toLowerCase())) {
+          const tail = `-${suffix}`;
+          code = `${base.slice(0, MAX_ABBREVIATION_LENGTH - tail.length)}${tail}`;
+          suffix += 1;
+        }
+        takenCodes.add(code.toLowerCase());
+        const [result] = await conn.query(
+          `INSERT INTO rotations (program_id, rotation_code, rotation_name, department_name)
+           VALUES (?, ?, ?, ?)`,
+          [program.id, code, name, name],
+        );
+        entry.rotation.id = result.insertId;
+        entry.rotation.rotation_code = code;
+        entry.rotation.identity = `id:${result.insertId}`;
+        createdRotations.push(name);
+      }
 
       // The sheet is authoritative for a block it fills: replace whatever was
       // there rather than layering a second set of rows over it.
@@ -347,12 +492,31 @@ class RotationImportController {
 
       const rows = residentCells.length;
       const sampleNote = sampleRows > 0 ? ` ${sampleRows} sample row${sampleRows === 1 ? '' : 's'} ignored.` : '';
+      const summaryParts = [
+        `${planned.length} weekly assignment${planned.length === 1 ? '' : 's'} saved across ${rows} resident row${
+          rows === 1 ? '' : 's'
+        }.${sampleNote}`,
+      ];
+      if (createdRotations.length > 0) {
+        summaryParts.push(
+          `${createdRotations.length} new rotation${createdRotations.length === 1 ? '' : 's'} catalogued (${createdRotations.join(', ')}).`,
+        );
+      }
+      if (vacantCells > 0) {
+        summaryParts.push(`${vacantCells} cell${vacantCells === 1 ? '' : 's'} marked off/unassigned left empty.`);
+      }
+      if (skippedCells > 0) {
+        summaryParts.push(
+          `${skippedCells} cell${skippedCells === 1 ? '' : 's'} could not be placed against the block calendar and ${skippedCells === 1 ? 'was' : 'were'} left unassigned.`,
+        );
+      }
       return res.json({
         success: true,
         updated: planned.length,
-        summary: `${planned.length} weekly assignment${planned.length === 1 ? '' : 's'} saved across ${rows} resident row${
-          rows === 1 ? '' : 's'
-        }.${sampleNote}`,
+        catalogued: createdRotations,
+        warnings,
+        skipped_cells: skippedCells,
+        summary: summaryParts.join(' '),
       });
     } catch (error) {
       if (inTransaction) {

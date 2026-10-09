@@ -35,8 +35,6 @@ import { colors, radius, spacing } from '../../../theme';
 import type { CohortGridCell } from '../../../types/api';
 import { goBack } from '../../../navigation/back';
 import {
-  allWeeks,
-  formatDmy,
   weekNumberForDate,
   weekWindow,
   MASTER_GRID_START,
@@ -182,8 +180,7 @@ export default function MasterGridScreen() {
     };
   }, [grid.data]);
 
-  const { columns: weeklyCols, groups: weeklyGroups } = useMemo(() => buildMasterGridColumns(), []);
-  const weeksList = useMemo(() => allWeeks(), []);
+  const { columns: columnsWeekly, groups: weeklyGroups } = useMemo(() => buildMasterGridColumns(), []);
 
   const columnsBlock = useMemo<MatrixColumnDef[]>(
     () =>
@@ -198,17 +195,6 @@ export default function MasterGridScreen() {
         };
       }),
     [blocksByNumber],
-  );
-
-  const columnsWeekly = useMemo<MatrixColumnDef[]>(
-    () =>
-      weeksList.map((w) => ({
-        key: `week-${w.weekNumber}`,
-        title: `${w.blockNumber}.${w.weekInBlock}`,
-        subtitle: `${formatDmy(w.start)}–${formatDmy(w.end)}`,
-        width: 110,
-      })),
-    [weeksList],
   );
 
   const rowsBlock = useMemo<MatrixRowDef[]>(
