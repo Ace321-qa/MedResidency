@@ -145,3 +145,14 @@ export function getAcademicYears(monthStart: number = 7, count: number = 3): str
   }
   return years;
 }
+
+/** Get the start date (YYYY-MM-DD) for an academic year in display form (e.g., 2026/2027) */
+export function getAcademicYearStartDate(academicYear: string | null | undefined): string | null {
+  const display = formatAcademicYear(academicYear);
+  if (!display.includes('/')) return null;
+  const [startYearStr] = display.split('/');
+  const startYear = parseInt(startYearStr, 10);
+  // Default: June 28 of start year
+  if (Number.isNaN(startYear)) return null;
+  return `${startYear}-06-28`;
+}

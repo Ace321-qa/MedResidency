@@ -88,6 +88,8 @@ export interface MatrixTableProps {
   frozenWidth?: number;
   /** Uniform row height shared by both panes. Text beyond it is clipped. */
   rowHeight?: number;
+  /** Allow rows to auto-size based on content (ignores fixed rowHeight) */
+  autoHeight?: boolean;
   /** Header text for the frozen pane's own column. */
   frozenHeader?: string;
   emptyTitle?: string;
@@ -107,6 +109,7 @@ export function MatrixTable({
   rows,
   frozenWidth = DEFAULT_FROZEN_WIDTH,
   rowHeight = DEFAULT_ROW_HEIGHT,
+  autoHeight = false,
   frozenHeader = '',
   emptyTitle = 'Nothing to show yet',
   emptyMessage,
@@ -160,7 +163,7 @@ export function MatrixTable({
               disabled={!row.onPress}
               accessibilityRole={row.onPress ? 'button' : 'text'}
               accessibilityLabel={row.accessibilityLabel}
-              style={[styles.frozenCell, { height: rowHeight }]}
+              style={[styles.frozenCell, autoHeight ? null : { height: rowHeight }]}
             >
               {row.accent ? <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} /> : null}
               {row.frozenContent ?? null}
@@ -220,12 +223,13 @@ export function MatrixTable({
             </View>
 
             {rows.map((row) => (
-              <View key={row.key} style={[styles.row, { height: rowHeight }]}>
+              <View key={row.key} style={[styles.row, autoHeight ? styles.rowAuto : { height: rowHeight }]}>
                 {columns.map((column) => (
                   <View
                     key={column.key}
                     style={[
                       styles.cell,
+                      autoHeight ? styles.cellAuto : null,
                       { width: column.width ?? DEFAULT_COLUMN_WIDTH },
                       column.align === 'right' ? styles.alignRight : null,
                     ]}
@@ -375,6 +379,10 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
   },
+  rowAuto: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
   cell: {
     justifyContent: 'center',
     paddingHorizontal: spacing.sm,
@@ -385,6 +393,10 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
     backgroundColor: colors.surface,
     overflow: 'hidden',
+  },
+  cellAuto: {
+    justifyContent: 'flex-start',
+    overflow: 'visible',
   },
   alignRight: {
     alignItems: 'flex-end',

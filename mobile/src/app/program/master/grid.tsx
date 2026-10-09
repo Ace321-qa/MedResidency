@@ -187,12 +187,12 @@ export default function MasterGridScreen() {
       BLOCK_NUMBERS.map((blockNumber) => {
         const block = blocksByNumber.get(blockNumber);
         const window = block?.startDateIso && block?.endDateIso ? describeWindow(block.startDateIso, block.endDateIso) : null;
-        return {
-          key: block ? `block-${block.block_id}` : `block-missing-${blockNumber}`,
-          title: block ? block.block_name || `Block ${blockNumber}` : `Block ${blockNumber}`,
-          subtitle: block ? window ?? 'No dates recorded' : 'Not created',
-          width: 132,
-        };
+          return {
+            key: block ? `block-${block.block_id}` : `block-missing-${blockNumber}`,
+            title: block ? block.block_name || `Block ${blockNumber}` : `Block ${blockNumber}`,
+            subtitle: block ? window ?? 'No dates recorded' : window ?? 'No dates recorded',
+            width: 160,
+          };
       }),
     [blocksByNumber],
   );
@@ -208,10 +208,12 @@ export default function MasterGridScreen() {
           const block = blocksByNumber.get(blockNumber);
           const columnKey = block ? `block-${block.block_id}` : `block-missing-${blockNumber}`;
           if (!block) {
-            cells[columnKey] = (
-              <Text variant="bodySmall" tone="disabled" align="center">
-                n/a
-              </Text>
+            cells[columnKey] = cellNode([], () =>
+              openAssignSheet({
+                residentId: resident.resident_id,
+                residentName: resident.resident_name,
+                blockNumber: blockNumber,
+              }),
             );
             continue;
           }
@@ -434,6 +436,7 @@ export default function MasterGridScreen() {
               frozenHeader="Resident"
               frozenWidth={172}
               rowHeight={58}
+              autoHeight
               emptyTitle="No blocks to map"
               emptyMessage="Create an academic block to start building the rota."
             />
@@ -445,17 +448,17 @@ export default function MasterGridScreen() {
               frozenHeader="Resident"
               frozenWidth={172}
               rowHeight={58}
+              autoHeight
               emptyTitle="No weeks to map"
               emptyMessage="Create an academic block to start building the rota."
             />
           )}
 
           {missingBlocks.length > 0 ? (
-            <Text variant="caption" tone="muted" style={styles.footnote}>
-              Block{missingBlocks.length === 1 ? '' : 's'} {missingBlocks.join(', ')} not created for this
-              year — the columns are kept so the gap is visible.
-            </Text>
-          ) : null}
+        <Text variant="caption" tone="muted" style={styles.footnote}>
+          Block{missingBlocks.length === 1 ? '' : 's'} {missingBlocks.join(', ')} may need block records for assignment operations.
+        </Text>
+      ) : null}
         </>
       ) : null}
 
@@ -506,6 +509,8 @@ function cellNode(
     <View style={styles.cellBadges}>
       {assignments.map((assignment, index) => {
         const palette = rotationPalette(assignment.rotation_code, assignment.rotation_id);
+        const weekNum = getWeekNumberForAssignment(assignment);
+        const badgeLabel = weekNum ? `W${weekNum}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}` : rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name);
         return (
           <View
             key={assignment.assignment_id ?? `${assignment.rotation_id}-${index}`}
@@ -517,8 +522,8 @@ function cellNode(
               typeof assignment.assigned_weeks === 'number' ? assignment.assigned_weeks : null,
             )}
           >
-            <Text variant="caption" numberOfLines={1} style={{ color: palette.foreground }}>
-              {rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}
+            <Text numberOfLines={1} style={[styles.cellBadgeText, { color: palette.foreground }]}>
+              {badgeLabel}
             </Text>
           </View>
         );
@@ -572,17 +577,23 @@ const styles = StyleSheet.create({
     marginVertical: spacing.xs,
   },
   cellBadges: {
-    gap: 2,
+    gap: 4,
     flexDirection: 'column',
+    flexWrap: 'wrap',
+    padding: 6,
   },
   cellBadge: {
     borderWidth: 1,
     borderRadius: radius.sm,
-    paddingHorizontal: spacing.xs,
+    paddingHorizontal: 4,
     paddingVertical: 2,
   },
+  cellBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+  },
   addBadge: {
-    paddingHorizontal: spacing.xs,
+    paddingHorizontal: 4,
     paddingVertical: 2,
     alignItems: 'center',
   },

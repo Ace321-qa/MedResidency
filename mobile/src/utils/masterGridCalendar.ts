@@ -1,29 +1,9 @@
 import { addDays, diffDays, parseCalendarDate } from './dateCalc';
+import { getAcademicYearStartDate } from './academicYear';
 
 /**
  * The Master Rotation Grid calendar: 13 blocks × 4 weeks = 52 weekly columns,
  * starting Sunday 28/06/2026.
- *
- * The rules, from the institutional spreadsheet the platform mirrors:
- *
- *     week W start = 28/06/2026 + (W - 1) × 7 days   (always a Sunday)
- *     week W end   = start + 6 days                   (always a Saturday)
- *     block B      = weeks (B-1)×4 + 1 … B×4
- *
- *     Block 1 W1  28/06/2026 – 04/07/2026
- *     Block 1 W4  19/07/2026 – 25/07/2026
- *     Block 2 W1  26/07/2026 – 01/08/2026
- *     Block 13 W4 20/06/2027 – 26/06/2027
- *
- * `src/utils/masterGridCalendar.js` on the server is the mirror of this file:
- * the workbook the API generates, the columns this app draws and the weeks the
- * importer writes all describe the same 52 windows, and a one-week drift
- * between them puts a rotation in the wrong column of the grid.
- * `scripts/verify-master-grid-52w.js` checks both halves against the same
- * literal dates.
- *
- * All arithmetic is done on `YYYY-MM-DD` strings in UTC, through `dateCalc.ts`,
- * so a week never lands on a Monday because of a timezone round-trip.
  */
 
 /** Sunday 28 June 2026 — week 1, block 1. */
