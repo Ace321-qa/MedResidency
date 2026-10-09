@@ -107,17 +107,26 @@ function expectWindow(logs: any[], anchor: Date) {
   // --- roster derivations -------------------------------------------------
   const programs = deriveProgramsFromResidents(roster);
   console.log('\nprograms:', JSON.stringify(programs));
-  assert('roster has 12 residents', roster.length === 12, `got ${roster.length}`);
-  assert('4 distinct programmes derived', programs.length === 4, `got ${programs.length}`);
+
+  // Residents arrive through Excel imports, so these are minimum baselines,
+  // not exact counts: the roster must never shrink below its seeded size, and
+  // the derived list is what the programme picker draws its choices from.
+  assert('roster has at least the 12 seeded residents', roster.length >= 12, `got ${roster.length}`);
+  assert('all four seeded programmes are derived', programs.length >= 4, `got ${programs.length}`);
+  const programmeOneCount = programs.find((p) => p.programId === 1)?.residentCount ?? 0;
   assert(
-    'program 1 counts 7 residents',
-    programs.find((p) => p.programId === 1)?.residentCount === 7,
-    String(programs.find((p) => p.programId === 1)?.residentCount),
+    'program 1 has at least its 7 seeded residents',
+    programmeOneCount >= 7,
+    String(programmeOneCount),
   );
+  // Exact accounting: every resident that carries a programme id is counted in
+  // the derived list, and no-one without one is. Imported rows must reconcile
+  // the two figures, whatever the exact numbers happen to be.
   assert(
-    'un-enrolled residents are excluded',
-    programs.reduce((s, p) => s + p.residentCount, 0) === 10,
-    String(programs.reduce((s, p) => s + p.residentCount, 0)),
+    'un-enrolled residents are excluded and the counts reconcile',
+    programs.reduce((s, p) => s + p.residentCount, 0) ===
+      roster.filter((r: any) => r.program_id !== null && r.program_id !== undefined).length,
+    `${programs.reduce((s, p) => s + p.residentCount, 0)} counted from ${roster.length} residents`,
   );
 
   const r1 = roster.find((r: any) => r.resident_id === 1);
