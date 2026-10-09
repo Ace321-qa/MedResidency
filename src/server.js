@@ -31,6 +31,13 @@ const rotationRoutes = require('./routes/rotationRoutes');
 // Mount under /api/v1/rotations
 app.use('/api/v1/rotations', rotationRoutes);
 
+// Rotation catalogue management (list, create, edit, delete, template, import).
+// Mounted after the rotation routes above: nothing there matches a bare
+// `/catalogue` path, so the request falls through to this router.
+const rotationCatalogueRoutes = require('./routes/rotationCatalogueRoutes');
+
+app.use('/api/v1/rotations/catalogue', rotationCatalogueRoutes);
+
 // Import the attendance routes
 const attendanceRoutes = require('./routes/attendanceRoutes');
 

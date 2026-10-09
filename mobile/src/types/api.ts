@@ -112,6 +112,36 @@ export interface RotationDefinition {
   is_active: number;
 }
 
+/**
+ * One row of `GET /rotations/catalogue?program_id=`.
+ *
+ * The API speaks the catalogue's own field names — `full_name`, `department`,
+ * `abbreviation` — which are the `rotation_name`, `department_name` and
+ * `rotation_code` columns of the same `rotations` rows the master grid and the
+ * assignment forms read. The extra two fields are carried through so a screen
+ * never has to call a second endpoint to know whether a rotation is available.
+ */
+export interface RotationCatalogueEntry {
+  id: number;
+  program_id: number;
+  full_name: string;
+  department: string;
+  abbreviation: string;
+  default_duration_weeks: number;
+  is_active: number;
+  created_at: IsoDateString | null;
+  updated_at: IsoDateString | null;
+}
+
+/** `POST /rotations/catalogue` / `PUT /rotations/catalogue/:id` — the form. */
+export interface CatalogueRotationPayload {
+  program_id: number;
+  full_name: string;
+  department: string;
+  /** Sent upper-cased; the API enforces one per programme. */
+  abbreviation: string;
+}
+
 export interface ResidentIdentifier {
   id: number;
   identifier_type: string;

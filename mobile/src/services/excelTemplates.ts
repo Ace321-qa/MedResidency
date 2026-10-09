@@ -21,8 +21,8 @@ import { saveSpreadsheet, type SavedFile } from '../utils/fileSave';
  * required" — rather than a JSON blob nobody can read.
  */
 
-/** The four workbooks this app hands out. */
-export type TemplateKind = 'roster' | 'master' | 'ccc' | 'timesheet';
+/** The five workbooks this app hands out. */
+export type TemplateKind = 'roster' | 'master' | 'ccc' | 'timesheet' | 'catalogue';
 
 export interface TemplateSpec {
   fileName: string;
@@ -45,6 +45,28 @@ export const ROSTER_COLUMNS = [
   'Start Date (YYYY-MM-DD)',
   'Expected Completion Date (YYYY-MM-DD)',
 ] as const;
+
+/** The rotation catalogue's three columns, in the order the API parses them. */
+export const CATALOGUE_COLUMNS = [
+  'Full Rotation Name',
+  'Hospital Department',
+  'Abbreviation',
+] as const;
+
+/**
+ * Sample catalogue rows — identical to the ones `src/utils/excel/catalogue.js`
+ * ships, so a workbook built on this device and one downloaded from the API
+ * are the same file as far as the import is concerned. They are real rotations
+ * rather than placeholders: importing the untouched template gives a new
+ * programme five usable rows, and importing it twice upserts the same five.
+ */
+const CATALOGUE_SAMPLE_ROWS: XlsxCellValue[][] = [
+  ['Continuity Clinic', 'Primary Health Care', 'PHC'],
+  ['Inpatient Medicine', 'Internal Medicine', 'MED-INP'],
+  ['General Surgery Inpatient', 'Department of Surgery', 'SURG-INP'],
+  ['Pediatrics Outpatient', 'Pediatrics', 'PEDS-OPD'],
+  ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD'],
+];
 
 /** Thirteen block columns, because the cohort grid reserves all of them. */
 const MASTER_COLUMNS: XlsxCellValue[] = [
@@ -86,6 +108,12 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
         '2029-06-30',
       ],
     ],
+  },
+  catalogue: {
+    fileName: 'rotations_catalogue_template.xlsx',
+    endpoint: '/rotations/catalogue/template',
+    sheetName: 'Rotations',
+    rows: [[...CATALOGUE_COLUMNS], ...CATALOGUE_SAMPLE_ROWS],
   },
   master: {
     fileName: 'master_grid_template.xlsx',
@@ -657,6 +685,7 @@ export const downloadRosterTemplate = () => downloadTemplate('roster');
 export const downloadMasterGridTemplate = () => downloadTemplate('master');
 export const downloadCccTemplate = () => downloadTemplate('ccc');
 export const downloadMonthlyTimesheetTemplate = () => downloadTemplate('timesheet');
+export const downloadCatalogueTemplate = () => downloadTemplate('catalogue');
 
 export const uploadRoster = (file: DocumentPicker.DocumentPickerAsset, programId?: number) =>
   uploadSpreadsheet('/roster/import', file, programId ? { program_id: programId } : {});
@@ -673,3 +702,12 @@ export const uploadCccMatrix = (
 
 export const uploadTimesheet = (file: DocumentPicker.DocumentPickerAsset, residentId: number) =>
   uploadSpreadsheet('/attendance/import', file, { resident_id: residentId });
+
+/**
+ * Upload a filled-in catalogue workbook.
+ *
+ * The server upserts on the programme's unique abbreviation, so re-uploading
+ * the same file updates the rows it names instead of duplicating them.
+ */
+export const uploadCatalogue = (file: DocumentPicker.DocumentPickerAsset, programId: number) =>
+  uploadSpreadsheet('/rotations/catalogue/import', file, { program_id: programId });

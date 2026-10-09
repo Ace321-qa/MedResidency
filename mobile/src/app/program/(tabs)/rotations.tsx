@@ -31,8 +31,10 @@ import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '
  *
  * Blocks can be created here; `POST /rotations/blocks` exists and the form is in
  * `../block`. Assigning a resident to a rotation lives in `../assignments/new`,
- * so this screen links rather than writes; the rotation *definitions* themselves
- * stay seeded data.
+ * so this screen links rather than writes. The rotation *definitions* are read
+ * here and managed in `../rotations/catalogue` — creating, renaming and bulk
+ * importing them needs a table of its own, which is why this list opens that
+ * screen instead of growing inline edit controls.
  */
 
 type View2 = 'BLOCKS' | 'ROTATIONS';
@@ -182,6 +184,13 @@ export default function ProgramRotationsScreen() {
                 onPress={() => router.push('/program/assignments/new' as any)}
                 style={styles.addButton}
               />
+              <Button
+                label="Rotations Catalogue"
+                variant="outline"
+                icon={Library}
+                onPress={() => router.push('/program/rotations/catalogue')}
+                style={styles.addButton}
+              />
             </>
           ) : null}
         </>
@@ -202,6 +211,8 @@ export default function ProgramRotationsScreen() {
                 icon={Library}
                 title="No rotations"
                 message="No rotation definitions are recorded for this programme."
+                actionLabel="Manage the catalogue"
+                onActionPress={() => router.push('/program/rotations/catalogue')}
               />
             </Card>
           ) : null}
@@ -220,11 +231,23 @@ export default function ProgramRotationsScreen() {
                       tone={rotation.is_active === 1 ? 'success' : 'neutral'}
                     />
                   }
+                  onPress={() => router.push('/program/rotations/catalogue')}
+                  accessibilityHint="Opens the catalogue, where rotations are added, edited and imported"
                   last={index === visibleRotations.length - 1}
                   muted={rotation.is_active !== 1}
                 />
               ))}
             </Card>
+          ) : null}
+
+          {rotations.status === 'ready' && (rotations.data?.length ?? 0) > 0 ? (
+            <Button
+              label="Rotations Catalogue"
+              variant="secondary"
+              icon={Library}
+              onPress={() => router.push('/program/rotations/catalogue')}
+              style={styles.addButton}
+            />
           ) : null}
         </>
       )}
