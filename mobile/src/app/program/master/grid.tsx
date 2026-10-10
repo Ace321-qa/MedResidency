@@ -510,7 +510,7 @@ function cellNode(
       {assignments.map((assignment, index) => {
         const palette = rotationPalette(assignment.rotation_code, assignment.rotation_id);
         const weekNum = getWeekNumberForAssignment(assignment);
-        const blockNum = assignment.block_number ?? assignment.blockNumber;
+        const blockNum = assignment.block_number;
         const weekInBlock = weekNum ? ((weekNum - 1) % 4) + 1 : null;
         let badgeLabel: string;
         if (blockNum && weekInBlock) {
