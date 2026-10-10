@@ -1,4 +1,4 @@
-import type { ResidentListItem } from '../types/api';
+import type { ResidentIdentifier, ResidentListItem } from '../types/api';
 import { formatPgy } from './insights';
 
 /**
@@ -29,6 +29,18 @@ export function residentSubtitle(resident: {
   }
   if (resident.specialty_name) parts.push(resident.specialty_name);
   return parts.join(' · ') || 'Programme not assigned';
+}
+
+/**
+ * The first identifier of a given type, or `''`.
+ *
+ * Corporate id, email and mobile are all `resident_identifiers` rows rather
+ * than columns on `residents`, so the edit form reads them by type. Returning
+ * an empty string rather than `undefined` lets that form bind straight to a
+ * controlled input.
+ */
+export function identifierValue(identifiers: ResidentIdentifier[], type: string): string {
+  return identifiers.find((identifier) => identifier.identifier_type === type)?.identifier_value ?? '';
 }
 
 /** `ACTIVE_FULL_TIME` -> `Active full time`. */

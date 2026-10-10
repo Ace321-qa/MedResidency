@@ -188,6 +188,43 @@ export interface Resident {
   enrollments: ResidentEnrollment[];
 }
 
+/** The `resident_status` values the edit form offers and the API accepts. */
+export const RESIDENT_STATUSES = [
+  'ACTIVE_FULL_TIME',
+  'ACTIVE_PART_TIME',
+  'LEAVE_OF_ABSENCE',
+  'STARTED_OFF_CYCLE',
+  'GRADUATED',
+  'WITHDRAWN',
+] as const;
+
+export type ResidentStatus = (typeof RESIDENT_STATUSES)[number];
+
+/**
+ * `PUT /residents/:id` — the coordinator's edit form.
+ *
+ * Every field is optional; the API changes only what it receives. `email` and
+ * `mobile` are stored as identifiers beside the corporate id, because the
+ * `residents` table has no columns for them.
+ */
+export interface UpdateResidentPayload {
+  first_name?: string;
+  middle_initial?: string | null;
+  last_name?: string;
+  /** Selects which enrollment the PGY level and status apply to. */
+  program_id?: number;
+  pgy_level?: number;
+  resident_status?: ResidentStatus | string;
+  corporate_id?: string;
+  email?: string;
+  mobile?: string;
+}
+
+/** `DELETE /residents/:id` — `cascade` also removes attendance and rotation history. */
+export interface DeleteResidentOptions {
+  cascade?: boolean;
+}
+
 export type AssignmentType = 'FULL_BLOCK' | 'PARTIAL_BLOCK';
 
 /** `GET /rotations/assignments/resident/:resident_id`. */
