@@ -510,7 +510,16 @@ function cellNode(
       {assignments.map((assignment, index) => {
         const palette = rotationPalette(assignment.rotation_code, assignment.rotation_id);
         const weekNum = getWeekNumberForAssignment(assignment);
-        const badgeLabel = weekNum ? `W${weekNum}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}` : rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name);
+        const blockNum = assignment.block_number ?? assignment.blockNumber;
+        const weekInBlock = weekNum ? ((weekNum - 1) % 4) + 1 : null;
+        let badgeLabel: string;
+        if (blockNum && weekInBlock) {
+          badgeLabel = `${blockNum}.${weekInBlock}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
+        } else if (weekNum) {
+          badgeLabel = `${weekNum}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
+        } else {
+          badgeLabel = rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name);
+        }
         return (
           <View
             key={assignment.assignment_id ?? `${assignment.rotation_id}-${index}`}
@@ -522,7 +531,7 @@ function cellNode(
               typeof assignment.assigned_weeks === 'number' ? assignment.assigned_weeks : null,
             )}
           >
-            <Text numberOfLines={1} style={[styles.cellBadgeText, { color: palette.foreground }]}>
+            <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.cellBadgeText, { color: palette.foreground }]}>
               {badgeLabel}
             </Text>
           </View>
@@ -579,14 +588,18 @@ const styles = StyleSheet.create({
   cellBadges: {
     gap: 4,
     flexDirection: 'column',
-    flexWrap: 'wrap',
+    flexWrap: 'nowrap',
     padding: 6,
+    overflow: 'hidden',
+    flex: 1,
+    alignItems: 'stretch',
   },
   cellBadge: {
     borderWidth: 1,
     borderRadius: radius.sm,
     paddingHorizontal: 4,
     paddingVertical: 2,
+    overflow: 'hidden',
   },
   cellBadgeText: {
     fontSize: 10,
@@ -607,6 +620,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.sm,
+    flex: 1,
   },
   assignBtn: {
     backgroundColor: colors.primary,

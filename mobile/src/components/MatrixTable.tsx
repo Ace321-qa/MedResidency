@@ -158,12 +158,12 @@ export function MatrixTable({
           </View>
           {rows.map((row) => (
             <Pressable
-              key={row.key}
+              key={`frozen-${row.key}`}
               onPress={row.onPress}
               disabled={!row.onPress}
               accessibilityRole={row.onPress ? 'button' : 'text'}
               accessibilityLabel={row.accessibilityLabel}
-              style={[styles.frozenCell, autoHeight ? null : { height: rowHeight }]}
+              style={[styles.frozenCell, autoHeight ? styles.frozenCellAuto : { height: rowHeight }, styles.rowBorder]}
             >
               {row.accent ? <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} /> : null}
               {row.frozenContent ?? null}
@@ -223,7 +223,7 @@ export function MatrixTable({
             </View>
 
             {rows.map((row) => (
-              <View key={row.key} style={[styles.row, autoHeight ? styles.rowAuto : { height: rowHeight }]}>
+              <View key={`grid-${row.key}`} style={[styles.row, autoHeight ? styles.rowAuto : { height: rowHeight }, styles.rowBorder]}>
                 {columns.map((column) => (
                   <View
                     key={column.key}
@@ -334,6 +334,11 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
     overflow: 'hidden',
   },
+  frozenCellAuto: {
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
+    overflow: 'hidden',
+  },
   accentBar: {
     position: 'absolute',
     left: 0,
@@ -381,22 +386,26 @@ const styles = StyleSheet.create({
   },
   rowAuto: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'stretch',
+  },
+  rowBorder: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#CBD5E1',
   },
   cell: {
     justifyContent: 'center',
+    alignItems: 'stretch',
     paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
     borderRightWidth: 1,
     borderRightColor: colors.border,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
     backgroundColor: colors.surface,
     overflow: 'hidden',
   },
   cellAuto: {
-    justifyContent: 'flex-start',
-    overflow: 'visible',
+    justifyContent: 'center',
+    alignItems: 'stretch',
+    overflow: 'hidden',
   },
   alignRight: {
     alignItems: 'flex-end',
