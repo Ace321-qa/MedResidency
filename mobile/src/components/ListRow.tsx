@@ -57,7 +57,7 @@ export function ListRow({
   const dimmed = muted || disabled;
   const chevronVisible = Boolean(onPress) && !disabled;
 
-  const body = (
+  const content = (
     <>
       {leading ??
         (LeadingIcon ? (
@@ -81,25 +81,37 @@ export function ListRow({
           </Text>
         ) : null}
       </View>
-
-      {trailing ?? (chevronVisible ? <ChevronRight color={colors.textMuted} size={18} /> : null)}
     </>
   );
 
+  const trailingElement = trailing ?? (chevronVisible ? <ChevronRight color={colors.textMuted} size={18} /> : null);
+
   if (!onPress || disabled) {
-    return <View style={[styles.row, dimmed && styles.rowDisabled, last ? styles.rowLast : null]}>{body}</View>;
+    return (
+      <View style={[styles.row, dimmed && styles.rowDisabled, last ? styles.rowLast : null]}>
+        <View style={styles.contentWrapper}>{content}</View>
+        {trailingElement ? <View style={styles.trailingWrapper}>{trailingElement}</View> : null}
+      </View>
+    );
   }
 
   return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel ?? title}
-      accessibilityHint={accessibilityHint}
-      style={({ pressed }) => [styles.row, last ? styles.rowLast : null, pressed ? styles.rowPressed : null]}
-    >
-      {body}
-    </Pressable>
+    <View style={[styles.row, last ? styles.rowLast : null]}>
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel ?? title}
+        accessibilityHint={accessibilityHint}
+        style={({ pressed }) => [styles.contentWrapper, pressed ? styles.rowPressed : null]}
+      >
+        {content}
+      </Pressable>
+      {trailingElement ? (
+        <View style={styles.trailingWrapper}>
+          {trailingElement}
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -154,12 +166,23 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
     minHeight: 64,
+  },
+  contentWrapper: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+  },
+  trailingWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingRight: spacing.lg,
+    gap: spacing.xs,
   },
   rowLast: {
     borderBottomWidth: 0,
