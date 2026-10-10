@@ -548,11 +548,28 @@ function subWeekSlotsForAssignment(assignment: CohortGridCell, block: GridBlock 
   return [...slots].sort((left, right) => left - right);
 }
 
-function assignmentBadge(assignment: CohortGridCell, label: string): React.ReactNode {
+/**
+ * Stable, collision-free React key for a rendered assignment badge.
+ *
+ * A single assignment is painted once per sub-week slot it covers (block mode)
+ * or once per weekly column (weekly mode), so its identity alone is not a valid
+ * React key — the same `assignment_id` legitimately appears several times in one
+ * cell. `scope` names the exact slot being drawn (e.g. `b3-s2`), and the local
+ * index disambiguates rows that share an id or fall back to the same rotation.
+ */
+function badgeKey(scope: string, assignment: CohortGridCell, index?: number): string {
+  const identity =
+    assignment.assignment_id !== null && assignment.assignment_id !== undefined
+      ? `a${assignment.assignment_id}`
+      : `r${assignment.rotation_id ?? 0}:${assignment.rotation_code ?? assignment.rotation_name ?? 'none'}`;
+  return index === undefined ? `${scope}-${identity}` : `${scope}-${identity}-${index}`;
+}
+
+function assignmentBadge(assignment: CohortGridCell, label: string, key: string): React.ReactNode {
   const palette = rotationPalette(assignment.rotation_code, assignment.rotation_id);
   return (
     <View
-      key={assignment.assignment_id ?? `assign-${assignment.rotation_id}`}
+      key={key}
       style={[styles.cellBadge, { backgroundColor: palette.surface, borderColor: palette.border }]}
       accessible
       accessibilityLabel={rotationCellDescription(
@@ -625,14 +642,19 @@ function blockCellNode(
       assignmentBadge(
         assignment,
         `${blockNumber}.${slot}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`,
+        badgeKey(`b${blockNumber}-s${slot}`, assignment),
       ),
     );
   }
-  for (const assignment of unplaced) {
+  unplaced.forEach((assignment, index) => {
     badges.push(
-      assignmentBadge(assignment, rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)),
+      assignmentBadge(
+        assignment,
+        rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name),
+        badgeKey(`b${blockNumber}-unplaced`, assignment, index),
+      ),
     );
-  }
+  });
 
   if (slots.size < 4) badges.push(addBadge(onAdd));
 
@@ -657,7 +679,7 @@ function weeklyCellNode(
   const label = window
     ? `${window.blockNumber}.${window.weekInBlock}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`
     : `${weekNumber}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
-  return <View style={styles.cellBadges}>{assignmentBadge(assignment, label)}</View>;
+  return <View style={styles.cellBadges}>{assignmentBadge(assignment, label, badgeKey(`w${weekNumber}`, assignment))}</View>;
 }
 
 function rowAccentTone(code: string | null): 'info' | 'success' | 'warning' | 'neutral' {
