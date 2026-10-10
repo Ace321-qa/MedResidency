@@ -164,10 +164,11 @@ function expectWindow(logs: any[], anchor: Date) {
 
   // DECIMAL strings must be summed across every row: the completed July block
   // plus the repeated November rows, so the total spans multiple blocks and
-  // tops out at the 20 weeks the live database holds.
+  // tops out at a full academic year (52 weeks) whatever the live database
+  // currently holds.
   assert(
-    'assigned_weeks sum across all blocks (multi-block, up to 20 weeks)',
-    s.totalWeeks > 4 && s.totalWeeks <= 20,
+    'assigned_weeks sum across all blocks (multi-block, spans the academic year)',
+    s.totalWeeks > 4 && s.totalWeeks <= 52,
     String(s.totalWeeks),
   );
   const rawWeeks = (sched as any[]).reduce(

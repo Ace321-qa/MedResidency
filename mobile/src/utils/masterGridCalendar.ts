@@ -82,6 +82,29 @@ export function overlapsWeek(weekNumber: number, startDate: string | null | unde
   return true;
 }
 
+/**
+ * The 1..4 sub-week slot a date falls in inside a 28-day block.
+ *
+ * Week 1 is days 1-7 of the block, week 2 days 8-14, week 3 days 15-21 and
+ * week 4 days 22-28, matching the `B.1`..`B.4` column labels. Offsets are taken
+ * against the block's *own* start date rather than the fixed grid start, so an
+ * assignment whose window is expressed relative to a real rotation block always
+ * lands on the correct sub-week.
+ *
+ * Returns `null` when either date is unknown or the assignment starts before
+ * the block or spills past its fourth week.
+ */
+export function weekInBlockForDate(
+  blockStartIso: string | null | undefined,
+  dateIso: string | null | undefined,
+): number | null {
+  if (!blockStartIso || !dateIso) return null;
+  const days = diffDays(blockStartIso, dateIso);
+  if (days === null || days < 0) return null;
+  const slot = Math.floor(days / 7) + 1;
+  return slot >= 1 && slot <= WEEKS_PER_BLOCK ? slot : null;
+}
+
 /** Every week `[startDate, endDate]` touches, ascending. */
 export function weeksForRange(startDate: string, endDate: string): number[] {
   const weeks: number[] = [];

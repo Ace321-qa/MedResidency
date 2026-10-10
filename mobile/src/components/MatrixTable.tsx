@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Pressable, ScrollView, StyleSheet, View, type TextStyle } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, View, type TextStyle } from 'react-native';
 
 import { colors, radius, spacing, type Tone } from '../theme';
 import { Text } from './Text';
@@ -7,31 +7,26 @@ import { Text } from './Text';
 /**
  * MatrixTable — the Excel-style grid both scheduling views are built from.
  *
- * A cohort rota is inherently two-dimensional and wider than a phone, so the two
- * obvious approaches both fail on a small screen:
+ * A cohort rota is inherently two-dimensional and wider than a phone, so the
+ * table lives inside a *horizontal* scroller. The resident header column sits
+ * at its left edge and is pinned there with `position: sticky; left: 0` (web),
+ * so names never scroll away no matter how far the grid is dragged.
  *
- *  - **One horizontal scroller for the whole table** scrolls the row headers off
- *    to the left, and after a few columns nobody knows which resident a row is.
- *  - **One vertical scroller per cell** loses the row/column alignment that makes
- *    a matrix readable in the first place.
- *
- * This splits the table the way a spreadsheet does. The row headers live in a
- * fixed-width pane outside the horizontal scroller and therefore never move; the
- * columns scroll behind them. Both panes are children of a *single* vertical
- * `ScrollView`, so their rows stay aligned without any scroll-position
- * bookkeeping — the thing that usually breaks in this pattern.
- *
- * Alignment relies on one more thing: **every row is `rowHeight` tall**, on both
- * panes. Fixed heights mean no measurement, no `onLayout` bookkeeping, and no
- * drift after a screen rotation.
+ * Rows are **never** split across two stacked containers (names in one pane,
+ * cells in another). Every record is ONE horizontal row `View` — an HTML `<tr>`
+ * equivalent — that spans the full table width from the resident name to the
+ * final column. That is the guarantee the two halves stay vertically aligned:
+ * `alignItems: 'stretch'` on the row forces the sticky name cell and every grid
+ * cell in the same row to the height of the tallest of them, so when one cell
+ * grows (Omar's block stacking four rotations) the name box grows with it and
+ * the horizontal rule beneath the row lands cleanly below the whole row.
  *
  * The header is the one place with variable height, and it is variable by
  * design: `columnGroups` adds a **tier 1** row (`Block 1` merged over four
  * sub-weeks) above the normal **tier 2** row, and `verticalSubtitle` rotates a
  * column's subtitle top-to-bottom so a date window like `28/06–04/07` fits a
- * narrow sub-column instead of being clipped. The frozen pane's header is
- * always the *sum* of the tiers the scrolling pane draws, so the first data row
- * starts at the same y on both panes whatever the header is made of.
+ * narrow sub-column instead of being clipped. The frozen header cell spans the
+ * sum of both tiers so the first data row starts at the same y as the columns.
  */
 
 export interface ColumnGroup {
@@ -84,13 +79,13 @@ export interface MatrixRowDef {
 export interface MatrixTableProps {
   columns: MatrixColumnDef[];
   rows: MatrixRowDef[];
-  /** Width of the frozen row-header pane. */
+  /** Width of the frozen row-header column (pinned left). */
   frozenWidth?: number;
   /** Uniform row height shared by both panes. Text beyond it is clipped. */
   rowHeight?: number;
   /** Allow rows to auto-size based on content (ignores fixed rowHeight) */
   autoHeight?: boolean;
-  /** Header text for the frozen pane's own column. */
+  /** Header text for the frozen column. */
   frozenHeader?: string;
   emptyTitle?: string;
   emptyMessage?: string;
@@ -103,6 +98,17 @@ export interface MatrixTableProps {
 const DEFAULT_FROZEN_WIDTH = 168;
 const DEFAULT_ROW_HEIGHT = 44;
 const DEFAULT_COLUMN_WIDTH = 116;
+
+/**
+ * Pin the resident/header column to the left edge of the horizontal scroller.
+ *
+ * `position: sticky` is a web-CSS feature; React Native's layout engine has no
+ * sticky positioning, so native builds fall back to `relative` (the header may
+ * scroll away on device). The web grid is the one whose row alignment is
+ * judged, and there the cast just hands the verbatim `sticky` string to the
+ * DOM. TypeScript's `ViewStyle` does not declare it and does not need to.
+ */
+const stickyPosition: 'relative' = Platform.OS === 'web' ? ('sticky' as any) : 'relative';
 
 export function MatrixTable({
   columns,
@@ -132,11 +138,17 @@ export function MatrixTable({
   }
 
   // Header geometry: the tiers the scrolling pane draws are exactly what the
-  // frozen pane's header must span, or the two panes' rows drift apart.
+  // frozen header must span, or the rows drift apart from the columns.
   const hasGroups = (columnGroups?.length ?? 0) > 0;
   const hasVerticalSubtitles = columns.some((column) => column.verticalSubtitle && column.subtitle);
   const headerHeight = hasVerticalSubtitles ? VERTICAL_HEADER_HEIGHT : HEADER_HEIGHT;
   const frozenHeaderHeight = (hasGroups ? GROUP_HEADER_HEIGHT : 0) + headerHeight;
+
+  const totalColumnWidth = columns.reduce(
+    (sum, column) => sum + (column.width ?? DEFAULT_COLUMN_WIDTH),
+    0,
+  );
+  const tableWidth = frozenWidth + totalColumnWidth;
 
   return (
     <ScrollView
@@ -147,101 +159,103 @@ export function MatrixTable({
     >
       {caption}
 
-      {/* One vertical scroller wraps both panes, which is what keeps the frozen
-          row headers level with the columns as the user scrolls down. */}
-      <View style={styles.table}>
-        <View style={[styles.frozenPane, { width: frozenWidth }]}>
-          <View style={[styles.frozenHeader, { height: frozenHeaderHeight }]}>
-            <Text variant="label" tone="secondary" numberOfLines={2}>
-              {frozenHeader}
-            </Text>
-          </View>
-          {rows.map((row) => (
-            <Pressable
-              key={`frozen-${row.key}`}
-              onPress={row.onPress}
-              disabled={!row.onPress}
-              accessibilityRole={row.onPress ? 'button' : 'text'}
-              accessibilityLabel={row.accessibilityLabel}
-              style={[styles.frozenCell, autoHeight ? styles.frozenCellAuto : { height: rowHeight }, styles.rowBorder]}
-            >
-              {row.accent ? <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} /> : null}
-              {row.frozenContent ?? null}
-            </Pressable>
-          ))}
-        </View>
-
-        <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.scroller}>
-          <View>
-            {hasGroups ? (
-              <View style={[styles.groupRow, { height: GROUP_HEADER_HEIGHT }]}>
-                {columnGroups!.map((group) => (
-                  <View
-                    key={group.key}
-                    style={[
-                      styles.groupCell,
-                      {
-                        width: columnsWidth(columns, group.startColumnIndex, group.columnCount),
-                        left: columnsWidth(columns, 0, group.startColumnIndex),
-                      },
-                    ]}
-                  >
-                    <Text variant="label" numberOfLines={1} align="center">
-                      {group.label}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            ) : null}
-            <View style={[styles.headerRow, { height: headerHeight }]}>
-              {columns.map((column) => (
-                <View
-                  key={column.key}
-                  style={[
-                    styles.headerCell,
-                    { width: column.width ?? DEFAULT_COLUMN_WIDTH },
-                    column.align === 'right' ? styles.alignRight : null,
-                    column.verticalSubtitle && column.subtitle ? styles.verticalHeaderCell : null,
-                  ]}
-                >
-                  <Text variant="label" numberOfLines={1}>
-                    {column.title}
-                  </Text>
-                  {column.subtitle ? (
-                    column.verticalSubtitle ? (
-                      <Text variant="caption" tone="secondary" numberOfLines={1} style={verticalDateStyle}>
-                        {column.subtitle}
-                      </Text>
-                    ) : (
-                      <Text variant="caption" tone="secondary" numberOfLines={1}>
-                        {column.subtitle}
-                      </Text>
-                    )
-                  ) : null}
-                </View>
-              ))}
+      {/* One horizontal scroller holds the entire table. The resident/header
+          column is sticky inside it, so names stay pinned while cells scroll. */}
+      <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.scroller}>
+        <View style={[styles.tableBody, { width: tableWidth }]}>
+          {/* Header: the frozen cell spans every tier of the scrolling header. */}
+          <View style={[styles.headerFrame, { height: frozenHeaderHeight }]}>
+            <View style={[styles.frozenHeaderCell, { width: frozenWidth, height: frozenHeaderHeight }]}>
+              <Text variant="label" tone="secondary" numberOfLines={2}>
+                {frozenHeader}
+              </Text>
             </View>
 
-            {rows.map((row) => (
-              <View key={`grid-${row.key}`} style={[styles.row, autoHeight ? styles.rowAuto : { height: rowHeight }, styles.rowBorder]}>
+            <View style={styles.headerTiers}>
+              {hasGroups ? (
+                <View style={[styles.groupRow, { width: totalColumnWidth }]}>
+                  {columnGroups!.map((group) => (
+                    <View
+                      key={group.key}
+                      style={[
+                        styles.groupCell,
+                        {
+                          width: columnsWidth(columns, group.startColumnIndex, group.columnCount),
+                          left: columnsWidth(columns, 0, group.startColumnIndex),
+                        },
+                      ]}
+                    >
+                      <Text variant="label" numberOfLines={1} align="center">
+                        {group.label}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
+              <View style={[styles.headerRow, { width: totalColumnWidth, height: headerHeight }]}>
                 {columns.map((column) => (
                   <View
                     key={column.key}
                     style={[
-                      styles.cell,
-                      autoHeight ? styles.cellAuto : null,
+                      styles.headerCell,
                       { width: column.width ?? DEFAULT_COLUMN_WIDTH },
                       column.align === 'right' ? styles.alignRight : null,
+                      column.verticalSubtitle && column.subtitle ? styles.verticalHeaderCell : null,
                     ]}
                   >
-                    {row.cells[column.key] ?? <Text variant="bodySmall" tone="disabled" align="center">—</Text>}
+                    <Text variant="label" numberOfLines={1}>
+                      {column.title}
+                    </Text>
+                    {column.subtitle ? (
+                      column.verticalSubtitle ? (
+                        <Text variant="caption" tone="secondary" numberOfLines={1} style={verticalDateStyle}>
+                          {column.subtitle}
+                        </Text>
+                      ) : (
+                        <Text variant="caption" tone="secondary" numberOfLines={1}>
+                          {column.subtitle}
+                        </Text>
+                      )
+                    ) : null}
                   </View>
                 ))}
               </View>
-            ))}
+            </View>
           </View>
-        </ScrollView>
-      </View>
+
+          {/* One unified horizontal row per record: name cell + all grid cells,
+              so the two can never drift out of alignment. */}
+          {rows.map((row) => (
+            <Pressable
+              key={`tr-${row.key}`}
+              onPress={row.onPress}
+              disabled={!row.onPress}
+              accessibilityRole={row.onPress ? 'button' : 'text'}
+              accessibilityLabel={row.accessibilityLabel}
+              style={[styles.tableRow, autoHeight ? styles.tableRowAuto : { height: rowHeight }]}
+            >
+              <View style={[styles.residentStickyCell, { width: frozenWidth, minWidth: frozenWidth }]}>
+                {row.accent ? <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} /> : null}
+                {row.frozenContent ?? null}
+              </View>
+              {columns.map((column) => (
+                <View
+                  key={column.key}
+                  style={[
+                    styles.cell,
+                    autoHeight ? styles.cellAuto : null,
+                    { width: column.width ?? DEFAULT_COLUMN_WIDTH },
+                    column.align === 'right' ? styles.alignRight : null,
+                  ]}
+                >
+                  {row.cells[column.key] ?? <Text variant="bodySmall" tone="disabled" align="center">—</Text>}
+                </View>
+              ))}
+            </Pressable>
+          ))}
+        </View>
+      </ScrollView>
     </ScrollView>
   );
 }
@@ -306,45 +320,30 @@ const styles = StyleSheet.create({
   content: {
     paddingBottom: spacing.xl,
   },
-  table: {
-    flexDirection: 'row',
-  },
   scroller: {
     paddingRight: spacing.lg,
   },
-  frozenPane: {
-    borderRightWidth: 1,
-    borderRightColor: colors.border,
-    backgroundColor: colors.surface,
+  tableBody: {
+    flexDirection: 'column',
   },
-  frozenHeader: {
+  headerFrame: {
+    flexDirection: 'row',
+  },
+  frozenHeaderCell: {
+    position: stickyPosition,
+    left: 0,
+    zIndex: 10,
     justifyContent: 'flex-end',
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.sm,
-    backgroundColor: colors.surfaceMuted,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  frozenCell: {
-    justifyContent: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
     backgroundColor: colors.surface,
+    borderRightWidth: 2,
+    borderRightColor: '#CBD5E1',
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
-    overflow: 'hidden',
   },
-  frozenCellAuto: {
-    justifyContent: 'flex-start',
-    alignItems: 'stretch',
-    overflow: 'hidden',
-  },
-  accentBar: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: 3,
+  headerTiers: {
+    flex: 1,
   },
   headerRow: {
     flexDirection: 'row',
@@ -381,16 +380,40 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs,
   },
-  row: {
+  tableRow: {
     flexDirection: 'row',
+    borderBottomWidth: 2,
+    borderBottomColor: '#64748B',
+    minHeight: 56,
   },
-  rowAuto: {
+  tableRowAuto: {
     flexDirection: 'row',
     alignItems: 'stretch',
   },
-  rowBorder: {
-    borderBottomWidth: 2,
-    borderBottomColor: '#CBD5E1',
+  /**
+   * The pinned resident column. `alignItems: 'stretch'` on the parent row makes
+   * every row's name box exactly as tall as its tallest grid cell, and the
+   * opaque background keeps the cells scrolling underneath it invisible.
+   */
+  residentStickyCell: {
+    position: stickyPosition,
+    left: 0,
+    zIndex: 10,
+    justifyContent: 'center',
+    alignItems: 'stretch',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    backgroundColor: colors.surface,
+    borderRightWidth: 2,
+    borderRightColor: '#CBD5E1',
+    overflow: 'hidden',
+  },
+  accentBar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 3,
   },
   cell: {
     justifyContent: 'center',

@@ -37,6 +37,8 @@ import { goBack } from '../../../navigation/back';
 import {
   weekNumberForDate,
   weekWindow,
+  weeksForRange,
+  weekInBlockForDate,
   MASTER_GRID_START,
 } from '../../../utils/masterGridCalendar';
 import { buildMasterGridColumns } from '../../../utils/masterGridColumns';
@@ -207,23 +209,12 @@ export default function MasterGridScreen() {
         for (const blockNumber of BLOCK_NUMBERS) {
           const block = blocksByNumber.get(blockNumber);
           const columnKey = block ? `block-${block.block_id}` : `block-missing-${blockNumber}`;
-          if (!block) {
-            cells[columnKey] = cellNode([], () =>
-              openAssignSheet({
-                residentId: resident.resident_id,
-                residentName: resident.resident_name,
-                blockNumber: blockNumber,
-              }),
-            );
-            continue;
-          }
-          const assignments = assignedRows(cellFor(resident.resident_id, block.block_id));
-          cells[columnKey] = cellNode(assignments, () =>
+          cells[columnKey] = blockCellNode(cellFor(resident.resident_id, block?.block_id ?? 0), block, () =>
             openAssignSheet({
               residentId: resident.resident_id,
               residentName: resident.resident_name,
-              blockId: block.block_id,
-              blockNumber: block.block_number,
+              blockId: block?.block_id,
+              blockNumber: block?.block_number ?? blockNumber,
             }),
           );
         }
@@ -269,19 +260,19 @@ export default function MasterGridScreen() {
           if (!block) continue;
           const assignments = assignedRows(cellFor(resident.resident_id, block.block_id));
           for (const a of assignments) {
-            const w = getWeekNumberForAssignment(a);
-            if (w && w >= 1 && w <= 52) {
-              const list = weekToAssignments.get(w) ?? [];
-              list.push(a);
-              weekToAssignments.set(w, list);
+            for (const w of weeksForAssignment(a)) {
+              if (w >= 1 && w <= 52) {
+                const list = weekToAssignments.get(w) ?? [];
+                list.push(a);
+                weekToAssignments.set(w, list);
+              }
             }
           }
         }
 
         for (let w = 1; w <= 52; w += 1) {
-          const asg = weekToAssignments.get(w) ?? [];
           const win = weekWindow(w);
-          cells[`week-${w}`] = cellNode(asg, () =>
+          cells[`week-${w}`] = weeklyCellNode(weekToAssignments.get(w), w, () =>
             openAssignSheet({
               residentId: resident.resident_id,
               residentName: resident.resident_name,
@@ -434,7 +425,7 @@ export default function MasterGridScreen() {
               columns={columnsBlock}
               rows={rowsBlock}
               frozenHeader="Resident"
-              frozenWidth={172}
+              frozenWidth={220}
               rowHeight={58}
               autoHeight
               emptyTitle="No blocks to map"
@@ -446,7 +437,7 @@ export default function MasterGridScreen() {
               rows={rowsWeekly}
               columnGroups={weeklyGroups}
               frozenHeader="Resident"
-              frozenWidth={172}
+              frozenWidth={220}
               rowHeight={58}
               autoHeight
               emptyTitle="No weeks to map"
@@ -490,58 +481,183 @@ export default function MasterGridScreen() {
   );
 }
 
-function cellNode(
-  assignments: CohortGridCell[],
+/** The assignment's own start date, preferring the timezone-safe iso copy. */
+function assignmentStartDate(assignment: CohortGridCell): string | null {
+  return assignment.assignment_start_date_iso ?? assignment.start_date ?? null;
+}
+
+/** The assignment's own end date, preferring the timezone-safe iso copy. */
+function assignmentEndDate(assignment: CohortGridCell): string | null {
+  return assignment.assignment_end_date_iso ?? assignment.end_date ?? null;
+}
+
+/**
+ * Collapse duplicate assignments that name the same rotation.
+ *
+ * A manually re-assigned block can carry several identical rows (same
+ * rotation, same window); the grid must not paint the same badge seven times.
+ */
+function dedupeAssignments(assignments: CohortGridCell[]): CohortGridCell[] {
+  const seen = new Set<string>();
+  const unique: CohortGridCell[] = [];
+  for (const assignment of assignments) {
+    const identity =
+      assignment.rotation_id === null || assignment.rotation_id === undefined
+        ? `c:${assignment.rotation_code ?? assignment.rotation_name}`
+        : `id:${assignment.rotation_id}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    unique.push(assignment);
+  }
+  return unique;
+}
+
+/** Every 1..52 week an assignment touches, ascending. */
+function weeksForAssignment(assignment: CohortGridCell): number[] {
+  const start = assignmentStartDate(assignment);
+  const end = assignmentEndDate(assignment);
+  if (start && end) {
+    const weeks = weeksForRange(start, end);
+    if (weeks.length > 0) return weeks;
+  }
+  const week = getWeekNumberForAssignment(assignment);
+  return week ? [week] : [];
+}
+
+/**
+ * The 1..4 sub-week slots an assignment occupies inside its block.
+ *
+ * Indexed from the block's own start date (week 1 = days 1-7, week 4 = days
+ * 22-28); an assignment whose window spills across sub-weeks fills every slot
+ * it touches, so a 4-week rotation reports B.1, B.2, B.3 and B.4 instead of a
+ * single mislabelled row.
+ */
+function subWeekSlotsForAssignment(assignment: CohortGridCell, block: GridBlock | undefined): number[] {
+  const slots = new Set<number>();
+  const startSlot = weekInBlockForDate(block?.startDateIso ?? null, assignmentStartDate(assignment));
+  if (startSlot !== null) {
+    slots.add(startSlot);
+  } else {
+    const weekNum = getWeekNumberForAssignment(assignment);
+    if (weekNum) slots.add(((weekNum - 1) % 4) + 1);
+  }
+  for (const week of weeksForAssignment(assignment)) {
+    const slot = ((week - 1) % 4) + 1;
+    if (slot >= 1 && slot <= 4) slots.add(slot);
+  }
+  return [...slots].sort((left, right) => left - right);
+}
+
+function assignmentBadge(assignment: CohortGridCell, label: string): React.ReactNode {
+  const palette = rotationPalette(assignment.rotation_code, assignment.rotation_id);
+  return (
+    <View
+      key={assignment.assignment_id ?? `assign-${assignment.rotation_id}`}
+      style={[styles.cellBadge, { backgroundColor: palette.surface, borderColor: palette.border }]}
+      accessible
+      accessibilityLabel={rotationCellDescription(
+        assignment.rotation_code,
+        assignment.rotation_name,
+        typeof assignment.assigned_weeks === 'number' ? assignment.assigned_weeks : null,
+      )}
+    >
+      <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.cellBadgeText, { color: palette.foreground }]}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function unassignedCell(onAdd: () => void): React.ReactNode {
+  return (
+    <Pressable onPress={onAdd} style={styles.unassignedCell} accessibilityLabel="Assign rotation">
+      <Plus size={14} color={colors.textMuted} />
+      <Text variant="caption" tone="muted">
+        + Assign
+      </Text>
+    </Pressable>
+  );
+}
+
+function addBadge(onAdd: () => void): React.ReactNode {
+  return (
+    <Pressable key="add" onPress={onAdd} style={styles.addBadge} accessibilityLabel="Assign rotation">
+      <Plus size={12} color={colors.textMuted} />
+    </Pressable>
+  );
+}
+
+/**
+ * Block-mode cell: a 28-day block holds at most four weekly sub-slots.
+ *
+ * Every assignment is collapsed into the 1..4 sub-week slots it covers, and
+ * identical rotations sharing a slot render once — never a stack of seven
+ * duplicates. Only when all four slots are fully taken does the add control
+ * disappear, so a coordinator can never push a fifth item into a full block.
+ */
+function blockCellNode(
+  cell: CohortGridCell[] | undefined,
+  block: GridBlock | undefined,
   onAdd: () => void,
 ): React.ReactNode {
-  if (assignments.length === 0) {
-    return (
-      <Pressable onPress={onAdd} style={styles.unassignedCell} accessibilityLabel="Assign rotation">
-        <Plus size={14} color={colors.textMuted} />
-        <Text variant="caption" tone="muted">
-          + Assign
-        </Text>
-      </Pressable>
+  const assignments = assignedRows(cell);
+  if (assignments.length === 0) return unassignedCell(onAdd);
+
+  const slots = new Map<number, CohortGridCell>();
+  const unplaced: CohortGridCell[] = [];
+  for (const assignment of assignments) {
+    const covered = subWeekSlotsForAssignment(assignment, block);
+    if (covered.length === 0) {
+      unplaced.push(assignment);
+      continue;
+    }
+    for (const slot of covered) {
+      if (!slots.has(slot)) slots.set(slot, assignment);
+    }
+  }
+
+  const blockNumber = block?.block_number ?? assignments[0].block_number;
+  const badges: React.ReactNode[] = [];
+  for (let slot = 1; slot <= 4; slot += 1) {
+    const assignment = slots.get(slot);
+    if (!assignment) continue;
+    badges.push(
+      assignmentBadge(
+        assignment,
+        `${blockNumber}.${slot}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`,
+      ),
+    );
+  }
+  for (const assignment of unplaced) {
+    badges.push(
+      assignmentBadge(assignment, rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)),
     );
   }
 
-  return (
-    <View style={styles.cellBadges}>
-      {assignments.map((assignment, index) => {
-        const palette = rotationPalette(assignment.rotation_code, assignment.rotation_id);
-        const weekNum = getWeekNumberForAssignment(assignment);
-        const blockNum = assignment.block_number;
-        const weekInBlock = weekNum ? ((weekNum - 1) % 4) + 1 : null;
-        let badgeLabel: string;
-        if (blockNum && weekInBlock) {
-          badgeLabel = `${blockNum}.${weekInBlock}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
-        } else if (weekNum) {
-          badgeLabel = `${weekNum}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
-        } else {
-          badgeLabel = rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name);
-        }
-        return (
-          <View
-            key={assignment.assignment_id ?? `${assignment.rotation_id}-${index}`}
-            style={[styles.cellBadge, { backgroundColor: palette.surface, borderColor: palette.border }]}
-            accessible
-            accessibilityLabel={rotationCellDescription(
-              assignment.rotation_code,
-              assignment.rotation_name,
-              typeof assignment.assigned_weeks === 'number' ? assignment.assigned_weeks : null,
-            )}
-          >
-            <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.cellBadgeText, { color: palette.foreground }]}>
-              {badgeLabel}
-            </Text>
-          </View>
-        );
-      })}
-      <Pressable onPress={onAdd} style={styles.addBadge}>
-        <Plus size={12} color={colors.textMuted} />
-      </Pressable>
-    </View>
-  );
+  if (slots.size < 4) badges.push(addBadge(onAdd));
+
+  return <View style={styles.cellBadges}>{badges}</View>;
+}
+
+/**
+ * Weekly-mode cell: one column is exactly one 7-day week, so the cell holds at
+ * most one rotation badge. Duplicate rows for the same rotation collapse into a
+ * single badge and there is never a stack of badges inside a sub-week cell.
+ */
+function weeklyCellNode(
+  cell: CohortGridCell[] | undefined,
+  weekNumber: number,
+  onAdd: () => void,
+): React.ReactNode {
+  const assignments = assignedRows(cell);
+  if (assignments.length === 0) return unassignedCell(onAdd);
+
+  const assignment = dedupeAssignments(assignments)[0];
+  const window = weekWindow(weekNumber);
+  const label = window
+    ? `${window.blockNumber}.${window.weekInBlock}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`
+    : `${weekNumber}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
+  return <View style={styles.cellBadges}>{assignmentBadge(assignment, label)}</View>;
 }
 
 function rowAccentTone(code: string | null): 'info' | 'success' | 'warning' | 'neutral' {
