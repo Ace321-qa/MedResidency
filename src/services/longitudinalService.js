@@ -2,17 +2,162 @@ const db = require('../config/db');
 const { addMonths, describeWindow } = require('../utils/blockDates');
 const RotationService = require('./rotationService');
 const { PRIMARY_IDENTIFIER_SQL } = RotationService;
+const {
+  PRIMARY_CARE_DEFAULT_CLINICS,
+  deriveClinicCode,
+} = require('../utils/primaryCareClinics');
 
 class LongitudinalService {
-  static async getClinicTypes(programId) {
-    const query = `
+  static async getClinicTypes(programId, { includeInactive = false } = {}) {
+    let query = `
       SELECT id, program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active
       FROM longitudinal_clinic_types
       WHERE program_id = ?
-      ORDER BY clinic_name ASC
     `;
-    const [rows] = await db.query(query, [programId]);
+    const params = [programId];
+    if (!includeInactive) {
+      query += ' AND is_active = 1';
+    }
+    query += ' ORDER BY clinic_name ASC';
+    const [rows] = await db.query(query, params);
     return rows;
+  }
+
+  /**
+   * Add a clinic to a programme's catalog, or bring an existing one back.
+   *
+   * The Primary Care Clinics view grows its chip pool from `longitudinal_clinic_types`,
+   * so "add a clinic" ends here. The name is the identity a coordinator sees, but the
+   * table keys on `(program_id, clinic_code)`; a clinic that is already on record —
+   * active or not — is therefore found by name (case-insensitively, via the column
+   * collation) and **reactivated**, so a clinic removed from the default pool still
+   * comes back with the same row, code and assignment history. A genuinely new name
+   * gets a code derived from it, made unique per programme, and is inserted active —
+   * which is exactly what makes a hand-typed custom clinic persist for the programme.
+   *
+   * Only fields the caller actually sent are written: re-adding a clinic never clobbers
+   * its recorded day or times.
+   *
+   * @param {object} data
+   * @param {number} data.program_id
+   * @param {string} data.clinic_name
+   * @param {string} [data.clinic_code]
+   * @param {string} [data.default_day_of_week]
+   * @param {string} [data.start_time]
+   * @param {string} [data.end_time]
+   * @param {number} [data.requires_release_letter]
+   */
+  static async createClinicType(data) {
+    const programId = Number(data.program_id);
+    const clinicName = String(data.clinic_name ?? '').trim();
+    if (!programId || !clinicName) {
+      const error = new Error('program_id and a non-empty clinic_name are required.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // Settable columns, in the order `getClinicTypes` selects them.
+    const fields = {
+      clinic_code: data.clinic_code ? String(data.clinic_code).trim() : undefined,
+      clinic_name: clinicName,
+      default_day_of_week: data.default_day_of_week || undefined,
+      start_time: data.start_time ? String(data.start_time).slice(0, 5) : undefined,
+      end_time: data.end_time ? String(data.end_time).slice(0, 5) : undefined,
+      requires_release_letter:
+        data.requires_release_letter !== undefined ? (data.requires_release_letter ? 1 : 0) : undefined,
+    };
+
+    const [matches] = await db.query(
+      'SELECT id FROM longitudinal_clinic_types WHERE program_id = ? AND clinic_name = ? ORDER BY id ASC LIMIT 1',
+      [programId, clinicName]
+    );
+    const existing = matches[0];
+
+    let clinicId;
+    if (existing) {
+      clinicId = existing.id;
+      const sets = ['updated_at = CURRENT_TIMESTAMP'];
+      const params = [];
+      for (const [column, value] of Object.entries(fields)) {
+        if (value === undefined) continue;
+        sets.push(`${column} = ?`);
+        params.push(value);
+      }
+      sets.push('is_active = 1');
+      params.push(clinicId);
+      await db.query(`UPDATE longitudinal_clinic_types SET ${sets.join(', ')} WHERE id = ?`, params);
+    } else {
+      const baseCode = deriveClinicCode(fields.clinic_code || clinicName);
+      const code = await this.ensureUniqueClinicCode(programId, baseCode);
+      const [result] = await db.query(
+        `INSERT INTO longitudinal_clinic_types
+           (program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          programId,
+          code,
+          fields.clinic_name,
+          fields.default_day_of_week || null,
+          fields.start_time || null,
+          fields.end_time || null,
+          fields.requires_release_letter ?? 0,
+        ]
+      );
+      clinicId = result.insertId;
+    }
+
+    const [rows] = await db.query(
+      `SELECT id, program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active
+       FROM longitudinal_clinic_types WHERE id = ?`,
+      [clinicId]
+    );
+    return rows[0];
+  }
+
+  /** The first `baseCode`, `baseCode 2`, … `baseCode N` not taken in this programme. */
+  static async ensureUniqueClinicCode(programId, baseCode) {
+    let candidate = baseCode;
+    let suffix = 2;
+    for (;;) {
+      const [rows] = await db.query(
+        'SELECT id FROM longitudinal_clinic_types WHERE program_id = ? AND clinic_code = ? LIMIT 1',
+        [programId, candidate]
+      );
+      if (rows.length === 0) return candidate;
+      candidate = `${String(baseCode).slice(0, 47)} ${suffix}`;
+      suffix += 1;
+    }
+  }
+
+  /**
+   * Seed the five standard Primary Care Clinics for every programme.
+   *
+   * Called at server boot and idempotent by construction: existing rows are
+   * matched by name and reactivated (never duplicated, never anything removed),
+   * and programmes that have no clinic records yet get the standard five. This is
+   * the only place new programmes receive their default pool; everything else a
+   * coordinator adds flows through `createClinicType`.
+   *
+   * @returns {Promise<object[]>} The seeded clinics.
+   */
+  static async ensureDefaultClinics() {
+    const [programs] = await db.query('SELECT id FROM programs ORDER BY id ASC');
+    const seeded = [];
+    for (const program of programs) {
+      for (const clinic of PRIMARY_CARE_DEFAULT_CLINICS) {
+        const row = await this.createClinicType({
+          program_id: program.id,
+          clinic_name: clinic.clinic_name,
+          clinic_code: clinic.code,
+          default_day_of_week: clinic.default_day_of_week,
+          start_time: clinic.start_time,
+          end_time: clinic.end_time,
+          requires_release_letter: clinic.requires_release_letter,
+        });
+        seeded.push(row);
+      }
+    }
+    return seeded;
   }
 
   static async getResidentLongitudinalAssignments(residentId) {

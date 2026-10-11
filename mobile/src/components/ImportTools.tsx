@@ -21,10 +21,10 @@ import { spacing } from '../theme';
  * that reports what happened.
  *
  * Import is presented the same way on every screen — roster, timesheet, master
- * grid, CCC matrix — because the shape of the interaction is identical:
- * download the template, fill it in, upload it, and find out *which row* was
- * rejected. A screen that reinvents this produces its own wording for the same
- * failure, and "Row 4: Corporate ID is required" on one screen becomes
+ * grid, Primary Care Clinics matrix — because the shape of the interaction is
+ * identical: download the template, fill it in, upload it, and find out *which
+ * row* was rejected. A screen that reinvents this produces its own wording for
+ * the same failure, and "Row 4: Corporate ID is required" on one screen becomes
  * "invalid input" on another.
  *
  * Success and failure are both shown inline rather than only in a toast: a

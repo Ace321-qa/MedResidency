@@ -1,34 +1,40 @@
 import { useMemo, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
-import { CalendarX } from 'lucide-react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { CalendarX, Plus, PlusCircle } from 'lucide-react-native';
 import { router } from 'expo-router';
 
 import {
   AppHeader,
   Banner,
+  Button,
   Card,
   EmptyState,
   ErrorState,
   ImportTools,
   MatrixTable,
   Screen,
+  SearchInput,
   SectionHeader,
   SelectField,
+  Sheet,
   SkeletonList,
   StatusBadge,
   Text,
+  TextField,
   type MatrixColumnDef,
   type MatrixRowDef,
   type SelectOption,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import {
+  createClinicType,
   fetchAllLongitudinalAssignments,
   fetchClinicSlots,
   fetchClinicTypes,
   fetchSupervisorAssignments,
 } from '../../../services/longitudinal';
 import { uploadCccMatrix } from '../../../services/excelTemplates';
+import { useInAppNotifications } from '../../../services/inAppNotifications';
 import { getAcademicYears } from '../../../utils/academicYear';
 import {
   CCC_FALLBACK_SLOTS,
@@ -37,12 +43,25 @@ import {
   dayOfWeekMatches,
   pgyLevelsForRow,
 } from '../../../utils/cccMatrix';
+import {
+  PRIMARY_CARE_CLINIC_CATALOG,
+  clinicNameKey,
+  sortClinicOptions,
+  type ClinicCatalogEntry,
+} from '../../../utils/primaryCareClinics';
 import { colors, radius, spacing } from '../../../theme';
 import type { LongitudinalAssignment } from '../../../types/api';
 import { goBack } from '../../../navigation/back';
 
 /**
- * CCC Longitudinal Matrix — who is where, on which day, supervised by whom.
+ * Primary Care Clinics — who is where, on which day, supervised by whom.
+ *
+ * The programme's clinic pool starts as the five standard Primary Care Clinics
+ * and grows as coordinators add others, either from the pre-defined catalog or by
+ * typing an exact clinic name. Adding a clinic stores it against the programme
+ * (`longitudinal_clinic_types`), so it becomes a selectable chip here and stays
+ * available to every coordinator. See `utils/primaryCareClinics.ts` for the pool
+ * and `services/longitudinal.createClinicType` for the persistence.
  *
  * ### Why the rows are code and the columns are data
  *
@@ -97,11 +116,23 @@ interface Placement {
 export default function LongitudinalMatrixScreen() {
   const { session } = useSession();
   const programId = session?.programId ?? 0;
+  const { notify } = useInAppNotifications();
 
   const academicYearOptions = useMemo(() => getAcademicYears(7, 3), []);
   const [academicYear, setAcademicYear] = useState(academicYearOptions[0] ?? '');
 
-  const clinicTypes = useApiResource(() => fetchClinicTypes(programId), [programId]);
+  /**
+   * The programme's clinics, including inactive ones.
+   *
+   * Inactive rows are what the catalog knows about: a clinic that is on record
+   * but was moved out of the default pool must not be offered again, and the
+   * server reactivates it by name if a coordinator picks it. The chip pool below
+   * filters to the active ones.
+   */
+  const clinicTypes = useApiResource(
+    () => fetchClinicTypes(programId, { includeInactive: true }),
+    [programId],
+  );
   /**
    * Assignments are scoped by the selected year; supervisor assignments are not.
    *
@@ -118,13 +149,23 @@ export default function LongitudinalMatrixScreen() {
   );
   const supervisors = useApiResource(() => fetchSupervisorAssignments(programId), [programId]);
 
-  const clinicOptions = useMemo<SelectOption<ClinicFilter>[]>(
-    () => [
-      { value: 'ALL', label: 'All clinics' },
-      ...(clinicTypes.data ?? []).map((clinic) => ({ value: String(clinic.id), label: clinic.clinic_name })),
-    ],
+  /** The clinics selectable right now: active, standard five first, then added. */
+  const activeClinics = useMemo(
+    () => (clinicTypes.data ?? []).filter((clinic) => clinic.is_active === 1),
     [clinicTypes.data],
   );
+
+  const clinicOptions = useMemo<SelectOption<ClinicFilter>[]>(() => {
+    const byName = new Map(activeClinics.map((clinic) => [clinicNameKey(clinic.clinic_name), clinic]));
+    const ordered = sortClinicOptions(activeClinics.map((clinic) => clinic.clinic_name));
+    return [
+      { value: 'ALL', label: 'All clinics' },
+      ...ordered.flatMap((name) => {
+        const clinic = byName.get(clinicNameKey(name));
+        return clinic ? [{ value: String(clinic.id), label: clinic.clinic_name }] : [];
+      }),
+    ];
+  }, [activeClinics]);
   const [clinicFilter, setClinicFilter] = useState<ClinicFilter>('ALL');
 
   /**
@@ -132,16 +173,20 @@ export default function LongitudinalMatrixScreen() {
    *
    * WBC is the clinic the ten slots belong to, so it wins over whichever clinic
    * happens to be selected: filtering the *rows* by clinic type is a different
-   * control from choosing the *columns*. Falls back to the first active clinic so
-   * a programme without a WBC row still gets real slots.
+   * control from choosing the *columns*. Falls back to the selected clinic, then
+   * to the first active clinic so a programme without a WBC row still gets real
+   * slots.
    */
   const columnClinic = useMemo(() => {
-    const clinics = clinicTypes.data ?? [];
-    const wbc = clinics.find((clinic) => /wbc/i.test(clinic.clinic_code ?? '') || /wbc/i.test(clinic.clinic_name ?? ''));
+    const wbc = activeClinics.find(
+      (clinic) => /wbc/i.test(clinic.clinic_code ?? '') || /wbc/i.test(clinic.clinic_name ?? ''),
+    );
     if (wbc) return wbc;
-    if (clinicFilter !== 'ALL') return clinics.find((clinic) => String(clinic.id) === clinicFilter) ?? null;
-    return clinics.find((clinic) => clinic.is_active === 1) ?? clinics[0] ?? null;
-  }, [clinicTypes.data, clinicFilter]);
+    if (clinicFilter !== 'ALL') {
+      return activeClinics.find((clinic) => String(clinic.id) === clinicFilter) ?? null;
+    }
+    return activeClinics[0] ?? null;
+  }, [activeClinics, clinicFilter]);
 
   const columnClinicId = columnClinic?.id ?? 0;
   const slots = useApiResource(
@@ -293,9 +338,11 @@ export default function LongitudinalMatrixScreen() {
   const rows = useMemo<MatrixRowDef[]>(() => {
     return CCC_SCHEDULE_ROWS.filter((row) => {
       if (clinicFilter === 'ALL') return true;
-      const clinic = (clinicTypes.data ?? []).find((candidate) => String(candidate.id) === clinicFilter);
+      const clinic = activeClinics.find((candidate) => String(candidate.id) === clinicFilter);
       if (!clinic) return true;
-      // The FMC days are not clinics, so a clinic filter cannot narrow them.
+      // A clinic with no recorded day runs across the week, so it cannot narrow
+      // the rows; the FMC days are not clinics either.
+      if (!clinic.default_day_of_week) return true;
       return row.code === 'FMC' || dayOfWeekMatches(clinic.default_day_of_week, row.weekday);
     }).map((row) => {
       const rowPlacements = (residentsByDay.get(row.key) ?? []).map((resident) => resident.residentId);
@@ -347,13 +394,107 @@ export default function LongitudinalMatrixScreen() {
         cells,
       };
     });
-  }, [columns, clinicFilter, clinicTypes.data, residentsByDay, placementsBySlot, placements, facultyByRow]);
+  }, [columns, clinicFilter, activeClinics, residentsByDay, placementsBySlot, placements, facultyByRow]);
 
   const loading = clinicTypes.isLoading || assignments.isLoading || supervisors.isLoading || slots.isLoading;
   const error = clinicTypes.error ?? assignments.error ?? supervisors.error ?? slots.error;
   const usingFallbackSlots = (slots.data ?? []).filter((slot) => slot.is_active === 1).length === 0;
   const totalResidents = assignments.data?.length ?? 0;
   const totalPairings = placements.length;
+
+  /* ---- Add / choose other clinic ---------------------------------------- */
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [addQuery, setAddQuery] = useState('');
+  const [customName, setCustomName] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  /** Clinics already on record for the programme, active or not. */
+  const knownClinicKeys = useMemo(
+    () => new Set((clinicTypes.data ?? []).map((clinic) => clinicNameKey(clinic.clinic_name))),
+    [clinicTypes.data],
+  );
+
+  /**
+   * The catalog entries that are not already on record.
+   *
+   * A clinic that was moved out of the default pool is still on record, so it is
+   * excluded here — picking it would only reactivate the row it already has.
+   */
+  const catalogCandidates = useMemo(
+    () => PRIMARY_CARE_CLINIC_CATALOG.filter((entry) => !knownClinicKeys.has(clinicNameKey(entry.name))),
+    [knownClinicKeys],
+  );
+
+  const catalogNeedle = addQuery.trim().toLowerCase();
+  const visibleCatalog = catalogNeedle
+    ? catalogCandidates.filter((entry) => entry.name.toLowerCase().includes(catalogNeedle))
+    : catalogCandidates;
+
+  function resetAddForm() {
+    setAddQuery('');
+    setCustomName('');
+    setAddError(null);
+  }
+
+  function closeAddSheet() {
+    setAddOpen(false);
+    resetAddForm();
+  }
+
+  /**
+   * Add a clinic, then make it the clinic this view is showing.
+   *
+   * The row is inserted (or reactivated) server-side for the active programme and
+   * patched into the local list immediately, so the new chip appears without a
+   * round-trip; `refresh` then reconciles the list with the server.
+   */
+  async function handleAddClinic(payload: {
+    clinic_name: string;
+    default_day_of_week?: string | null;
+    start_time?: string | null;
+    end_time?: string | null;
+    requires_release_letter?: number;
+  }) {
+    setAdding(true);
+    setAddError(null);
+    try {
+      const created = await createClinicType({ program_id: programId, ...payload });
+      clinicTypes.setData((current) => [
+        ...(current ?? []).filter((clinic) => clinic.id !== created.id),
+        created,
+      ]);
+      setClinicFilter(String(created.id));
+      closeAddSheet();
+      clinicTypes.refresh();
+      notify({
+        title: 'Clinic added',
+        message: `${created.clinic_name} is now available in Primary Care Clinics.`,
+        tone: 'success',
+      });
+    } catch (caught) {
+      setAddError(caught instanceof Error ? caught.message : 'Could not add this clinic.');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  function handleAddCatalog(entry: ClinicCatalogEntry) {
+    void handleAddClinic({
+      clinic_name: entry.name,
+      default_day_of_week: entry.defaultDay,
+      start_time: entry.startTime,
+      end_time: entry.endTime,
+      requires_release_letter: entry.requiresReleaseLetter ? 1 : 0,
+    });
+  }
+
+  function handleAddCustom() {
+    const name = customName.trim();
+    if (!name) return;
+    void handleAddClinic({ clinic_name: name });
+  }
 
   return (
     <Screen onRefresh={() => {
@@ -363,7 +504,7 @@ export default function LongitudinalMatrixScreen() {
       void slots.refresh();
     }}>
       <AppHeader
-        title="CCC Longitudinal Matrix"
+        title="Primary Care Clinics"
         subtitle={`${academicYear} · ${columnClinic?.clinic_name ?? 'Clinic slots'}`}
         onBack={goBack}
       />
@@ -381,12 +522,24 @@ export default function LongitudinalMatrixScreen() {
         value={clinicFilter}
         onChange={setClinicFilter}
         options={clinicOptions}
-        hint="Filters the rows. The columns are always the slot list of the selected slot clinic."
+        hint="Filters the rows. The columns are always the slot list of the selected slot clinic. Added clinics appear here as chips."
+      />
+
+      <Button
+        label="Add / Choose Other Clinic"
+        variant="outline"
+        icon={PlusCircle}
+        onPress={() => {
+          setAddError(null);
+          setAddOpen(true);
+        }}
+        accessibilityHint="Opens the clinic catalog and lets you type a custom clinic name"
+        style={styles.addClinicButton}
       />
 
       <ImportTools
         template="ccc"
-        uploadLabel="Upload CCC Matrix"
+        uploadLabel="Upload Primary Care Clinics Matrix"
         upload={(file) =>
           uploadCccMatrix(file, { program_id: programId, academic_year: academicYear })
         }
@@ -443,15 +596,106 @@ export default function LongitudinalMatrixScreen() {
         <Card>
           <EmptyState
             icon={CalendarX}
-            title="No longitudinal assignments yet"
+            title="No Primary Care Clinic assignments yet"
             message="Assign residents to a clinic and this matrix will fill in."
             actionLabel="Assign faculty"
             onActionPress={() => router.push('/program/supervisor/assign')}
           />
         </Card>
       ) : null}
+
+      <Sheet
+        visible={addOpen}
+        onClose={closeAddSheet}
+        title="Add a clinic"
+        subtitle="Choose a clinic from the catalog or type an exact name."
+        footer={
+          <Button
+            label="Close"
+            variant="outline"
+            onPress={closeAddSheet}
+            accessibilityHint="Closes this list without adding a clinic"
+          />
+        }
+      >
+        {addError ? <Banner tone="danger" title="Could not add the clinic" message={addError} /> : null}
+
+        <TextField
+          label="Other / custom clinic name"
+          value={customName}
+          onChangeText={setCustomName}
+          placeholder="e.g. Al Noor Diabetes Clinic"
+          hint="Use this when the clinic is not in the catalog below. It is stored for this programme and offered to every coordinator."
+        />
+        <Button
+          label={adding ? 'Adding…' : 'Add custom clinic'}
+          onPress={handleAddCustom}
+          disabled={customName.trim().length === 0 || adding}
+          loading={adding}
+          style={styles.customButton}
+        />
+
+        <SectionHeader title="Catalog" trailing={`${visibleCatalog.length} available`} />
+
+        <SearchInput
+          value={addQuery}
+          onChangeText={setAddQuery}
+          placeholder="Search clinics"
+          accessibilityLabel="Search the clinic catalog"
+        />
+
+        <View style={styles.catalogList}>
+          {visibleCatalog.map((entry) => (
+            <Pressable
+              key={entry.name}
+              onPress={() => handleAddCatalog(entry)}
+              disabled={adding}
+              accessibilityRole="button"
+              accessibilityLabel={`Add ${entry.name}`}
+              style={({ pressed }) => [styles.catalogRow, pressed && !adding ? styles.catalogRowPressed : null]}
+            >
+              <View style={styles.catalogText}>
+                <Text variant="bodySmall" numberOfLines={2}>
+                  {entry.name}
+                </Text>
+                <Text variant="caption" tone="muted" numberOfLines={1}>
+                  {describeCatalogEntry(entry)}
+                </Text>
+              </View>
+              <Plus color={colors.primary} size={18} />
+            </Pressable>
+          ))}
+
+          {visibleCatalog.length === 0 ? (
+            <Text variant="bodySmall" tone="muted" align="center" style={styles.catalogEmpty}>
+              {catalogNeedle
+                ? `No catalog clinic matches “${addQuery.trim()}”. Type it above to add it.`
+                : 'Every catalog clinic is already in the pool. Type a custom name above to add another.'}
+            </Text>
+          ) : null}
+        </View>
+      </Sheet>
     </Screen>
   );
+}
+
+/** One catalog row's supporting line: the session, and whether a letter is needed. */
+function describeCatalogEntry(entry: ClinicCatalogEntry): string {
+  const parts: string[] = [];
+  if (entry.defaultDay) {
+    parts.push(`${titleCaseDay(entry.defaultDay)}${entry.startTime && entry.endTime ? ` ${entry.startTime}–${entry.endTime}` : ''}`);
+  } else if (entry.startTime && entry.endTime) {
+    parts.push(`Any day ${entry.startTime}–${entry.endTime}`);
+  } else {
+    parts.push('No fixed day');
+  }
+  if (entry.requiresReleaseLetter) parts.push('Release letter required');
+  return parts.join(' · ');
+}
+
+function titleCaseDay(day: string): string {
+  const lower = day.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
 
 /** The residents free to cover a missed session on one academic day. */
@@ -573,6 +817,39 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primarySoft,
     paddingHorizontal: spacing.xs,
     paddingVertical: 2,
+  },
+  addClinicButton: {
+    marginBottom: spacing.lg,
+  },
+  customButton: {
+    marginBottom: spacing.lg,
+  },
+  catalogList: {
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  catalogRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    minHeight: 56,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+  },
+  catalogRowPressed: {
+    backgroundColor: colors.primarySoft,
+  },
+  catalogText: {
+    flex: 1,
+    gap: spacing.xxs,
+  },
+  catalogEmpty: {
+    paddingVertical: spacing.lg,
   },
   pools: {
     gap: spacing.sm,

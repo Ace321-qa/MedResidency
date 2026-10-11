@@ -1,5 +1,4 @@
-import XLSX from 'xlsx';
-import type { WorkSheet } from 'xlsx';
+import * as XLSX from 'xlsx';
 export type XlsxCellValue = string | number | boolean | null | undefined;
 
 export function buildXlsx(

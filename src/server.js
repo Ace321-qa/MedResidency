@@ -96,6 +96,17 @@ if (require.main === module) {
     }
 
     await testConnection();
+
+    // Seed the standard Primary Care Clinics for every programme so a fresh
+    // install (or a programme created after the last boot) starts with its five
+    // default clinics. Idempotent: existing rows are matched by name.
+    try {
+      const LongitudinalService = require('./services/longitudinalService');
+      const seeded = await LongitudinalService.ensureDefaultClinics();
+      console.log(`[primary-care] ensured ${seeded.length} default clinic record(s).`);
+    } catch (error) {
+      console.error('[primary-care] could not seed default clinics:', error.message);
+    }
   });
 
   server.on('error', (error) => {

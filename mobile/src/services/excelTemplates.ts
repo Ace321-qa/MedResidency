@@ -69,14 +69,14 @@ const CATALOGUE_SAMPLE_ROWS: XlsxCellValue[][] = [
   ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD'],
 ];
 
-/** Thirteen block columns, because the cohort grid reserves all of them. */
-const MASTER_COLUMNS: XlsxCellValue[] = [
-  'Resident Corporate ID',
-  'Resident Name',
-  ...Array.from({ length: 13 }, (_, index) => `Block ${index + 1}`),
-];
-
-const CCC_ROWS: XlsxCellValue[][] = [
+/**
+ * The Primary Care Clinics matrix workbook's header row.
+ *
+ * The offline copy built on this device must match the one the API serves
+ * (`src/utils/excel/grid.js`): the importer reads the first sheet and matches
+ * these columns by name, so the header strings are a format contract.
+ */
+const PRIMARY_CARE_CLINICS_ROWS: XlsxCellValue[][] = [
   ['Academic Day / Clinic', 'Resident Pairings', 'Faculty Leads', 'Catchup Pools'],
 ]
 
@@ -438,10 +438,10 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
     ],
   },
   ccc: {
-    fileName: 'ccc_matrix_template.xlsx',
+    fileName: 'primary_care_clinics_matrix_template.xlsx',
     endpoint: '/rotations/import/ccc/template',
-    sheetName: 'CCC Matrix',
-    rows: CCC_ROWS,
+    sheetName: 'Primary Care Clinics Matrix',
+    rows: PRIMARY_CARE_CLINICS_ROWS,
   },
   timesheet: {
     fileName: 'monthly_timesheet_template.xlsx',
@@ -462,11 +462,6 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
     ],
   },
 };
-
-/** Thirteen blank block cells, so the row is visible as a filled-in row shape. */
-function emptyMasterRow(): XlsxCellValue[] {
-  return Array.from({ length: 13 }, () => '');
-}
 
 export interface TemplateOptions {
   /**

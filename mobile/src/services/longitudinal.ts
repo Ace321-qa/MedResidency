@@ -9,10 +9,39 @@ import type {
   LongitudinalSupervisorAssignment,
 } from '../types/api';
 
-export async function fetchClinicTypes(programId: number): Promise<LongitudinalClinicType[]> {
-  const path = `/longitudinal/clinic-types${queryString({ program_id: programId })}`;
+export async function fetchClinicTypes(
+  programId: number,
+  options: { includeInactive?: boolean } = {},
+): Promise<LongitudinalClinicType[]> {
+  const params: Record<string, string | number> = { program_id: programId };
+  if (options.includeInactive) params.include_inactive = '1';
+  const path = `/longitudinal/clinic-types${queryString(params)}`;
   const response = await request<ApiListResponse<LongitudinalClinicType>>(path);
   return response.data ?? [];
+}
+
+/**
+ * Add a clinic to the programme's Primary Care Clinics catalog.
+ *
+ * The name is the identity; an existing clinic — active or not — is reactivated
+ * server-side, so this is also how a clinic brought back from the catalog returns
+ * with its original row, code and teaching history. A brand-new name is
+ * catalogued against the programme and persists for every coordinator.
+ */
+export async function createClinicType(payload: {
+  program_id: number;
+  clinic_name: string;
+  clinic_code?: string;
+  default_day_of_week?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  requires_release_letter?: number;
+}): Promise<LongitudinalClinicType> {
+  const response = await request<ApiResponse<LongitudinalClinicType>>('/longitudinal/clinic-types', {
+    method: 'POST',
+    data: payload,
+  });
+  return response.data;
 }
 
 /**

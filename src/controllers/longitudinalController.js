@@ -3,13 +3,41 @@ const LongitudinalService = require('../services/longitudinalService');
 class LongitudinalController {
   static async getClinicTypes(req, res) {
     try {
-      const { program_id } = req.query;
+      const { program_id, include_inactive } = req.query;
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      const data = await LongitudinalService.getClinicTypes(program_id);
+      const data = await LongitudinalService.getClinicTypes(program_id, {
+        includeInactive: include_inactive === '1' || include_inactive === 'true',
+      });
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `POST /longitudinal/clinic-types`
+   *
+   * Adds a clinic to a programme's Primary Care Clinics catalog — either a
+   * pre-defined one chosen from the catalog or a hand-typed custom name. Existing
+   * rows are reactivated, so this is safe to call for names already on record.
+   */
+  static async createClinicType(req, res) {
+    try {
+      const { program_id, clinic_name } = req.body;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      if (!clinic_name || !String(clinic_name).trim()) {
+        return res.status(400).json({ success: false, error: 'Missing required field: clinic_name' });
+      }
+      const data = await LongitudinalService.createClinicType(req.body);
+      return res.status(201).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
       return res.status(500).json({ success: false, error: error.message });
     }
   }
@@ -30,8 +58,8 @@ class LongitudinalController {
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      // Optional: the CCC matrix scopes by year, a resident's profile wants the
-      // whole longitudinal record.
+      // Optional: the Primary Care Clinics matrix scopes by year, a resident's
+      // profile wants the whole longitudinal record.
       const data = await LongitudinalService.getAllLongitudinalAssignments(program_id, academic_year || null);
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {

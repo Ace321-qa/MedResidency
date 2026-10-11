@@ -21,6 +21,7 @@ import {
   calculateBlockEndDate,
   calculateEndDate,
   calculateWeeklySubRanges,
+  describeWindow,
 } from '../src/utils/dateCalc';
 import {
   allWeeks,
@@ -31,7 +32,6 @@ import {
   weekNumberForDate,
   weekWindow,
 } from '../src/utils/masterGridCalendar';
-import { describeWindow } from '../src/utils/dateCalc';
 
 const failures: string[] = [];
 

@@ -121,7 +121,7 @@ class RotationImportController {
 
   static async cccTemplate(req, res) {
     try {
-      res.setHeader('Content-Disposition', 'attachment; filename="ccc_matrix_template.xlsx"');
+      res.setHeader('Content-Disposition', 'attachment; filename="primary_care_clinics_matrix_template.xlsx"');
       res.setHeader(
         'Content-Type',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -534,7 +534,7 @@ class RotationImportController {
   }
 
   /**
-   * Import the CCC longitudinal matrix.
+   * Import the Primary Care Clinics matrix.
    *
    * Each row names an academic day and clinic, the residents paired to it and
    * the faculty leading it. The clinic resolves against this programme's clinic
