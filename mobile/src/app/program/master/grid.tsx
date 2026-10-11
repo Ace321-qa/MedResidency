@@ -5,7 +5,6 @@ import { router } from 'expo-router';
 
 import {
   AppHeader,
-  Banner,
   Card,
   ChoiceGroup,
   EmptyState,
@@ -13,10 +12,8 @@ import {
   ImportTools,
   MatrixTable,
   Screen,
-  SectionHeader,
   SelectField,
   Sheet,
-  
   SkeletonList,
   StatusBadge,
   Text,
@@ -129,12 +126,10 @@ export default function MasterGridScreen() {
 
   const rotations = useApiResource(() => fetchRotations(programId), [programId]);
 
-  const { blocksByNumber, residents, cellFor, unassignedCells, rotationKeys } = useMemo(() => {
+  const { blocksByNumber, residents, cellFor } = useMemo(() => {
     const blockMap = new Map<number, GridBlock>();
     const residentMap = new Map<number, GridResident>();
     const cellsByResidentBlock = new Map<string, CohortGridCell[]>();
-    const rotationKeysSet = new Set<string>();
-    let gaps = 0;
 
     for (const row of grid.data ?? []) {
       if (!blockMap.has(row.block_number)) {
@@ -162,11 +157,6 @@ export default function MasterGridScreen() {
       } else {
         cellsByResidentBlock.set(key, [row]);
       }
-      if (row.is_assigned === 1 && row.rotation_name) {
-        rotationKeysSet.add(row.rotation_code ?? row.rotation_name);
-      } else {
-        gaps += 1;
-      }
     }
 
     const byNumber = new Map<number, GridBlock>();
@@ -175,8 +165,6 @@ export default function MasterGridScreen() {
     return {
       blocksByNumber: byNumber,
       residents: Array.from(residentMap.values()),
-      unassignedCells: gaps,
-      rotationKeys: rotationKeysSet,
       cellFor: (residentId: number, blockId: number): CohortGridCell[] | undefined =>
         cellsByResidentBlock.get(cellKey(residentId, blockId)),
     };
@@ -209,7 +197,7 @@ export default function MasterGridScreen() {
         for (const blockNumber of BLOCK_NUMBERS) {
           const block = blocksByNumber.get(blockNumber);
           const columnKey = block ? `block-${block.block_id}` : `block-missing-${blockNumber}`;
-          cells[columnKey] = blockCellNode(cellFor(resident.resident_id, block?.block_id ?? 0), block, () =>
+          cells[columnKey] = blockCellNode(resident.resident_id, cellFor(resident.resident_id, block?.block_id ?? 0), block, () =>
             openAssignSheet({
               residentId: resident.resident_id,
               residentName: resident.resident_name,
@@ -272,7 +260,7 @@ export default function MasterGridScreen() {
 
         for (let w = 1; w <= 52; w += 1) {
           const win = weekWindow(w);
-          cells[`week-${w}`] = weeklyCellNode(weekToAssignments.get(w), w, () =>
+          cells[`week-${w}`] = weeklyCellNode(resident.resident_id, weekToAssignments.get(w), w, () =>
             openAssignSheet({
               residentId: resident.resident_id,
               residentName: resident.resident_name,
@@ -328,7 +316,6 @@ export default function MasterGridScreen() {
 
   async function handleAssign() {
     if (!selected || !assignRotationId || !programId) return;
-    const rotation = rotations.data?.find((r) => r.rotation_id === assignRotationId);
     const start = selected.startDate ?? (selected.blockNumber
       ? blockWindowStart(selected.blockNumber)
       : MASTER_GRID_START);
@@ -346,8 +333,8 @@ export default function MasterGridScreen() {
       });
       setAssignSheetOpen(false);
       grid.refresh();
-    } catch (e) {
-      // ignore; UI can show banner if needed
+    } catch {
+      // ignore; UI can show a banner if needed
     }
   }
 
@@ -554,15 +541,34 @@ function subWeekSlotsForAssignment(assignment: CohortGridCell, block: GridBlock 
  * A single assignment is painted once per sub-week slot it covers (block mode)
  * or once per weekly column (weekly mode), so its identity alone is not a valid
  * React key — the same `assignment_id` legitimately appears several times in one
- * cell. `scope` names the exact slot being drawn (e.g. `b3-s2`), and the local
- * index disambiguates rows that share an id or fall back to the same rotation.
+ * cell and across residents. The key therefore folds together every axis that
+ * can repeat:
+ *
+ *   - render location  `b<blockId>-s<slot>` (block) or `w<weekNumber>` (weekly)
+ *   - the row's resident  `r<residentId>`
+ *   - the assignment identity  `a<id>`, falling back to the rotation
+ *   - the local array index, which disambiguates rows that share an id or fall
+ *     back to the same rotation (`-i<index>`)
+ *
+ * Example: `badge-r1-b3-s2-a5` or `badge-r4-w14-rFM:antenatal-0`.
  */
-function badgeKey(scope: string, assignment: CohortGridCell, index?: number): string {
+function badgeKey(params: {
+  residentId: number;
+  assignment: CohortGridCell;
+  blockId?: number;
+  slot?: number;
+  weekNumber?: number;
+  index?: number;
+}): string {
+  const { residentId, assignment, blockId, slot, weekNumber, index } = params;
   const identity =
     assignment.assignment_id !== null && assignment.assignment_id !== undefined
       ? `a${assignment.assignment_id}`
       : `r${assignment.rotation_id ?? 0}:${assignment.rotation_code ?? assignment.rotation_name ?? 'none'}`;
-  return index === undefined ? `${scope}-${identity}` : `${scope}-${identity}-${index}`;
+  const location =
+    weekNumber !== undefined ? `w${weekNumber}` : `b${blockId ?? 0}-s${slot ?? 0}`;
+  const suffix = index === undefined ? '' : `-i${index}`;
+  return `badge-r${residentId}-${location}-${identity}${suffix}`;
 }
 
 function assignmentBadge(assignment: CohortGridCell, label: string, key: string): React.ReactNode {
@@ -613,6 +619,7 @@ function addBadge(onAdd: () => void): React.ReactNode {
  * disappear, so a coordinator can never push a fifth item into a full block.
  */
 function blockCellNode(
+  residentId: number,
   cell: CohortGridCell[] | undefined,
   block: GridBlock | undefined,
   onAdd: () => void,
@@ -634,6 +641,7 @@ function blockCellNode(
   }
 
   const blockNumber = block?.block_number ?? assignments[0].block_number;
+  const blockId = block?.block_id;
   const badges: React.ReactNode[] = [];
   for (let slot = 1; slot <= 4; slot += 1) {
     const assignment = slots.get(slot);
@@ -642,7 +650,8 @@ function blockCellNode(
       assignmentBadge(
         assignment,
         `${blockNumber}.${slot}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`,
-        badgeKey(`b${blockNumber}-s${slot}`, assignment),
+        // Slot-scoped, resident-aware key supplied by the cell iterator.
+        badgeKey({ residentId, assignment, blockId, slot }),
       ),
     );
   }
@@ -651,7 +660,8 @@ function blockCellNode(
       assignmentBadge(
         assignment,
         rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name),
-        badgeKey(`b${blockNumber}-unplaced`, assignment, index),
+        // Local index is the final fallback for rows that cannot be slotted.
+        badgeKey({ residentId, assignment, blockId, index }),
       ),
     );
   });
@@ -667,6 +677,7 @@ function blockCellNode(
  * single badge and there is never a stack of badges inside a sub-week cell.
  */
 function weeklyCellNode(
+  residentId: number,
   cell: CohortGridCell[] | undefined,
   weekNumber: number,
   onAdd: () => void,
@@ -679,7 +690,12 @@ function weeklyCellNode(
   const label = window
     ? `${window.blockNumber}.${window.weekInBlock}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`
     : `${weekNumber}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
-  return <View style={styles.cellBadges}>{assignmentBadge(assignment, label, badgeKey(`w${weekNumber}`, assignment))}</View>;
+  // Week-scoped, resident-aware key supplied by the cell iterator.
+  return (
+    <View style={styles.cellBadges}>
+      {assignmentBadge(assignment, label, badgeKey({ residentId, assignment, weekNumber }))}
+    </View>
+  );
 }
 
 function rowAccentTone(code: string | null): 'info' | 'success' | 'warning' | 'neutral' {

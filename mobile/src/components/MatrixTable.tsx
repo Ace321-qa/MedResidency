@@ -382,6 +382,7 @@ const styles = StyleSheet.create({
   },
   tableRow: {
     flexDirection: 'row',
+    alignItems: 'stretch',
     borderBottomWidth: 2,
     borderBottomColor: '#64748B',
     minHeight: 56,
