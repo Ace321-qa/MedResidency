@@ -7,6 +7,11 @@ import type {
   FacultySupervisor,
   LongitudinalClinicSlot,
   LongitudinalSupervisorAssignment,
+  PrimaryCareCycle,
+  PrimaryCareClinicSlot,
+  PrimaryCareBackupFaculty,
+  PrimaryCareCycleSchedule,
+  RandomizeSupervisorsResult,
 } from '../types/api';
 
 export async function fetchClinicTypes(
@@ -158,34 +163,90 @@ export async function rotateSupervisor(assignmentId: number, payload: any): Prom
 }
 
 
-export async function fetchCycleSchedule(programId: number, cycleId?: number) {
-  const params: any = { program_id: programId };
+export async function fetchCycleSchedule(
+  programId: number,
+  cycleId?: number,
+): Promise<PrimaryCareCycleSchedule> {
+  const params: Record<string, string | number> = { program_id: programId };
   if (cycleId) params.cycle_id = cycleId;
   const path = `/longitudinal/cycle-schedule${queryString(params)}`;
-  const response = await request<ApiResponse<any>>(path);
+  const response = await request<ApiResponse<PrimaryCareCycleSchedule>>(path);
   return response.data;
 }
 
-export async function updateCycleHeader(payload: any) {
-  const response = await request<ApiResponse<any>>('/longitudinal/cycle-schedule/header', {
+export interface CycleHeaderUpdate {
+  program_id: number;
+  cycle_id?: number;
+  cycle_number?: string;
+  week_number?: string;
+  start_date?: string;
+  dailyHeaders?: {
+    id: number;
+    day_of_week?: string;
+    shift_time?: string | null;
+    pgy_level?: string | null;
+    in_charge_faculty_name?: string | null;
+    in_charge_faculty_id?: number | null;
+  }[];
+}
+
+export async function updateCycleHeader(payload: CycleHeaderUpdate): Promise<PrimaryCareCycle> {
+  const response = await request<ApiResponse<PrimaryCareCycle>>('/longitudinal/cycle-schedule/header', {
     method: 'PUT',
     data: payload,
   });
   return response.data;
 }
 
-export async function updateCycleSlot(slotId: number, payload: any) {
-  const response = await request<ApiResponse<any>>('/longitudinal/cycle-schedule/slot', {
+export interface CycleSlotUpdate {
+  resident_1_name?: string | null;
+  resident_2_name?: string | null;
+  faculty_name?: string | null;
+  faculty_id?: number | null;
+}
+
+export async function updateCycleSlot(
+  slotId: number,
+  payload: CycleSlotUpdate,
+): Promise<PrimaryCareClinicSlot> {
+  const response = await request<ApiResponse<PrimaryCareClinicSlot>>('/longitudinal/cycle-schedule/slot', {
     method: 'PUT',
     data: { slot_id: slotId, ...payload },
   });
   return response.data;
 }
 
-export async function updateBackupFaculty(payload: any) {
-  const response = await request<ApiResponse<any>>('/longitudinal/cycle-schedule/backup', {
+export async function updateBackupFaculty(payload: {
+  program_id: number;
+  cycle_id?: number;
+  day_of_week: string;
+  faculty_list: { faculty_name: string; faculty_id?: number | null }[];
+}): Promise<PrimaryCareBackupFaculty[]> {
+  const response = await request<ApiResponse<PrimaryCareBackupFaculty[]>>('/longitudinal/cycle-schedule/backup', {
     method: 'POST',
     data: payload,
   });
+  return response.data;
+}
+
+/**
+ * Randomise or rotate supervising faculty across a cycle's clinic slots.
+ *
+ * Omitting `day_of_week` shuffles every CCC day; supplying one restricts the
+ * change to that day. `rationale` is recorded against every reassignment in the
+ * server-side audit trail.
+ */
+export async function randomizeSupervisors(payload: {
+  program_id: number;
+  cycle_id?: number;
+  day_of_week?: string;
+  rotation_months?: number;
+  randomize?: boolean;
+  rationale?: string;
+}): Promise<RandomizeSupervisorsResult> {
+  const response = await request<ApiResponse<RandomizeSupervisorsResult>>(
+    '/longitudinal/cycle-schedule/randomize',
+    { method: 'POST', data: payload },
+  );
   return response.data;
 }

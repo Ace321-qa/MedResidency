@@ -250,6 +250,33 @@ class LongitudinalController {
       return res.status(500).json({ success: false, error: error.message });
     }
   }
+
+  /**
+   * `POST /longitudinal/cycle-schedule/randomize`
+   *
+   * Randomise or rotate supervising faculty across a cycle's clinic slots. The
+   * optional `day_of_week` restricts the shuffle to one CCC day; `rationale` is
+   * recorded against every reassignment in the audit trail.
+   */
+  static async randomizeSupervisors(req, res) {
+    try {
+      const { program_id } = req.body;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      const data = await LongitudinalService.randomizeSupervisors(program_id, {
+        cycleId: req.body.cycle_id,
+        dayOfWeek: req.body.day_of_week || null,
+        rotationMonths: req.body.rotation_months,
+        randomize: req.body.randomize !== false,
+        rationale: req.body.rationale || null,
+      });
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
 }
 
 module.exports = LongitudinalController;

@@ -604,6 +604,8 @@ export interface FacultySupervisor {
   email: string | null;
   phone: string | null;
   is_active: number;
+  /** Server-concatenated name carrying the institutional `Dr.` title. */
+  display_name?: string;
 }
 
 export interface LongitudinalClinicSlot {
@@ -729,4 +731,66 @@ export interface RotationAssignmentDetail {
   assigned_weeks: Numeric;
   assignment_type: AssignmentType;
   notes: string | null;
+}
+
+/**
+ * Primary Care Clinics (CCC) cycle-schedule records.
+ *
+ * These mirror the four `primary_care_*` tables: a cycle, one header per
+ * academic day, twelve fixed clinic slots per day (ten clinics plus WBC and
+ * Leaves), and a per-day backup / catchup faculty pool.
+ */
+export interface PrimaryCareCycle {
+  id: number;
+  program_id: number;
+  cycle_number: string;
+  week_number: string;
+  /** Plain `YYYY-MM-DD`, normalised server-side. */
+  start_date: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PrimaryCareDailyHeader {
+  id: number;
+  cycle_id: number;
+  day_of_week: string;
+  shift_time: string | null;
+  pgy_level: string | null;
+  in_charge_faculty_id: number | null;
+  in_charge_faculty_name: string | null;
+}
+
+export interface PrimaryCareClinicSlot {
+  id: number;
+  daily_header_id: number;
+  clinic_number: number;
+  resident_1_name: string | null;
+  resident_2_name: string | null;
+  faculty_name: string | null;
+  faculty_id: number | null;
+}
+
+export interface PrimaryCareBackupFaculty {
+  id: number;
+  daily_header_id: number;
+  day_of_week: string;
+  faculty_name: string | null;
+  faculty_id: number | null;
+  priority_order: number;
+}
+
+export interface PrimaryCareCycleSchedule {
+  cycle: PrimaryCareCycle;
+  dailyHeaders: PrimaryCareDailyHeader[];
+  slots: PrimaryCareClinicSlot[];
+  backups: Record<string, PrimaryCareBackupFaculty[]>;
+}
+
+export interface RandomizeSupervisorsResult {
+  updated: number;
+  days: { day_of_week: string; reassigned: number }[];
+  rationale?: string | null;
+  rotation_months?: number;
+  reason?: string;
 }

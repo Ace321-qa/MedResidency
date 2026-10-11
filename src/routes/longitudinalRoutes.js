@@ -18,5 +18,6 @@ router.get('/cycle-schedule', LongitudinalController.getCycleSchedule);
 router.put('/cycle-schedule/header', LongitudinalController.updateCycleHeader);
 router.put('/cycle-schedule/slot', LongitudinalController.updateCycleSlot);
 router.post('/cycle-schedule/backup', LongitudinalController.updateBackupFaculty);
+router.post('/cycle-schedule/randomize', LongitudinalController.randomizeSupervisors);
 
 module.exports = router;
