@@ -192,6 +192,64 @@ class LongitudinalController {
       return res.status(500).json({ success: false, error: error.message });
     }
   }
+
+  static async getCycleSchedule(req, res) {
+    try {
+      const { program_id, cycle_id } = req.query;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
+      }
+      const data = await LongitudinalService.getCycleSchedule(program_id, { cycleId: cycle_id });
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async updateCycleHeader(req, res) {
+    try {
+      const { program_id } = req.body;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      const data = await LongitudinalService.updateCycleHeader(program_id, req.body);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async updateCycleSlot(req, res) {
+    try {
+      const { slot_id } = req.body;
+      if (!slot_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: slot_id' });
+      }
+      const data = await LongitudinalService.updateCycleSlot(slot_id, req.body);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async updateBackupFaculty(req, res) {
+    try {
+      const { program_id, day_of_week } = req.body;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      if (!day_of_week) {
+        return res.status(400).json({ success: false, error: 'Missing required field: day_of_week' });
+      }
+      const data = await LongitudinalService.updateBackupFaculty(program_id, req.body);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
 }
 
 module.exports = LongitudinalController;

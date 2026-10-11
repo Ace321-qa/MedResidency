@@ -274,434 +274,121 @@ class LongitudinalService {
     return { id, clinic_name: existing.clinic_name, clinic_code: existing.clinic_code, is_active: 0 };
   }
 
-  /**
-   * Seed the five standard Primary Care Clinics for every programme.
-   *
-   * Called at server boot and idempotent by construction: existing rows are
-   * matched by name and reactivated (never duplicated, never anything removed),
-   * and programmes that have no clinic records yet get the standard five. This is
-   * the only place new programmes receive their default pool; everything else a
-   * coordinator adds flows through `createClinicType`.
-   *
-   * @returns {Promise<object[]>} The seeded clinics.
-   */
-  static async ensureDefaultClinics() {
-    const [programs] = await db.query('SELECT id FROM programs ORDER BY id ASC');
-    const seeded = [];
-    for (const program of programs) {
-      for (const clinic of PRIMARY_CARE_DEFAULT_CLINICS) {
-        const row = await this.createClinicType({
-          program_id: program.id,
-          clinic_name: clinic.clinic_name,
-          clinic_code: clinic.code,
-          default_day_of_week: clinic.default_day_of_week,
-          start_time: clinic.start_time,
-          end_time: clinic.end_time,
-          requires_release_letter: clinic.requires_release_letter,
-        });
-        seeded.push(row);
+  static async getCycleSchedule(programId, options = {}) {
+    const { cycleId } = options;
+    let cycle = null;
+    if (cycleId) {
+      const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ? AND program_id = ?', [cycleId, programId]);
+      cycle = cycles[0] || null;
+    } else {
+      const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+      cycle = cycles[0] || null;
+    }
+    if (!cycle) {
+      cycle = { id: null, program_id: programId, cycle_number: 'Cycle 1', week_number: 'Week 1', start_date: new Date().toISOString().split('T')[0] };
+    }
+    const [headers] = await db.query('SELECT * FROM primary_care_daily_headers WHERE cycle_id = ? ORDER BY day_of_week', [cycle.id || 0]);
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
+    for (const day of days) {
+      const exists = headers.find(h => h.day_of_week === day);
+      if (!exists) {
+        await db.query('INSERT INTO primary_care_daily_headers (cycle_id, day_of_week, shift_time, pgy_level) VALUES (?, ?, ?, ?)',
+          [cycle.id || 0, day, (day === 'Tuesday' || day === 'Thursday') ? '07:00 - 2:00' : '10:30 - 2:00',
+           day === 'Sunday' ? 'PGY-3' : day === 'Monday' ? 'PGY-2' : day === 'Tuesday' ? 'FMC' : day === 'Wednesday' ? 'PGY-1' : 'FMC']);
       }
     }
-    return seeded;
-  }
-
-  static async getResidentLongitudinalAssignments(residentId) {
-    const query = `
-      SELECT
-        rla.id AS longitudinal_assignment_id,
-        rla.resident_id,
-        rla.clinic_type_id,
-        lct.clinic_code,
-        lct.clinic_name,
-        rla.site_name,
-        rla.supervisor_name,
-        rla.faculty_supervisor_id,
-        rla.day_of_week,
-        rla.start_time,
-        rla.end_time,
-        rla.start_date,
-        rla.end_date,
-        rla.is_active,
-        rla.requires_release_letter,
-        rla.release_letter_generated,
-        rla.notes
-      FROM resident_longitudinal_assignments rla
-      JOIN longitudinal_clinic_types lct ON lct.id = rla.clinic_type_id
-      WHERE rla.resident_id = ?
-      ORDER BY rla.start_date ASC
-    `;
-    const [rows] = await db.query(query, [residentId]);
-    return rows;
-  }
-
-  /**
-   * Every longitudinal assignment in a programme, optionally scoped to a year.
-   *
-   * `longitudinal_assignments` carries no `academic_year` column, so a year has to
-   * be resolved through the date window the assignment actually covers — the same
-   * overlap test `getLongitudinalMatrix` uses, against the programme's rotation
-   * blocks for that year. Omitting `academicYear` keeps the unfiltered behaviour,
-   * which is what the resident's own profile needs: a resident wants their whole
-   * longitudinal record, not the slice for the year currently selected.
-   */
-  static async getAllLongitudinalAssignments(programId, academicYear = null) {
-    let query = `
-      SELECT
-        rla.id AS longitudinal_assignment_id,
-        rla.resident_id,
-        CONCAT(r.first_name, ' ', r.last_name) AS resident_name,
-        rla.clinic_type_id,
-        lct.clinic_code,
-        lct.clinic_name,
-        rla.site_name,
-        rla.supervisor_name,
-        rla.faculty_supervisor_id,
-        rla.day_of_week,
-        rla.start_time,
-        rla.end_time,
-        rla.start_date,
-        rla.end_date,
-        rla.is_active,
-        re.year_in_program AS pgy_level
-      FROM resident_longitudinal_assignments rla
-      JOIN longitudinal_clinic_types lct ON lct.id = rla.clinic_type_id
-      JOIN residents r ON r.id = rla.resident_id
-      LEFT JOIN residency_enrollments re ON re.resident_id = r.id
-      WHERE lct.program_id = ?
-    `;
-    const params = [programId];
-
-    if (academicYear) {
-      const scopes = await RotationService.getAcademicYearScopes(academicYear, programId);
-      if (scopes.length === 0) return [];
-
-      // One scope per program; the programme is already pinned, so the first is
-      // the whole window. The overlap test is deliberately permissive: an
-      // assignment with open-ended dates belongs to every year it touches.
-      const scope = scopes[0];
-      query += ` AND (rla.start_date IS NULL OR rla.start_date <= ?)
-                AND (rla.end_date IS NULL OR rla.end_date >= ?)`;
-      params.push(scope.window_end, scope.window_start);
+    const [headers2] = await db.query('SELECT * FROM primary_care_daily_headers WHERE cycle_id = ? ORDER BY day_of_week', [cycle.id || 0]);
+    const allSlots = [];
+    for (const h of headers2) {
+      const [slots] = await db.query('SELECT * FROM primary_care_clinic_slots WHERE daily_header_id = ? ORDER BY clinic_number', [h.id]);
+      if (slots.length === 0) {
+        const inserts = [];
+        for (let i = 1; i <= 12; i++) inserts.push([h.id, i, null, null, null, null]);
+        if (inserts.length > 0) await db.query('INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id) VALUES ?', [inserts]);
+        const [slots2] = await db.query('SELECT * FROM primary_care_clinic_slots WHERE daily_header_id = ? ORDER BY clinic_number', [h.id]);
+        allSlots.push(...slots2);
+      } else allSlots.push(...slots);
     }
-
-    query += ' ORDER BY lct.clinic_name ASC, rla.day_of_week ASC';
-
-    const [rows] = await db.query(query, params);
-    return rows;
+    const headerIds = headers2.map(h=>h.id);
+    const [backups] = await db.query('SELECT * FROM primary_care_backup_faculty WHERE daily_header_id IN (?)', [headerIds.length>0?headerIds:[0]]);
+    const backupsByDay = {};
+    for (const b of backups) { if (!backupsByDay[b.day_of_week]) backupsByDay[b.day_of_week] = []; backupsByDay[b.day_of_week].push(b); }
+    return { cycle, dailyHeaders: headers2, slots: allSlots, backups: backupsByDay };
   }
 
-  /**
-/**
-   * Faculty who can supervise a longitudinal clinic.
-   *
-   * The supervisor form could never offer a selection because this list came back
-   * empty: `getFacultySupervisors` matched on `program_id` alone and the table
-   * carries rows for every department in the hospital, most of them not supervising
-   * this programme — and, before this change, departed faculty as well. It now
-   * filters to active faculty registered against the programme, which is what
-   * "supervising faculty" means in a supervision assignment, and reports which
-   * of the programme's clinics each person already supervises so the assignment
-   * screen can label an option.
-   *
-   * Departed faculty stay reachable with `includeInactive`, because a record of a
-   * posting that has already ended must still be editable.
-   *
-   * @param {number} programId
-   * @param {object} [options]
-   * @param {boolean} [options.includeInactive=false]
-   * @param {number} [options.clinicTypeId] - Also report covered clinic types.
-   */
-  static async getFacultySupervisors(programId, { includeInactive = false, clinicTypeId } = {}) {
-    let query = `
-      SELECT id, program_id, first_name, last_name, title, email, phone, is_active
-      FROM faculty_supervisors
-      WHERE program_id = ?
-    `;
-    const params = [programId];
-    if (!includeInactive) {
-      query += ' AND is_active = 1';
+  static async updateCycleHeader(programId, data = {}) {
+    let cycleId = data.cycle_id;
+    if (!cycleId) {
+      const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+      if (cycles.length > 0) cycleId = cycles[0].id;
+      else {
+        const [res] = await db.query('INSERT INTO primary_care_cycles (program_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?)',
+          [programId, data.cycle_number || 'Cycle 1', data.week_number || 'Week 1', data.start_date || new Date().toISOString().split('T')[0]]);
+        cycleId = res.insertId;
+      }
     }
-    query += ' ORDER BY last_name ASC, first_name ASC';
-
-    const [rows] = await db.query(query, params);
-    if (!clinicTypeId || rows.length === 0) return rows;
-
-    // Which clinics each of these faculty already supervise, for the option label.
-    const placeholders = rows.map(() => '?').join(', ');
-    const [links] = await db.query(
-      `SELECT faculty_supervisor_id, clinic_type_id
-       FROM longitudinal_clinic_supervisor_assignments
-       WHERE clinic_type_id = ? AND faculty_supervisor_id IN (${placeholders}) AND is_active = 1`,
-      [clinicTypeId, ...rows.map((row) => row.id)]
-    );
-
-    const byFaculty = new Map();
-    for (const link of links) {
-      const list = byFaculty.get(link.faculty_supervisor_id) ?? [];
-      list.push(link.clinic_type_id);
-      byFaculty.set(link.faculty_supervisor_id, list);
+    if (data.cycle_number !== undefined || data.week_number !== undefined || data.start_date !== undefined) {
+      const sets = [], params = [];
+      if (data.cycle_number !== undefined) { sets.push('cycle_number = ?'); params.push(data.cycle_number); }
+      if (data.week_number !== undefined) { sets.push('week_number = ?'); params.push(data.week_number); }
+      if (data.start_date !== undefined) { sets.push('start_date = ?'); params.push(data.start_date); }
+      params.push(cycleId, programId);
+      await db.query(`UPDATE primary_care_cycles SET ${sets.join(', ')} WHERE id = ? AND program_id = ?`, params);
     }
-
-    return rows.map((row) => ({ ...row, clinic_type_ids: byFaculty.get(row.id) ?? [] }));
+    if (data.dailyHeaders) {
+      for (const dh of data.dailyHeaders) {
+        const sets = [], params = [];
+        if (dh.shift_time !== undefined) { sets.push('shift_time = ?'); params.push(dh.shift_time); }
+        if (dh.pgy_level !== undefined) { sets.push('pgy_level = ?'); params.push(dh.pgy_level); }
+        if (dh.in_charge_faculty_name !== undefined) { sets.push('in_charge_faculty_name = ?'); params.push(dh.in_charge_faculty_name); }
+        if (sets.length > 0) { params.push(dh.id); await db.query(`UPDATE primary_care_daily_headers SET ${sets.join(', ')} WHERE id = ?`, params); }
+      }
+    }
+    const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ?', [cycleId]);
+    return cycles[0];
   }
 
-  static async getClinicSlots(clinicTypeId) {
-    const query = `
-      SELECT
-        id,
-        clinic_type_id,
-        slot_number,
-        slot_label,
-        day_of_week,
-        TIME_FORMAT(start_time, '%H:%i') AS start_time,
-        TIME_FORMAT(end_time, '%H:%i') AS end_time,
-        site_name,
-        notes,
-        is_active
-      FROM longitudinal_clinic_slots
-      WHERE clinic_type_id = ?
-      ORDER BY slot_number ASC
-    `;
-    const [rows] = await db.query(query, [clinicTypeId]);
-    return rows;
+  static async updateCycleSlot(slotId, data = {}) {
+    if (!slotId) { const e = new Error('slotId required'); e.statusCode = 400; throw e; }
+    const sets = [], params = [];
+    if (data.resident_1_name !== undefined) { sets.push('resident_1_name = ?'); params.push(data.resident_1_name); }
+    if (data.resident_2_name !== undefined) { sets.push('resident_2_name = ?'); params.push(data.resident_2_name); }
+    if (data.faculty_name !== undefined) { sets.push('faculty_name = ?'); params.push(data.faculty_name); }
+    if (sets.length === 0) { const e = new Error('Nothing to update'); e.statusCode = 400; throw e; }
+    params.push(slotId);
+    await db.query(`UPDATE primary_care_clinic_slots SET ${sets.join(', ')} WHERE id = ?`, params);
+    const [rows] = await db.query('SELECT * FROM primary_care_clinic_slots WHERE id = ?', [slotId]);
+    return rows[0];
   }
 
-  static async getSupervisorAssignments(programId, clinicTypeId = null) {
-    let query = `
-      SELECT
-        lsa.id,
-        lsa.program_id,
-        lsa.clinic_type_id,
-        lct.clinic_code,
-        lct.clinic_name,
-        lsa.longitudinal_assignment_id,
-        lsa.longitudinal_clinic_slot_id,
-        lsa.faculty_supervisor_id,
-        CONCAT(fs.first_name, ' ', fs.last_name) AS faculty_supervisor_name,
-        fs.title AS faculty_title,
-        fs.is_active AS faculty_is_active,
-        lsa.resident_id,
-        CONCAT(r.first_name, ' ', r.last_name) AS resident_name,
-        lsa.start_date,
-        lsa.end_date,
-        DATE_FORMAT(lsa.start_date, '%Y-%m-%d') AS start_date_iso,
-        DATE_FORMAT(lsa.end_date, '%Y-%m-%d') AS end_date_iso,
-        lsa.rotation_period_months,
-        lsa.is_primary,
-        lsa.is_active,
-        lsa.notes,
-        lcs.slot_number,
-        lcs.slot_label,
-        lcs.day_of_week AS slot_day_of_week,
-        lcs.site_name AS slot_site_name
-      FROM longitudinal_clinic_supervisor_assignments lsa
-      JOIN faculty_supervisors fs ON fs.id = lsa.faculty_supervisor_id
-      JOIN longitudinal_clinic_types lct ON lct.id = lsa.clinic_type_id
-      LEFT JOIN residents r ON r.id = lsa.resident_id
-      LEFT JOIN longitudinal_clinic_slots lcs ON lcs.id = lsa.longitudinal_clinic_slot_id
-      WHERE lsa.program_id = ?
-    `;
-    const params = [programId];
-    if (clinicTypeId) {
-      query += ' AND lsa.clinic_type_id = ?';
-      params.push(clinicTypeId);
+  static async updateBackupFaculty(programId, data = {}) {
+    const { cycle_id, day_of_week, faculty_list = [] } = data;
+    let cycleId = cycle_id;
+    if (!cycleId) {
+      const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+      if (cycles.length === 0) {
+        const [res] = await db.query('INSERT INTO primary_care_cycles (program_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?)',
+          [programId, 'Cycle 1', 'Week 1', new Date().toISOString().split('T')[0]]);
+        cycleId = res.insertId;
+      } else cycleId = cycles[0].id;
     }
-    query += ' ORDER BY lsa.start_date DESC';
-    const [rows] = await db.query(query, params);
-    return rows;
-  }
-
-  /**
-   * Create a faculty supervision assignment.
-   *
-   * The end date is the *evaluation* end date: a supervision posting runs for
-   * `rotation_period_months` (three by default) from the start date, so the end
-   * is derived rather than typed. A coordinator who sets a start date and an end
-   * date that disagrees with the three-month period is asking for one of them to
-   * be wrong, so an explicit mismatch is rejected with the derived date in the
-   * message instead of being silently overwritten.
-   */
-  static async createSupervisorAssignment(data) {
-    const {
-      program_id,
-      clinic_type_id,
-      longitudinal_assignment_id,
-      longitudinal_clinic_slot_id,
-      faculty_supervisor_id,
-      resident_id,
-      start_date,
-      end_date,
-      is_primary,
-      rotation_period_months,
-      notes,
-    } = data;
-
-    const months = Number(rotation_period_months) > 0 ? Number(rotation_period_months) : 3;
-    const derivedEnd = addMonths(start_date, months);
-
-    if (!derivedEnd) {
-      const error = new Error('start_date must be a real date in YYYY-MM-DD form.');
-      error.statusCode = 400;
-      throw error;
+    let [headers] = await db.query('SELECT * FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ?', [cycleId, day_of_week]);
+    let dailyHeaderId = headers[0]?.id;
+    if (!dailyHeaderId) {
+      await db.query('INSERT INTO primary_care_daily_headers (cycle_id, day_of_week, shift_time, pgy_level) VALUES (?, ?, ?, ?)',
+        [cycleId, day_of_week, (day_of_week === 'Tuesday' || day_of_week === 'Thursday') ? '07:00 - 2:00' : '10:30 - 2:00',
+         day_of_week === 'Sunday' ? 'PGY-3' : day_of_week === 'Monday' ? 'PGY-2' : day_of_week === 'Tuesday' ? 'FMC' : day_of_week === 'Wednesday' ? 'PGY-1' : 'FMC']);
+      const [h2] = await db.query('SELECT * FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ?', [cycleId, day_of_week]);
+      dailyHeaderId = h2[0].id;
     }
-
-    if (end_date && String(end_date).slice(0, 10) !== derivedEnd) {
-      const error = new Error(
-        `A ${months}-month supervision period starting ${String(start_date).slice(0, 10)} ends on ${derivedEnd}, not ${String(end_date).slice(0, 10)}.`
-      );
-      error.statusCode = 400;
-      throw error;
+    await db.query('DELETE FROM primary_care_backup_faculty WHERE daily_header_id = ? AND day_of_week = ?', [dailyHeaderId, day_of_week]);
+    const inserts = [];
+    for (let i = 0; i < faculty_list.length; i++) {
+      const f = faculty_list[i];
+      inserts.push([dailyHeaderId, day_of_week, (f.faculty_name || f.name || '').replace(/^Dr\.\s*/i, ''), f.faculty_id || null, i + 1]);
     }
-
-    const query = `
-      INSERT INTO longitudinal_clinic_supervisor_assignments
-        (program_id, clinic_type_id, longitudinal_assignment_id, longitudinal_clinic_slot_id, faculty_supervisor_id, resident_id,
-         start_date, end_date, is_primary, rotation_period_months, notes, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    `;
-    const [result] = await db.query(query, [
-      program_id,
-      clinic_type_id,
-      longitudinal_assignment_id || null,
-      longitudinal_clinic_slot_id || null,
-      faculty_supervisor_id,
-      resident_id || null,
-      String(start_date).slice(0, 10),
-      derivedEnd,
-      is_primary !== undefined ? (is_primary ? 1 : 0) : 1,
-      months,
-      notes || null,
-    ]);
-
-    return {
-      id: result.insertId,
-      ...data,
-      start_date: String(start_date).slice(0, 10),
-      end_date: derivedEnd,
-      rotation_period_months: months,
-      period_label: `${months} month${months === 1 ? '' : 's'} · ${describeWindow(String(start_date).slice(0, 10), derivedEnd)}`,
-    };
-  }
-
-  static async rotateSupervisor(assignmentId, newSupervisorId, newStartDate, newEndDate, notes) {
-    const query = `
-      UPDATE longitudinal_clinic_supervisor_assignments
-      SET faculty_supervisor_id = ?, start_date = ?, end_date = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `;
-    const [result] = await db.query(query, [newSupervisorId, newStartDate, newEndDate, notes || null, assignmentId]);
-    return { affectedRows: result.affectedRows };
-  }
-
-  /**
-   * Longitudinal Matrix: one row per resident per longitudinal clinic type.
-   *
-   * Longitudials run the whole year rather than sitting inside a rotation
-   * block, so the academic year is resolved through rotation_blocks to get the
-   * program(s) and the calendar window (see
-   * RotationService.getAcademicYearScopes). An assignment counts as covering
-   * that year when it overlaps the window -- which includes it, rather than
-   * being fully contained by it, because a clinic running the full academic
-   * year extends past both ends of the block calendar.
-   *
-   * LEFT JOINs keep unassigned cells visible, so the matrix doubles as the
-   * clinic coverage report the coordinator needs to spot gaps.
-   *
-   * Row grain is one resident/clinic/assignment; `assignment_count` reports how
-   * many assignments share that cell.
-   *
-   * @param {object} filters
-   * @param {string} filters.academic_year - Required. Accepts "2026/2027" or "2026-2027".
-   * @param {number} [filters.program_id]
-   * @param {number} [filters.pgy_level]
-   * @param {string} [filters.resident_status]
-   */
-  static async getLongitudinalMatrix(filters = {}) {
-    const { pgy_level, resident_status } = filters;
-    // `getAcademicYearScopes` matches both the hyphenated and slash spellings of
-    // the year, so it is handed whatever the caller sent.
-    const academicYear = filters.academic_year;
-    const programId = filters.program_id || null;
-
-    const scopes = await RotationService.getAcademicYearScopes(academicYear, programId);
-    if (scopes.length === 0) return [];
-
-    const placeholders = scopes.map(() => '?').join(', ');
-    const windowConditions = scopes
-      .map(
-        () =>
-          `(
-            (rla.start_date IS NULL OR rla.start_date <= ?) AND
-            (rla.end_date IS NULL OR rla.end_date >= ?)
-          )`
-      )
-      .join(' OR ');
-
-    // Placeholders bind in SQL text order: the window conditions live in the
-    // LEFT JOIN ON clause, which is emitted before the WHERE clause.
-    const windowParams = [];
-    for (const scope of scopes) {
-      windowParams.push(scope.window_end, scope.window_start);
-    }
-    const params = [...windowParams, ...scopes.map((scope) => scope.program_id)];
-
-    let query = `
-      SELECT
-        re.resident_id,
-        CONCAT(r.first_name, ' ', COALESCE(r.middle_initial, ''), ' ', r.last_name) AS resident_name,
-        ${PRIMARY_IDENTIFIER_SQL} AS employee_id,
-        re.year_in_program AS pgy_level,
-        re.resident_status,
-        re.program_id,
-        p.program_code,
-        lct.id AS clinic_type_id,
-        lct.clinic_code,
-        lct.clinic_name,
-        lct.default_day_of_week,
-        lct.start_time AS default_start_time,
-        lct.end_time AS default_end_time,
-        lct.requires_release_letter,
-        lct.is_active AS clinic_type_is_active,
-        rla.id AS longitudinal_assignment_id,
-        rla.site_name,
-        rla.site_id,
-        rla.day_of_week,
-        rla.start_time,
-        rla.end_time,
-        rla.start_date,
-        rla.end_date,
-        rla.faculty_supervisor_id,
-        CONCAT(fs.first_name, ' ', fs.last_name) AS faculty_supervisor_name,
-        rla.supervisor_name,
-        rla.is_active,
-        rla.requires_release_letter AS assignment_requires_release_letter,
-        rla.release_letter_generated,
-        rla.notes,
-        (rla.id IS NOT NULL) AS is_assigned,
-        (
-          SELECT COUNT(*)
-          FROM resident_longitudinal_assignments cell_rla
-          WHERE cell_rla.resident_id = re.resident_id
-            AND cell_rla.clinic_type_id = lct.id
-        ) AS assignment_count
-      FROM longitudinal_clinic_types lct
-      JOIN programs p ON p.id = lct.program_id
-      JOIN residency_enrollments re ON re.program_id = lct.program_id
-      JOIN residents r ON r.id = re.resident_id
-      LEFT JOIN resident_longitudinal_assignments rla
-        ON rla.resident_id = re.resident_id
-       AND rla.clinic_type_id = lct.id
-       AND (${windowConditions})
-      LEFT JOIN faculty_supervisors fs ON fs.id = rla.faculty_supervisor_id
-      WHERE lct.program_id IN (${placeholders})
-    `;
-
-    if (pgy_level) { query += ' AND re.year_in_program = ?'; params.push(pgy_level); }
-    if (resident_status) { query += ' AND re.resident_status = ?'; params.push(resident_status); }
-    query +=
-      ' ORDER BY re.year_in_program ASC, r.last_name ASC, r.first_name ASC, lct.clinic_name ASC';
-
-    const [rows] = await db.query(query, params);
+    if (inserts.length > 0) await db.query('INSERT INTO primary_care_backup_faculty (daily_header_id, day_of_week, faculty_name, faculty_id, priority_order) VALUES ?', [inserts]);
+    const [rows] = await db.query('SELECT * FROM primary_care_backup_faculty WHERE daily_header_id = ? AND day_of_week = ? ORDER BY priority_order ASC', [dailyHeaderId, day_of_week]);
     return rows;
   }
 }

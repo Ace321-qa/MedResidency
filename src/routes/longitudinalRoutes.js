@@ -14,4 +14,9 @@ router.get('/supervisor-assignments', LongitudinalController.getSupervisorAssign
 router.post('/supervisor-assignments', LongitudinalController.createSupervisorAssignment);
 router.patch('/supervisor-assignments/:assignment_id/rotate', LongitudinalController.rotateSupervisor);
 
+router.get('/cycle-schedule', LongitudinalController.getCycleSchedule);
+router.put('/cycle-schedule/header', LongitudinalController.updateCycleHeader);
+router.put('/cycle-schedule/slot', LongitudinalController.updateCycleSlot);
+router.post('/cycle-schedule/backup', LongitudinalController.updateBackupFaculty);
+
 module.exports = router;

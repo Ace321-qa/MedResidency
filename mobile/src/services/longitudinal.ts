@@ -156,3 +156,36 @@ export async function rotateSupervisor(assignmentId: number, payload: any): Prom
     data: payload,
   });
 }
+
+
+export async function fetchCycleSchedule(programId: number, cycleId?: number) {
+  const params: any = { program_id: programId };
+  if (cycleId) params.cycle_id = cycleId;
+  const path = `/longitudinal/cycle-schedule${queryString(params)}`;
+  const response = await request<ApiResponse<any>>(path);
+  return response.data;
+}
+
+export async function updateCycleHeader(payload: any) {
+  const response = await request<ApiResponse<any>>('/longitudinal/cycle-schedule/header', {
+    method: 'PUT',
+    data: payload,
+  });
+  return response.data;
+}
+
+export async function updateCycleSlot(slotId: number, payload: any) {
+  const response = await request<ApiResponse<any>>('/longitudinal/cycle-schedule/slot', {
+    method: 'PUT',
+    data: { slot_id: slotId, ...payload },
+  });
+  return response.data;
+}
+
+export async function updateBackupFaculty(payload: any) {
+  const response = await request<ApiResponse<any>>('/longitudinal/cycle-schedule/backup', {
+    method: 'POST',
+    data: payload,
+  });
+  return response.data;
+}
