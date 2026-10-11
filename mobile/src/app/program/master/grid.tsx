@@ -7,6 +7,7 @@ import {
   AppHeader,
   Card,
   ChoiceGroup,
+  DateField,
   EmptyState,
   ErrorState,
   ImportTools,
@@ -25,18 +26,25 @@ import {
 import { useApiResource, useSession } from '../../../hooks';
 import { createAssignment, fetchCohortGrid, fetchRotations } from '../../../services/rotations';
 import { uploadMasterGrid } from '../../../services/excelTemplates';
-import { ACADEMIC_DAYS, academicDayForPgy, getAcademicYears } from '../../../utils/academicYear';
-import { describeWindow } from '../../../utils/dateCalc';
+import {
+  ACADEMIC_DAYS,
+  academicDayForPgy,
+  getAcademicYearStartDate,
+  getAcademicYears,
+} from '../../../utils/academicYear';
+import { describeWindow, isCalendarDate } from '../../../utils/dateCalc';
 import { rotationBadgeLabel, rotationCellDescription, rotationPalette } from '../../../utils/rotationBadges';
 import { colors, radius, spacing } from '../../../theme';
 import type { CohortGridCell } from '../../../types/api';
 import { goBack } from '../../../navigation/back';
 import {
+  blockWindow,
   weekNumberForDate,
   weekWindow,
   weeksForRange,
   weekInBlockForDate,
   MASTER_GRID_START,
+  type GridStart,
 } from '../../../utils/masterGridCalendar';
 import { buildMasterGridColumns } from '../../../utils/masterGridColumns';
 
@@ -83,14 +91,18 @@ function assignedRows(cell: CohortGridCell[] | undefined): CohortGridCell[] {
   return cell.filter((row) => row.is_assigned === 1 && row.rotation_name);
 }
 
-function getWeekNumberForAssignment(assignment: CohortGridCell, weekNum?: number): number | null {
+function getWeekNumberForAssignment(
+  assignment: CohortGridCell,
+  weekNum?: number,
+  gridStart: GridStart = MASTER_GRID_START,
+): number | null {
   if (weekNum) return weekNum;
   if (assignment.start_date) {
-    const w = weekNumberForDate(assignment.start_date);
+    const w = weekNumberForDate(assignment.start_date, gridStart);
     if (w) return w;
   }
   if (assignment.end_date) {
-    const w = weekNumberForDate(assignment.end_date);
+    const w = weekNumberForDate(assignment.end_date, gridStart);
     if (w) return w;
   }
   return null;
@@ -102,6 +114,12 @@ export default function MasterGridScreen() {
 
   const academicYearOptions = useMemo(() => getAcademicYears(7, 3), []);
   const [academicYear, setAcademicYear] = useState(academicYearOptions[0] ?? '');
+  // The Coordinator-chosen start of the academic year. Every block and weekly
+  // header is recalculated from it, so picking a Monday (rather than the
+  // default Sunday) redraws the whole grid immediately.
+  const [startDate, setStartDate] = useState(
+    () => getAcademicYearStartDate(academicYearOptions[0] ?? '') ?? MASTER_GRID_START,
+  );
   const [pgyFilter, setPgyFilter] = useState<PgyFilter>('ALL');
   const [viewMode, setViewMode] = useState<ViewMode>('block');
   const [assignSheetOpen, setAssignSheetOpen] = useState(false);
@@ -116,6 +134,13 @@ export default function MasterGridScreen() {
   } | null>(null);
   const [assignRotationId, setAssignRotationId] = useState<number | null>(null);
   const [assignNotes, setAssignNotes] = useState('');
+
+  // Changing the academic year resets the start date to that year's default
+  // (28 June), so the grid never mixes one year's dates with another's.
+  function handleAcademicYearChange(year: string) {
+    setAcademicYear(year);
+    setStartDate(getAcademicYearStartDate(year) ?? MASTER_GRID_START);
+  }
 
   const pgyLevel = pgyFilter === 'ALL' ? undefined : Number(pgyFilter);
 
@@ -170,21 +195,27 @@ export default function MasterGridScreen() {
     };
   }, [grid.data]);
 
-  const { columns: columnsWeekly, groups: weeklyGroups } = useMemo(() => buildMasterGridColumns(), []);
+  // The weekly columns and their Block 1..13 tier-1 headings are rebuilt from
+  // the selected start date, so both tiers stay in step with the picker.
+  const { columns: columnsWeekly, groups: weeklyGroups } = useMemo(
+    () => buildMasterGridColumns(startDate),
+    [startDate],
+  );
 
   const columnsBlock = useMemo<MatrixColumnDef[]>(
     () =>
       BLOCK_NUMBERS.map((blockNumber) => {
         const block = blocksByNumber.get(blockNumber);
-        const window = block?.startDateIso && block?.endDateIso ? describeWindow(block.startDateIso, block.endDateIso) : null;
-          return {
-            key: block ? `block-${block.block_id}` : `block-missing-${blockNumber}`,
-            title: block ? block.block_name || `Block ${blockNumber}` : `Block ${blockNumber}`,
-            subtitle: block ? window ?? 'No dates recorded' : window ?? 'No dates recorded',
-            width: 160,
-          };
+        const window = blockWindow(blockNumber, startDate);
+        const windowLabel = window ? describeWindow(window.start, window.end) : 'No dates recorded';
+        return {
+          key: block ? `block-${block.block_id}` : `block-missing-${blockNumber}`,
+          title: block?.block_name || `Block ${blockNumber}`,
+          subtitle: windowLabel,
+          width: 160,
+        };
       }),
-    [blocksByNumber],
+    [blocksByNumber, startDate],
   );
 
   const rowsBlock = useMemo<MatrixRowDef[]>(
@@ -197,13 +228,18 @@ export default function MasterGridScreen() {
         for (const blockNumber of BLOCK_NUMBERS) {
           const block = blocksByNumber.get(blockNumber);
           const columnKey = block ? `block-${block.block_id}` : `block-missing-${blockNumber}`;
-          cells[columnKey] = blockCellNode(resident.resident_id, cellFor(resident.resident_id, block?.block_id ?? 0), block, () =>
-            openAssignSheet({
-              residentId: resident.resident_id,
-              residentName: resident.resident_name,
-              blockId: block?.block_id,
-              blockNumber: block?.block_number ?? blockNumber,
-            }),
+          cells[columnKey] = blockCellNode(
+            resident.resident_id,
+            cellFor(resident.resident_id, block?.block_id ?? 0),
+            block,
+            startDate,
+            () =>
+              openAssignSheet({
+                residentId: resident.resident_id,
+                residentName: resident.resident_name,
+                blockId: block?.block_id,
+                blockNumber: block?.block_number ?? blockNumber,
+              }),
           );
         }
 
@@ -232,7 +268,7 @@ export default function MasterGridScreen() {
           cells,
         };
       }),
-    [residents, blocksByNumber, cellFor],
+    [residents, blocksByNumber, cellFor, startDate],
   );
 
   const rowsWeekly = useMemo<MatrixRowDef[]>(
@@ -248,7 +284,7 @@ export default function MasterGridScreen() {
           if (!block) continue;
           const assignments = assignedRows(cellFor(resident.resident_id, block.block_id));
           for (const a of assignments) {
-            for (const w of weeksForAssignment(a)) {
+            for (const w of weeksForAssignment(a, startDate)) {
               if (w >= 1 && w <= 52) {
                 const list = weekToAssignments.get(w) ?? [];
                 list.push(a);
@@ -259,8 +295,8 @@ export default function MasterGridScreen() {
         }
 
         for (let w = 1; w <= 52; w += 1) {
-          const win = weekWindow(w);
-          cells[`week-${w}`] = weeklyCellNode(resident.resident_id, weekToAssignments.get(w), w, () =>
+          const win = weekWindow(w, startDate);
+          cells[`week-${w}`] = weeklyCellNode(resident.resident_id, weekToAssignments.get(w), w, startDate, () =>
             openAssignSheet({
               residentId: resident.resident_id,
               residentName: resident.resident_name,
@@ -296,7 +332,7 @@ export default function MasterGridScreen() {
           cells,
         };
       }),
-    [residents, blocksByNumber, cellFor],
+    [residents, blocksByNumber, cellFor, startDate],
   );
 
   function openAssignSheet(opts: {
@@ -317,9 +353,9 @@ export default function MasterGridScreen() {
   async function handleAssign() {
     if (!selected || !assignRotationId || !programId) return;
     const start = selected.startDate ?? (selected.blockNumber
-      ? blockWindowStart(selected.blockNumber)
+      ? blockWindowStart(selected.blockNumber, startDate)
       : MASTER_GRID_START);
-    const end = selected.endDate ?? (selected.blockNumber ? blockWindowEnd(selected.blockNumber) : null);
+    const end = selected.endDate ?? (selected.blockNumber ? blockWindowEnd(selected.blockNumber, startDate) : null);
     try {
       await createAssignment({
         
@@ -338,6 +374,16 @@ export default function MasterGridScreen() {
     }
   }
 
+  const gridPreview = useMemo(() => {
+    const first = blockWindow(1, startDate);
+    const last = blockWindow(BLOCK_NUMBERS[BLOCK_NUMBERS.length - 1], startDate);
+    if (!first || !last) return null;
+    return {
+      blockOne: describeWindow(first.start, first.end),
+      yearEnd: describeWindow(last.start, last.end),
+    };
+  }, [startDate]);
+
   const showEmptyState = grid.status === 'ready' && residents.length === 0;
   const missingBlocks = BLOCK_NUMBERS.filter((blockNumber) => !blocksByNumber.has(blockNumber));
   const hasContent = residents.length > 0 && blocksByNumber.size > 0;
@@ -353,8 +399,22 @@ export default function MasterGridScreen() {
       <SelectField
         label="Academic year"
         value={academicYear}
-        onChange={setAcademicYear}
+        onChange={handleAcademicYearChange}
         options={academicYearOptions.map((year) => ({ value: year, label: year }))}
+      />
+
+      <DateField
+        label="Academic year start"
+        value={startDate}
+        onChangeText={setStartDate}
+        placeholder="YYYY-MM-DD"
+        durationWeeks={4}
+        error={startDate && !isCalendarDate(startDate) ? 'Use YYYY-MM-DD, e.g. 2026-06-29' : null}
+        hint={
+          gridPreview
+            ? `Block 1: ${gridPreview.blockOne}. Year ends ${gridPreview.yearEnd}. Pick any weekday — Sunday, Monday or otherwise.`
+            : 'Pick the first day of Block 1 on the calendar; every block and week recalculates from it.'
+        }
       />
 
       <SelectField
@@ -378,6 +438,7 @@ export default function MasterGridScreen() {
         uploadLabel="Upload Master Grid"
         upload={(file) => uploadMasterGrid(file, { program_id: programId, academic_year: academicYear })}
         onImported={() => grid.refresh()}
+        downloadOptions={{ startDate }}
         hint="One row per resident: Corporate ID, name, then the rotation for each block/week."
       />
 
@@ -500,14 +561,14 @@ function dedupeAssignments(assignments: CohortGridCell[]): CohortGridCell[] {
 }
 
 /** Every 1..52 week an assignment touches, ascending. */
-function weeksForAssignment(assignment: CohortGridCell): number[] {
+function weeksForAssignment(assignment: CohortGridCell, gridStart: GridStart = MASTER_GRID_START): number[] {
   const start = assignmentStartDate(assignment);
   const end = assignmentEndDate(assignment);
   if (start && end) {
-    const weeks = weeksForRange(start, end);
+    const weeks = weeksForRange(start, end, gridStart);
     if (weeks.length > 0) return weeks;
   }
-  const week = getWeekNumberForAssignment(assignment);
+  const week = getWeekNumberForAssignment(assignment, undefined, gridStart);
   return week ? [week] : [];
 }
 
@@ -519,16 +580,20 @@ function weeksForAssignment(assignment: CohortGridCell): number[] {
  * it touches, so a 4-week rotation reports B.1, B.2, B.3 and B.4 instead of a
  * single mislabelled row.
  */
-function subWeekSlotsForAssignment(assignment: CohortGridCell, block: GridBlock | undefined): number[] {
+function subWeekSlotsForAssignment(
+  assignment: CohortGridCell,
+  block: GridBlock | undefined,
+  gridStart: GridStart = MASTER_GRID_START,
+): number[] {
   const slots = new Set<number>();
   const startSlot = weekInBlockForDate(block?.startDateIso ?? null, assignmentStartDate(assignment));
   if (startSlot !== null) {
     slots.add(startSlot);
   } else {
-    const weekNum = getWeekNumberForAssignment(assignment);
+    const weekNum = getWeekNumberForAssignment(assignment, undefined, gridStart);
     if (weekNum) slots.add(((weekNum - 1) % 4) + 1);
   }
-  for (const week of weeksForAssignment(assignment)) {
+  for (const week of weeksForAssignment(assignment, gridStart)) {
     const slot = ((week - 1) % 4) + 1;
     if (slot >= 1 && slot <= 4) slots.add(slot);
   }
@@ -622,6 +687,7 @@ function blockCellNode(
   residentId: number,
   cell: CohortGridCell[] | undefined,
   block: GridBlock | undefined,
+  gridStart: GridStart = MASTER_GRID_START,
   onAdd: () => void,
 ): React.ReactNode {
   const assignments = assignedRows(cell);
@@ -630,7 +696,7 @@ function blockCellNode(
   const slots = new Map<number, CohortGridCell>();
   const unplaced: CohortGridCell[] = [];
   for (const assignment of assignments) {
-    const covered = subWeekSlotsForAssignment(assignment, block);
+    const covered = subWeekSlotsForAssignment(assignment, block, gridStart);
     if (covered.length === 0) {
       unplaced.push(assignment);
       continue;
@@ -680,13 +746,14 @@ function weeklyCellNode(
   residentId: number,
   cell: CohortGridCell[] | undefined,
   weekNumber: number,
+  gridStart: GridStart = MASTER_GRID_START,
   onAdd: () => void,
 ): React.ReactNode {
   const assignments = assignedRows(cell);
   if (assignments.length === 0) return unassignedCell(onAdd);
 
   const assignment = dedupeAssignments(assignments)[0];
-  const window = weekWindow(weekNumber);
+  const window = weekWindow(weekNumber, gridStart);
   const label = window
     ? `${window.blockNumber}.${window.weekInBlock}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`
     : `${weekNumber}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`;
@@ -715,15 +782,15 @@ function formatAcademicYearForHeader(year: string): string {
   return year || 'No academic year';
 }
 
-function blockWindowStart(blockNumber: number): string {
+function blockWindowStart(blockNumber: number, gridStart: GridStart = MASTER_GRID_START): string {
   const first = (blockNumber - 1) * 4 + 1;
-  const w = weekWindow(first);
+  const w = weekWindow(first, gridStart);
   return w?.start ?? MASTER_GRID_START;
 }
 
-function blockWindowEnd(blockNumber: number): string {
+function blockWindowEnd(blockNumber: number, gridStart: GridStart = MASTER_GRID_START): string {
   const last = blockNumber * 4;
-  const w = weekWindow(last);
+  const w = weekWindow(last, gridStart);
   return w?.end ?? MASTER_GRID_START;
 }
 

@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 import { API_BASE_URL } from '../config/env';
 import { buildXlsx, type XlsxCellValue } from '../utils/xlsx';
 import { saveSpreadsheet, type SavedFile } from '../utils/fileSave';
+import { allWeeks, formatDmy, MASTER_GRID_START } from '../utils/masterGridCalendar';
 
 /**
  * Excel templates: download, pick, upload.
@@ -467,8 +468,35 @@ function emptyMasterRow(): XlsxCellValue[] {
   return Array.from({ length: 13 }, () => '');
 }
 
-export function templateSpec(kind: TemplateKind): TemplateSpec {
-  return TEMPLATES[kind];
+export interface TemplateOptions {
+  /**
+   * Master grid only: the day Block 1 begins. The workbook's start-date and
+   * end-date rows are regenerated from it, so an offline template built on the
+   * device carries the same week windows as the one the API would serve for the
+   * Coordinator's chosen start day.
+   */
+  startDate?: string;
+}
+
+/**
+ * The master workbook's date rows for `startDate`, keeping the block-heading
+ * row and the two sample residents exactly as the static spec lays them out.
+ */
+function buildMasterTemplateRows(startDate: string): XlsxCellValue[][] {
+  const base = TEMPLATES.master.rows;
+  const weeks = allWeeks(startDate);
+  const startRow: XlsxCellValue[] = ['', '', '', '', '', ...weeks.map((week) => formatDmy(week.start))];
+  const endRow: XlsxCellValue[] = ['', '', '', '', '', ...weeks.map((week) => formatDmy(week.end))];
+  return [base[0], startRow, endRow, ...base.slice(3)];
+}
+
+export function templateSpec(kind: TemplateKind, options: TemplateOptions = {}): TemplateSpec {
+  const spec = TEMPLATES[kind];
+  const startDate = options.startDate ?? MASTER_GRID_START;
+  if (kind === 'master') {
+    return { ...spec, rows: buildMasterTemplateRows(startDate) };
+  }
+  return spec;
 }
 
 export interface DownloadOutcome extends SavedFile {
@@ -483,9 +511,15 @@ export interface DownloadOutcome extends SavedFile {
  * something else is not working, and a 15-second spinner before a local
  * fallback would defeat the point of having one.
  */
-export async function downloadTemplate(kind: TemplateKind): Promise<DownloadOutcome> {
-  const spec = TEMPLATES[kind];
-  const fromServer = spec.endpoint ? await fetchTemplateBytes(spec.endpoint) : null;
+export async function downloadTemplate(
+  kind: TemplateKind,
+  options: TemplateOptions = {},
+): Promise<DownloadOutcome> {
+  const spec = templateSpec(kind, options);
+  const endpoint = spec.endpoint && options.startDate && kind === 'master'
+    ? `${spec.endpoint}?start_date=${encodeURIComponent(options.startDate)}`
+    : spec.endpoint;
+  const fromServer = endpoint ? await fetchTemplateBytes(endpoint) : null;
 
   let bytes: any = fromServer ?? buildXlsx(spec.rows, spec.sheetName, spec.merges as any);
   if (bytes instanceof ArrayBuffer) {

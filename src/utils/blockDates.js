@@ -165,6 +165,30 @@ function isCalendarDate(value) {
   return parseCalendarDate(value) !== null;
 }
 
+/**
+ * Coerce a `Date` or `YYYY-MM-DD` string into the canonical `YYYY-MM-DD` form.
+ *
+ * A `Date` is read through its *local* parts, matching the mobile mirror and
+ * `calendarDateToLocalDate`: the app builds picker dates at local midday, and
+ * reading them back through UTC would shift a date by a day west of Greenwich.
+ *
+ * @returns {string|null} null for an unparseable or invalid value.
+ */
+function resolveCalendarDate(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return toCalendarDate({
+      year: value.getFullYear(),
+      month: value.getMonth() + 1,
+      day: value.getDate(),
+      index: Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()),
+    });
+  }
+  const parts = parseCalendarDate(value);
+  return parts ? toCalendarDate(parts) : null;
+}
+
 /** Day name for a date string, e.g. 'Sunday', or null when unparseable. */
 function dayNameOf(value) {
   const parts = parseCalendarDate(value);
@@ -219,6 +243,55 @@ function endDateForDuration(startDate, weeks) {
   const duration = Number(weeks);
   if (!Number.isFinite(duration) || duration <= 0) return null;
   return addDays(startDate, Math.round(duration) * 7 - 1);
+}
+
+/**
+ * The universal inclusive end date: `startDate + (durationDays - 1) days`.
+ *
+ *     calculateEndDate('2026-06-28', 7)  === '2026-07-04'  (Sunday -> Saturday)
+ *     calculateEndDate('2026-06-28', 28) === '2026-07-25'  (Sunday -> Saturday)
+ *     calculateEndDate('2026-06-29', 7)  === '2026-07-05'  (Monday -> Sunday)
+ *
+ * @param {Date|string} startDate
+ * @param {number} durationDays Positive whole days.
+ * @returns {string|null}
+ */
+function calculateEndDate(startDate, durationDays) {
+  const start = resolveCalendarDate(startDate);
+  const duration = Number(durationDays);
+  if (!start || !Number.isFinite(duration) || duration <= 0) return null;
+  return addDays(start, Math.round(duration) - 1);
+}
+
+/** The end of `weeks` whole weeks: `calculateEndDate(startDate, weeks * 7)`. */
+function calculateBlockEndDate(startDate, weeks) {
+  const count = Number(weeks === undefined || weeks === null ? 4 : weeks);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return calculateEndDate(startDate, Math.round(count) * 7);
+}
+
+/**
+ * The `totalWeeks` contiguous 7-day windows that begin at `startDate`, each
+ * following whatever weekday the start date falls on.
+ *
+ * @returns {{weekNumber:number, start:string, end:string}[]}
+ */
+function calculateWeeklySubRanges(startDate, totalWeeks) {
+  const start = resolveCalendarDate(startDate);
+  const count = Number(totalWeeks === undefined || totalWeeks === null ? 52 : totalWeeks);
+  if (!start || !Number.isFinite(count) || count <= 0) return [];
+
+  const weeks = [];
+  for (let index = 0; index < Math.floor(count); index += 1) {
+    const weekStart = addDays(start, index * 7);
+    if (!weekStart) break;
+    weeks.push({
+      weekNumber: index + 1,
+      start: weekStart,
+      end: addDays(weekStart, 6) || weekStart,
+    });
+  }
+  return weeks;
 }
 
 /**
@@ -394,6 +467,9 @@ module.exports = {
   MONTH_NAMES,
   addDays,
   addMonths,
+  calculateBlockEndDate,
+  calculateEndDate,
+  calculateWeeklySubRanges,
   dayNameOf,
   describeWindow,
   diffDays,
@@ -403,6 +479,7 @@ module.exports = {
   normalizeWeekStartDay,
   parseCalendarDate,
   resolveBlockWindow,
+  resolveCalendarDate,
   toCalendarDate,
   weekEndDay,
 };

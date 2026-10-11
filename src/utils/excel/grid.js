@@ -4,6 +4,7 @@ const {
   BLOCK_COUNT,
   WEEKS_PER_BLOCK,
   WEEK_COUNT,
+  MASTER_GRID_START,
   blockWeeks,
   formatDmy,
   weekNumberForDate,
@@ -203,8 +204,10 @@ function isBlankRow(row) {
  * date straight to its week, an "end" row maps it back six days first. Both are
  * accepted because a coordinator may have kept only the End Sat row.
  *
- * @returns {{week:number, columnIndex:number}[]|null} null when the row does not
- *   look like a date header at all.
+ * @returns {{columns:{week:number, columnIndex:number}[], gridStart:string}|null}
+ *   null when the row does not look like a date header at all. `gridStart` is
+ *   the day week 1 begins, inferred from the row's earliest date, so the importer
+ *   can follow the workbook's own weekday start rather than the fixed grid.
  */
 function resolveDateColumns(textRows, rawRows, rowIndex, mode) {
   const textRow = textRows[rowIndex] ?? [];
@@ -212,7 +215,11 @@ function resolveDateColumns(textRows, rawRows, rowIndex, mode) {
   const width = Math.max(textRow.length, rawRow.length);
   if (width === 0) return null;
 
-  const columns = [];
+  // Read every date in the row first, then anchor the grid to the earliest one.
+  // Anchoring to the workbook's *own* first date — rather than to the fixed
+  // 28/06/2026 calendar — is what lets an import follow a Monday, Tuesday or any
+  // other weekday start: week 1 is always the first column's own window.
+  const parsed = [];
   let nonEmpty = 0;
 
   for (let column = 0; column < width; column += 1) {
@@ -224,18 +231,26 @@ function resolveDateColumns(textRows, rawRows, rowIndex, mode) {
     if (hasValue) nonEmpty += 1;
 
     const iso = parseHeaderDate(rawValue) ?? parseHeaderDate(textValue);
-    if (!iso) continue;
-
-    const week = mode === 'end' ? weekForEndDate(iso) : weekNumberForDate(iso);
-    if (!week) continue;
-
-    columns.push({ columnIndex: column, week });
+    if (iso) parsed.push({ columnIndex: column, iso });
   }
 
-  if (columns.length < MIN_DATE_COLUMNS) return null;
+  if (parsed.length < MIN_DATE_COLUMNS) return null;
   // A resident's data row is mostly rotation names; a date row is mostly dates.
-  if (columns.length < nonEmpty * 0.5) return null;
-  return columns;
+  if (parsed.length < nonEmpty * 0.5) return null;
+
+  const earliest = parsed.reduce((min, entry) => (entry.iso < min ? entry.iso : min), parsed[0].iso);
+  // An end-date row's earliest cell is the last day of week 1, so its grid start
+  // is six days earlier; a start-date row's earliest cell *is* the grid start.
+  const gridStart = mode === 'end' ? shiftIso(earliest, -6) : earliest;
+
+  const columns = [];
+  for (const entry of parsed) {
+    const week = weekNumberForDate(entry.iso, gridStart);
+    if (!week) continue;
+    columns.push({ columnIndex: entry.columnIndex, week });
+  }
+
+  return { columns, gridStart };
 }
 
 /** Shift a `YYYY-MM-DD` string by whole days. */
@@ -247,21 +262,6 @@ function shiftIso(iso, days) {
     2,
     '0',
   )}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
-}
-
-/**
- * The week an End Sat date heads.
- *
- * A proper End Sat is the Saturday of its window, so it maps straight back; any
- * other weekday is walked to the Sunday that starts the same window, which is
- * how a stray `05/07/2026` typed into the End row still lands on a week instead
- * of being read as somebody's corporate id.
- */
-function weekForEndDate(iso) {
-  const direct = weekNumberForDate(iso);
-  if (direct && weekWindow(direct).end === iso) return direct;
-  const byStart = weekNumberForDate(shiftIso(iso, -6));
-  return byStart ?? direct;
 }
 
 /** True when the row carries enough in-range dates to be a date header. */
@@ -402,6 +402,7 @@ function forwardFillWeeks(weeks) {
  *   corporateIndex: number,
  *   layout: 'dates'|'headings',
  *   weekColumns: {week:number, columnIndex:number}[],
+ *   gridStart: string,
  *   cells: {row:number, corporateId:string, name:string, level:string,
  *           mobile:string, email:string, weeks:Record<number,string|null>}[],
  * }}
@@ -435,15 +436,17 @@ function parseMasterGrid(buffer) {
 
   // --- week columns ------------------------------------------------------
   let weekColumns = null;
+  let gridStart = MASTER_GRID_START;
   let layout = 'dates';
   let firstDataRow = headerIndex + 1;
 
   for (let offset = 1; offset <= 3 && weekColumns === null; offset += 1) {
     const rowIndex = headerIndex + offset;
     if (rowIndex >= textRows.length) break;
-    const columns = resolveDateColumns(textRows, rawRows, rowIndex, 'start');
-    if (columns) {
-      weekColumns = columns;
+    const resolved = resolveDateColumns(textRows, rawRows, rowIndex, 'start');
+    if (resolved) {
+      weekColumns = resolved.columns;
+      gridStart = resolved.gridStart;
       firstDataRow = rowIndex + 1;
     }
   }
@@ -451,9 +454,10 @@ function parseMasterGrid(buffer) {
     for (let offset = 1; offset <= 3 && weekColumns === null; offset += 1) {
       const rowIndex = headerIndex + offset;
       if (rowIndex >= textRows.length) break;
-      const columns = resolveDateColumns(textRows, rawRows, rowIndex, 'end');
-      if (columns) {
-        weekColumns = columns;
+      const resolved = resolveDateColumns(textRows, rawRows, rowIndex, 'end');
+      if (resolved) {
+        weekColumns = resolved.columns;
+        gridStart = resolved.gridStart;
         firstDataRow = rowIndex + 1;
       }
     }
@@ -508,7 +512,7 @@ function parseMasterGrid(buffer) {
     });
   }
 
-  return { headers, corporateIndex, layout, weekColumns, cells };
+  return { headers, corporateIndex, layout, weekColumns, gridStart, cells };
 }
 
 /* ------------------------------------------------------------------ *
@@ -556,10 +560,16 @@ function sampleRows() {
  * The downloadable workbook: three header rows, merged block headings and the
  * sample residents.
  *
+ * The weekly start-date and end-date rows (rows 2 and 3) are generated from
+ * `startDate`, so the workbook handed out matches the start day the Coordinator
+ * chose in the app: a Monday start produces Monday–Sunday weeks, a Sunday start
+ * Sunday–Saturday ones.
+ *
  * @param {number} [blockCount]
+ * @param {string|Date} [startDate] The day Block 1 begins; defaults to 28/06/2026.
  * @returns {Buffer}
  */
-function generateMasterGridTemplate(blockCount = BLOCK_COUNT) {
+function generateMasterGridTemplate(blockCount = BLOCK_COUNT, startDate = MASTER_GRID_START) {
   const headerRowCells = [...LEFT_HEADERS];
   const startRow = LEFT_HEADERS.map(() => '');
   const endRow = LEFT_HEADERS.map(() => '');
@@ -572,7 +582,7 @@ function generateMasterGridTemplate(blockCount = BLOCK_COUNT) {
 
   const weeks = blockCount * WEEKS_PER_BLOCK;
   for (let week = 1; week <= weeks; week += 1) {
-    const window = weekWindow(week);
+    const window = weekWindow(week, startDate);
     const isFirstWeekOfBlock = (week - 1) % WEEKS_PER_BLOCK === 0;
     headerRowCells.push(isFirstWeekOfBlock ? `Block ${window.blockNumber}` : '');
     startRow.push(formatDmy(window.start));

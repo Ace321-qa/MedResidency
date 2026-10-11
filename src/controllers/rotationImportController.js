@@ -8,6 +8,7 @@ const {
 const { academicYearMatchValues } = require('../utils/academicYear');
 const { MAX_ABBREVIATION_LENGTH, MAX_NAME_LENGTH } = require('../utils/excel/catalogue');
 const {
+  MASTER_GRID_START,
   WEEKS_PER_BLOCK,
   clampWindow,
   weekWindow,
@@ -111,7 +112,8 @@ class RotationImportController {
         'Content-Type',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       );
-      res.send(generateMasterGridTemplate(13));
+      const startDate = String(req.query.start_date ?? '').trim() || undefined;
+      res.send(generateMasterGridTemplate(13, startDate));
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -172,6 +174,9 @@ class RotationImportController {
     }
 
     const academicYear = String(req.body.academic_year ?? '').trim();
+    // The workbook's own week-1 start, inferred by the parser from its date
+    // headers, so a Monday- or Tuesday-start grid aligns without a one-day drift.
+    const gridStart = parsed.gridStart || MASTER_GRID_START;
 
     const conn = await db.getConnection();
     let inTransaction = false;
@@ -223,7 +228,7 @@ class RotationImportController {
        * @returns {typeof blocks[number]|null}
        */
       const blockForWeek = (week) => {
-        const window = weekWindow(week);
+        const window = weekWindow(week, gridStart);
         if (!window) return null;
         const contained = blocks.find(
           (block) => block.start_date_iso <= window.start && window.start <= block.end_date_iso,
@@ -391,8 +396,8 @@ class RotationImportController {
 
         for (const [block, entries] of byBlock) {
           for (const run of runsOf(entries)) {
-            const first = weekWindow(run.weeks[0]);
-            const last = weekWindow(run.weeks[run.weeks.length - 1]);
+            const first = weekWindow(run.weeks[0], gridStart);
+            const last = weekWindow(run.weeks[run.weeks.length - 1], gridStart);
             const window = clampWindow(first.start, last.end, block.start_date_iso, block.end_date_iso);
             if (!window) {
               warn(

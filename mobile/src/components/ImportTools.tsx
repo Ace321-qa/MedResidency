@@ -11,6 +11,7 @@ import {
   pickSpreadsheet,
   type ImportOutcome,
   type TemplateKind,
+  type TemplateOptions,
 } from '../services/excelTemplates';
 import type { DocumentPickerAsset } from 'expo-document-picker';
 import { spacing } from '../theme';
@@ -41,6 +42,8 @@ interface ImportToolsProps {
   uploadLabel?: string;
   /** One line under the buttons explaining the file's shape. */
   hint?: string;
+  /** Workbook options, e.g. the master grid's chosen start date. */
+  downloadOptions?: TemplateOptions;
   style?: object;
 }
 
@@ -51,6 +54,7 @@ export function ImportTools({
   downloadLabel = 'Download Template (.xlsx)',
   uploadLabel = 'Upload Excel',
   hint,
+  downloadOptions,
   style,
 }: ImportToolsProps) {
   const { notify } = useInAppNotifications();
@@ -62,7 +66,7 @@ export function ImportTools({
   async function handleDownload() {
     setDownloading(true);
     try {
-      const outcome = await downloadTemplate(template);
+      const outcome = await downloadTemplate(template, downloadOptions);
       notify({
         title: 'Template downloaded',
         message: `${outcome.fileName} is ready to fill in${outcome.source === 'device' ? ' (built on this device — the API was unreachable)' : ''}.`,

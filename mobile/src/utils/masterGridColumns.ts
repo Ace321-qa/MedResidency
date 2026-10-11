@@ -1,5 +1,6 @@
 import type { MatrixColumnDef, ColumnGroup } from '../components/MatrixTable';
-import { allWeeks, formatShortRange } from './masterGridCalendar';
+import { describeWindow } from './dateCalc';
+import { allWeeks, blockWindow, formatShortRange, MASTER_GRID_START, type GridStart } from './masterGridCalendar';
 
 export interface MasterGridBlockDefinition {
   blockNumber: number;
@@ -19,14 +20,18 @@ export interface MasterGridBlockDefinition {
  * the right of the sub-weeks it is meant to head.
  *
  * Each sub-column carries its `block.weekInBlock` label (`1.1`, `1.2`, …) and
- * its Sunday–Saturday window as a compact `28/06–04/07` range. The range is
- * drawn rotated top-to-bottom (`verticalSubtitle`), because a full date window
- * is wider than the column and used to be clipped to `28/06/2026–0…`.
+ * its 7-day window as a compact `28/06–04/07` range. The range is drawn rotated
+ * top-to-bottom (`verticalSubtitle`), because a full date window is wider than
+ * the column and used to be clipped to `28/06/2026–0…`.
+ *
+ * Both tiers are computed from `gridStart` — the start date the Coordinator
+ * picks in the grid's calendar — so selecting a Monday start redraws every
+ * sub-header as Monday–Sunday without any other change.
  */
 const WEEK_COLUMN_WIDTH = 110;
 const WEEKS_PER_BLOCK = 4;
 
-export function buildMasterGridColumns(): {
+export function buildMasterGridColumns(gridStart: GridStart = MASTER_GRID_START): {
   columns: MatrixColumnDef[];
   groups: ColumnGroup[];
   blocks: MasterGridBlockDefinition[];
@@ -35,17 +40,19 @@ export function buildMasterGridColumns(): {
   const groups: ColumnGroup[] = [];
   const columns: MatrixColumnDef[] = [];
 
-  allWeeks().forEach((week, index) => {
+  allWeeks(gridStart).forEach((week, index) => {
     if (week.weekInBlock === 1) {
+      const window = blockWindow(week.blockNumber, gridStart);
+      const label = window ? `Block ${week.blockNumber} · ${describeWindow(window.start, window.end)}` : `Block ${week.blockNumber}`;
       blocks.push({
         blockNumber: week.blockNumber,
-        title: `Block ${week.blockNumber}`,
+        title: label,
         columnCount: WEEKS_PER_BLOCK,
         firstColumnIndex: index,
       });
       groups.push({
         key: `block_${week.blockNumber}`,
-        label: `Block ${week.blockNumber}`,
+        label,
         startColumnIndex: index,
         columnCount: WEEKS_PER_BLOCK,
       });

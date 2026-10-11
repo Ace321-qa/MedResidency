@@ -17,9 +17,11 @@
   "files": [
     "src/utils/dateCalc.ts",
     "src/utils/academicYear.ts",
+    "src/utils/masterGridCalendar.ts",
     "src/utils/letterPreview.ts",
     "src/utils/cccMatrix.ts",
     "scripts/verify-date-calc.ts",
+    "scripts/verify-date-boundaries.ts",
     "scripts/verify-letter-preview.ts",
     "scripts/verify-ccc-matrix.ts",
     "../scripts/date-parity-cases.js"

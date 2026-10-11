@@ -1,19 +1,37 @@
-import { addDays, diffDays, parseCalendarDate } from './dateCalc';
-import { getAcademicYearStartDate } from './academicYear';
+import { addDays, diffDays, parseCalendarDate, resolveCalendarDate } from './dateCalc';
 
 /**
- * The Master Rotation Grid calendar: 13 blocks × 4 weeks = 52 weekly columns,
- * starting Sunday 28/06/2026.
+ * The Master Rotation Grid calendar: 13 blocks × 4 weeks = 52 weekly columns.
+ *
+ * The grid used to be pinned to Sunday 28/06/2026, but the academic year now
+ * starts on whatever day the Coordinator picks in the grid's calendar picker.
+ * Every function therefore takes an optional `gridStart` (a `YYYY-MM-DD` string
+ * or a `Date`); omit it and the institutional default applies.
+ *
+ *     week W start = gridStart + (W - 1) × 7 days
+ *     week W end   = week W start + 6 days
+ *     block B      = weeks (B-1)×4 + 1 … B×4
+ *
+ * The day of the week `gridStart` falls on is preserved throughout: a Sunday
+ * start yields Sunday–Saturday weeks, a Monday start Monday–Sunday ones.
  */
 
-/** Sunday 28 June 2026 — week 1, block 1. */
+/** Sunday 28 June 2026 — the institutional default; week 1, block 1. */
 export const MASTER_GRID_START = '2026-06-28';
 
 export const BLOCK_COUNT = 13;
 export const WEEKS_PER_BLOCK = 4;
 export const WEEK_COUNT = BLOCK_COUNT * WEEKS_PER_BLOCK;
 
-/** One weekly subcolumn: its place in the block and its Sunday-Saturday window. */
+/** Either a `YYYY-MM-DD` string or a `Date`; both resolve to the same calendar day. */
+export type GridStart = string | Date | null | undefined;
+
+/** Coerce whatever a caller supplies into the `YYYY-MM-DD` grid start. */
+export function gridStartFrom(value?: GridStart): string {
+  return resolveCalendarDate(value ?? null) ?? MASTER_GRID_START;
+}
+
+/** One weekly subcolumn: its place in the block and its inclusive 7-day window. */
 export interface MasterWeekWindow {
   /** 1..52, the column's index across the whole year. */
   weekNumber: number;
@@ -25,18 +43,49 @@ export interface MasterWeekWindow {
   end: string;
 }
 
+/** One block's four weekly windows plus the block's own inclusive window. */
+export interface MasterBlockWindow {
+  /** 1..13. */
+  blockNumber: number;
+  start: string;
+  end: string;
+  weeks: MasterWeekWindow[];
+}
+
 /** One block's four weekly windows, or `[]` outside 1..13. */
-export function blockWeeks(blockNumber: number): MasterWeekWindow[] {
+export function blockWeeks(blockNumber: number, gridStart: GridStart = MASTER_GRID_START): MasterWeekWindow[] {
   if (!Number.isInteger(blockNumber) || blockNumber < 1 || blockNumber > BLOCK_COUNT) return [];
   const first = (blockNumber - 1) * WEEKS_PER_BLOCK + 1;
-  return [first, first + 1, first + 2, first + 3].map((week) => weekWindow(week)!);
+  return [first, first + 1, first + 2, first + 3].map((week) => weekWindow(week, gridStart)!);
 }
 
 /** All 52 weeks, in column order. */
-export function allWeeks(): MasterWeekWindow[] {
+export function allWeeks(gridStart: GridStart = MASTER_GRID_START): MasterWeekWindow[] {
   const weeks: MasterWeekWindow[] = [];
-  for (let week = 1; week <= WEEK_COUNT; week += 1) weeks.push(weekWindow(week)!);
+  for (let week = 1; week <= WEEK_COUNT; week += 1) weeks.push(weekWindow(week, gridStart)!);
   return weeks;
+}
+
+/**
+ * The whole block a `blockNumber` covers — its first week's start through its
+ * last week's end — or `null` outside 1..13.
+ */
+export function blockWindow(blockNumber: number, gridStart: GridStart = MASTER_GRID_START): MasterBlockWindow | null {
+  const weeks = blockWeeks(blockNumber, gridStart);
+  if (weeks.length === 0) return null;
+  return {
+    blockNumber,
+    start: weeks[0].start,
+    end: weeks[weeks.length - 1].end,
+    weeks,
+  };
+}
+
+/** Every block window, 1..13, in order. */
+export function blockWindows(gridStart: GridStart = MASTER_GRID_START): MasterBlockWindow[] {
+  const windows: MasterBlockWindow[] = [];
+  for (let block = 1; block <= BLOCK_COUNT; block += 1) windows.push(blockWindow(block, gridStart)!);
+  return windows;
 }
 
 /**
@@ -46,10 +95,10 @@ export function allWeeks(): MasterWeekWindow[] {
  * assert the range first; callers that hold an arbitrary number use the nullable
  * form directly.
  */
-export function weekWindow(weekNumber: number): MasterWeekWindow | null {
+export function weekWindow(weekNumber: number, gridStart: GridStart = MASTER_GRID_START): MasterWeekWindow | null {
   if (!Number.isInteger(weekNumber) || weekNumber < 1 || weekNumber > WEEK_COUNT) return null;
 
-  const start = addDays(MASTER_GRID_START, (weekNumber - 1) * 7);
+  const start = addDays(gridStartFrom(gridStart), (weekNumber - 1) * 7);
   if (!start) return null;
 
   return {
@@ -64,10 +113,13 @@ export function weekWindow(weekNumber: number): MasterWeekWindow | null {
 /**
  * The 1..52 week a date falls in, or `null` when it lies outside the grid.
  *
- * A non-Sunday date still resolves, to the week whose window contains it.
+ * A non-week-start date still resolves, to the week whose window contains it.
  */
-export function weekNumberForDate(value: string | null | undefined): number | null {
-  const days = diffDays(MASTER_GRID_START, value ?? '');
+export function weekNumberForDate(
+  value: string | null | undefined,
+  gridStart: GridStart = MASTER_GRID_START,
+): number | null {
+  const days = diffDays(gridStartFrom(gridStart), value ?? '');
   if (days === null || days < 0) return null;
 
   const week = Math.floor(days / 7) + 1;
@@ -75,8 +127,13 @@ export function weekNumberForDate(value: string | null | undefined): number | nu
 }
 
 /** True when `[startDate, endDate]` shares at least one day with the week. */
-export function overlapsWeek(weekNumber: number, startDate: string | null | undefined, endDate: string | null | undefined): boolean {
-  const week = weekWindow(weekNumber);
+export function overlapsWeek(
+  weekNumber: number,
+  startDate: string | null | undefined,
+  endDate: string | null | undefined,
+  gridStart: GridStart = MASTER_GRID_START,
+): boolean {
+  const week = weekWindow(weekNumber, gridStart);
   if (!week || !startDate || !endDate) return false;
   if (endDate < week.start || startDate > week.end) return false;
   return true;
@@ -106,10 +163,14 @@ export function weekInBlockForDate(
 }
 
 /** Every week `[startDate, endDate]` touches, ascending. */
-export function weeksForRange(startDate: string, endDate: string): number[] {
+export function weeksForRange(
+  startDate: string,
+  endDate: string,
+  gridStart: GridStart = MASTER_GRID_START,
+): number[] {
   const weeks: number[] = [];
   for (let week = 1; week <= WEEK_COUNT; week += 1) {
-    if (overlapsWeek(week, startDate, endDate)) weeks.push(week);
+    if (overlapsWeek(week, startDate, endDate, gridStart)) weeks.push(week);
   }
   return weeks;
 }

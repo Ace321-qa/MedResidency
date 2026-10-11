@@ -126,6 +126,26 @@ export function localDateToCalendarDate(date: Date): string {
   return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+/**
+ * Coerce whatever a caller hands us — a `Date` or a `YYYY-MM-DD` string — into
+ * the canonical `YYYY-MM-DD` form every arithmetic function here works on.
+ *
+ * A `Date` is read through its *local* parts, matching `calendarDateToLocalDate`
+ * / `localDateToCalendarDate`: the app builds picker dates at local midday, and
+ * reading them back through UTC would shift a date by a day west of Greenwich.
+ *
+ * @returns {string|null} null for an unparseable or invalid value.
+ */
+export function resolveCalendarDate(value: Date | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return localDateToCalendarDate(value);
+  }
+  const parts = parseCalendarDate(value);
+  return parts ? `${pad(parts.year, 4)}-${pad(parts.month)}-${pad(parts.day)}` : null;
+}
+
 /** True when `value` is a real calendar date in `YYYY-MM-DD` form. */
 export function isCalendarDate(value: string | null | undefined): boolean {
   return parseCalendarDate(value) !== null;
@@ -178,17 +198,97 @@ export function diffDays(start: string, end: string): number | null {
 }
 
 /**
+ * The universal inclusive end date: `startDate + (durationDays - 1) days`.
+ *
+ * The whole rule in one line — a window that is `N` days long owns its start
+ * day, so a 7-day week runs `start .. start + 6`, a 28-day block runs
+ * `start .. start + 27`, and the end always lands on the day before the start's
+ * weekday (the next week around).
+ *
+ * Worked examples:
+ *
+ *     calculateEndDate('2026-06-28', 7)  === '2026-07-04'  (Sunday -> Saturday)
+ *     calculateEndDate('2026-06-28', 28) === '2026-07-25'  (Sunday -> Saturday)
+ *     calculateEndDate('2026-06-29', 7)  === '2026-07-05'  (Monday -> Sunday)
+ *     calculateEndDate('2026-07-01', 7)  === '2026-07-07'  (Wednesday -> Tuesday)
+ *
+ * @param startDate A `Date` or `YYYY-MM-DD` string.
+ * @param durationDays Positive whole days; fractional values are rounded.
+ * @returns {string|null} `YYYY-MM-DD`, or null for a bad date or a
+ *   non-positive duration.
+ */
+export function calculateEndDate(startDate: Date | string, durationDays: number): string | null {
+  const start = resolveCalendarDate(startDate);
+  const duration = Number(durationDays);
+  if (!start || !Number.isFinite(duration) || duration <= 0) return null;
+  return addDays(start, Math.round(duration) - 1);
+}
+
+/**
+ * The end date of a block of `weeks` whole weeks: `calculateEndDate(start, weeks * 7)`.
+ *
+ * A four-week block from Sunday 28/06/2026 ends Saturday 25/07/2026, and from
+ * Monday 29/06/2026 ends Sunday 26/07/2026 — whatever weekday the coordinator
+ * picked for `startDate`.
+ */
+export function calculateBlockEndDate(startDate: Date | string, weeks = 4): string | null {
+  const count = Number(weeks);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return calculateEndDate(startDate, Math.round(count) * 7);
+}
+
+/** One contiguous 7-day window of a yearly sequence. */
+export interface WeeklySubRange {
+  /** 1-based index across the sequence. */
+  weekNumber: number;
+  start: string;
+  end: string;
+}
+
+/**
+ * The `totalWeeks` contiguous 7-day windows that begin at `startDate`.
+ *
+ * The sequence follows whatever weekday `startDate` falls on — a Sunday start
+ * yields Sunday–Saturday weeks, a Monday start Monday–Sunday ones — because each
+ * window is simply `start + (W-1)*7` through `start + (W-1)*7 + 6`.
+ *
+ * ```ts
+ * calculateWeeklySubRanges('2026-06-29', 2)
+ * // [{ weekNumber: 1, start: '2026-06-29', end: '2026-07-05' },
+ * //  { weekNumber: 2, start: '2026-07-06', end: '2026-07-12' }]
+ * ```
+ */
+export function calculateWeeklySubRanges(startDate: Date | string, totalWeeks = 52): WeeklySubRange[] {
+  const start = resolveCalendarDate(startDate);
+  const count = Number(totalWeeks);
+  if (!start || !Number.isFinite(count) || count <= 0) return [];
+
+  const weeks: WeeklySubRange[] = [];
+  for (let index = 0; index < Math.floor(count); index += 1) {
+    const weekStart = addDays(start, index * 7);
+    if (!weekStart) break;
+    weeks.push({
+      weekNumber: index + 1,
+      start: weekStart,
+      end: addDays(weekStart, 6) ?? weekStart,
+    });
+  }
+  return weeks;
+}
+
+/**
  * The end date of a block of `weeks` whole weeks starting at `startDate`.
  *
  * `endDateForDuration('2026-07-05', 4) === '2026-08-01'` (Saturday).
+ *
+ * Kept as the named entry point the block editor and the backend mirror already
+ * import; it now delegates to `calculateBlockEndDate` so there is one formula.
  *
  * @returns {string|null} `YYYY-MM-DD`, or null for a bad date or a
  *   non-positive duration.
  */
 export function endDateForDuration(startDate: string, weeks: number): string | null {
-  const duration = Number(weeks);
-  if (!Number.isFinite(duration) || duration <= 0) return null;
-  return addDays(startDate, Math.round(duration) * 7 - 1);
+  return calculateBlockEndDate(startDate, weeks);
 }
 
 /**
