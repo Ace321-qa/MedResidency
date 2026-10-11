@@ -42,6 +42,50 @@ class LongitudinalController {
     }
   }
 
+  /**
+   * `PUT /longitudinal/clinic-types/:id`
+   *
+   * Renames (or otherwise edits) a clinic for the active programme. The row's
+   * id and code never change, so slots, supervisor pairings and resident
+   * assignments that reference the clinic keep resolving.
+   */
+  static async updateClinicType(req, res) {
+    try {
+      const { id } = req.params;
+      const data = await LongitudinalService.updateClinicType(id, req.body.program_id, req.body);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `DELETE /longitudinal/clinic-types/:id`
+   *
+   * Soft-deletes a clinic (`is_active = 0`) so the chip is removed from the
+   * active pool while its slots, pairings and assignment history stay intact.
+   * `program_id` scopes the operation and is read from the body or the query
+   * string so a plain `DELETE` request can still pin the programme.
+   */
+  static async deleteClinicType(req, res) {
+    try {
+      const { id } = req.params;
+      // A body-less DELETE leaves `req.body` undefined in Express, so the query
+      // string is a fallback rather than an alternative.
+      const programId = (req.body ?? {}).program_id ?? req.query.program_id;
+      const data = await LongitudinalService.deleteClinicType(id, programId);
+      return res.status(200).json({ success: true, message: 'Clinic deactivated', data });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async getResidentLongitudinalAssignments(req, res) {
     try {
       const { resident_id } = req.params;

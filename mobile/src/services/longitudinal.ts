@@ -45,6 +45,44 @@ export async function createClinicType(payload: {
 }
 
 /**
+ * `PUT /longitudinal/clinic-types/:id` — rename (or otherwise edit) a clinic.
+ *
+ * The id and code never change, so slots, supervisor pairings and assignment
+ * history that reference the clinic keep resolving; only the label updates. The
+ * chip pool, filter labels and header subtitle all derive from this row, so
+ * patching it back into local state updates them without a refresh.
+ */
+export async function updateClinicType(
+  id: number,
+  payload: {
+    program_id: number;
+    clinic_name?: string;
+    default_day_of_week?: string | null;
+    start_time?: string | null;
+    end_time?: string | null;
+    requires_release_letter?: number;
+  },
+): Promise<LongitudinalClinicType> {
+  const response = await request<ApiResponse<LongitudinalClinicType>>(`/longitudinal/clinic-types/${id}`, {
+    method: 'PUT',
+    data: payload,
+  });
+  return response.data;
+}
+
+/**
+ * `DELETE /longitudinal/clinic-types/:id` — soft-delete a clinic.
+ *
+ * The server flips `is_active` to 0 instead of removing the row, so historical
+ * schedule records and resident assignments stay intact and resolvable. The
+ * chip is gone from the active selection pool until the clinic is re-added.
+ */
+export async function deleteClinicType(id: number, programId: number): Promise<void> {
+  const path = `/longitudinal/clinic-types/${id}${queryString({ program_id: programId })}`;
+  await request<ApiResponse<unknown>>(path, { method: 'DELETE' });
+}
+
+/**
  * Longitudinal assignments for a programme.
  *
  * `academicYear` is optional and *filters by overlap*, not by an equality on a

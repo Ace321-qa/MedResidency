@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
-import { CalendarX, Plus, PlusCircle } from 'lucide-react-native';
+import { CalendarX, Check, Pencil, Plus, PlusCircle, Trash2 } from 'lucide-react-native';
 import { router } from 'expo-router';
 
 import {
@@ -23,15 +23,16 @@ import {
   TextField,
   type MatrixColumnDef,
   type MatrixRowDef,
-  type SelectOption,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import {
   createClinicType,
+  deleteClinicType,
   fetchAllLongitudinalAssignments,
   fetchClinicSlots,
   fetchClinicTypes,
   fetchSupervisorAssignments,
+  updateClinicType,
 } from '../../../services/longitudinal';
 import { uploadCccMatrix } from '../../../services/excelTemplates';
 import { useInAppNotifications } from '../../../services/inAppNotifications';
@@ -50,7 +51,7 @@ import {
   type ClinicCatalogEntry,
 } from '../../../utils/primaryCareClinics';
 import { colors, radius, spacing } from '../../../theme';
-import type { LongitudinalAssignment } from '../../../types/api';
+import type { LongitudinalAssignment, LongitudinalClinicType } from '../../../types/api';
 import { goBack } from '../../../navigation/back';
 
 /**
@@ -155,16 +156,14 @@ export default function LongitudinalMatrixScreen() {
     [clinicTypes.data],
   );
 
-  const clinicOptions = useMemo<SelectOption<ClinicFilter>[]>(() => {
+  /** The clinics selectable right now, in pool order (standard five first). */
+  const orderedActiveClinics = useMemo<LongitudinalClinicType[]>(() => {
     const byName = new Map(activeClinics.map((clinic) => [clinicNameKey(clinic.clinic_name), clinic]));
     const ordered = sortClinicOptions(activeClinics.map((clinic) => clinic.clinic_name));
-    return [
-      { value: 'ALL', label: 'All clinics' },
-      ...ordered.flatMap((name) => {
-        const clinic = byName.get(clinicNameKey(name));
-        return clinic ? [{ value: String(clinic.id), label: clinic.clinic_name }] : [];
-      }),
-    ];
+    return ordered.flatMap((name) => {
+      const clinic = byName.get(clinicNameKey(name));
+      return clinic ? [clinic] : [];
+    });
   }, [activeClinics]);
   const [clinicFilter, setClinicFilter] = useState<ClinicFilter>('ALL');
 
@@ -496,6 +495,115 @@ export default function LongitudinalMatrixScreen() {
     void handleAddClinic({ clinic_name: name });
   }
 
+  /* ---- Edit / rename a clinic -------------------------------------------- */
+
+  const [editingClinic, setEditingClinic] = useState<LongitudinalClinicType | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  function openEditClinic(clinic: LongitudinalClinicType) {
+    setEditName(clinic.clinic_name);
+    setEditError(null);
+    setEditingClinic(clinic);
+  }
+
+  function closeEditClinic() {
+    if (savingEdit) return;
+    setEditingClinic(null);
+    setEditName('');
+    setEditError(null);
+  }
+
+  /**
+   * Rename a clinic, then patch the row back into local state.
+   *
+   * The chip pool, the filter options and the header subtitle all derive from
+   * `clinicTypes.data`, so replacing the renamed row in that list updates them
+   * instantly; `refresh` then reconciles with the server so the single source
+   * of truth stays the backend.
+   */
+  async function handleRenameClinic() {
+    if (!editingClinic) return;
+    const name = editName.trim();
+    if (!name) {
+      setEditError('A clinic name is required.');
+      return;
+    }
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      const updated = await updateClinicType(editingClinic.id, {
+        program_id: programId,
+        clinic_name: name,
+      });
+      clinicTypes.setData((current) =>
+        (current ?? []).map((clinic) => (clinic.id === updated.id ? updated : clinic)),
+      );
+      setEditingClinic(null);
+      setEditName('');
+      clinicTypes.refresh();
+      notify({ title: 'Clinic renamed', message: updated.clinic_name, tone: 'success' });
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Could not rename this clinic.';
+      setEditError(message);
+      notify({ title: 'Rename failed', message, tone: 'danger' });
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  /* ---- Delete / deactivate a clinic -------------------------------------- */
+
+  const [pendingDelete, setPendingDelete] = useState<LongitudinalClinicType | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  function askDeleteClinic(clinic: LongitudinalClinicType) {
+    setPendingDelete(clinic);
+    setDeleteError(null);
+    setConfirmingDelete(true);
+  }
+
+  /**
+   * Deactivate a clinic, then drop it out of the active pool in place.
+   *
+   * The server soft-deletes the row so its slots, pairings and assignment
+   * history survive. Local state flips the row inactive so the chip disappears
+   * and, if it was the selected filter, the view falls back to "All clinics".
+   */
+  async function handleDeleteClinic() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteClinicType(pendingDelete.id, programId);
+      clinicTypes.setData((current) =>
+        (current ?? []).map((clinic) =>
+          clinic.id === pendingDelete.id ? { ...clinic, is_active: 0 } : clinic,
+        ),
+      );
+      if (clinicFilter === String(pendingDelete.id)) {
+        setClinicFilter('ALL');
+      }
+      setConfirmingDelete(false);
+      setPendingDelete(null);
+      clinicTypes.refresh();
+      notify({
+        title: 'Clinic removed',
+        message: `${pendingDelete.clinic_name} was removed from the active clinics.`,
+        tone: 'warning',
+      });
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Could not remove this clinic.';
+      setDeleteError(message);
+      notify({ title: 'Remove failed', message, tone: 'danger' });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <Screen onRefresh={() => {
       void clinicTypes.refresh();
@@ -517,13 +625,23 @@ export default function LongitudinalMatrixScreen() {
         hint="Scopes the residents to this year's block window. Pairings come from the supervisor table, so a pairing for a resident who left the programme in an earlier year is not shown."
       />
 
-      <SelectField
-        label="Clinic"
-        value={clinicFilter}
-        onChange={setClinicFilter}
-        options={clinicOptions}
-        hint="Filters the rows. The columns are always the slot list of the selected slot clinic. Added clinics appear here as chips."
-      />
+      <View style={styles.clinicField}>
+        <Text variant="label" tone="secondary" uppercase>
+          Clinic
+        </Text>
+        <ClinicFilterChips
+          clinics={orderedActiveClinics}
+          selected={clinicFilter}
+          onSelect={setClinicFilter}
+          onEdit={openEditClinic}
+          onDelete={askDeleteClinic}
+        />
+        <Text variant="caption" tone="muted">
+          Filters the rows. The columns are always the slot list of the selected slot clinic. Use the
+          pencil to rename a clinic or the bin to remove it from the active pool; its history stays
+          preserved.
+        </Text>
+      </View>
 
       <Button
         label="Add / Choose Other Clinic"
@@ -675,6 +793,76 @@ export default function LongitudinalMatrixScreen() {
           ) : null}
         </View>
       </Sheet>
+
+      <Sheet
+        visible={editingClinic !== null}
+        onClose={closeEditClinic}
+        title="Rename clinic"
+        subtitle={editingClinic ? `${editingClinic.clinic_name} · ${editingClinic.clinic_code}` : undefined}
+        footer={
+          <View style={styles.footer}>
+            <Button
+              label={savingEdit ? 'Saving…' : 'Save name'}
+              loading={savingEdit}
+              onPress={() => void handleRenameClinic()}
+              accessibilityHint="Updates the clinic name everywhere it is shown"
+            />
+            <Button
+              label="Cancel"
+              variant="ghost"
+              disabled={savingEdit}
+              onPress={closeEditClinic}
+            />
+          </View>
+        }
+      >
+        {editError ? (
+          <Banner tone="danger" title="Could not rename the clinic" message={editError} />
+        ) : null}
+
+        <TextField
+          label="Clinic name"
+          required
+          value={editName}
+          onChangeText={setEditName}
+          placeholder="e.g. Well Baby Clinic (WBC)"
+          autoCapitalize="words"
+          hint="Renaming updates the chip here and every screen that shows this clinic. Slots and assignment history are preserved."
+        />
+      </Sheet>
+
+      <Sheet
+        visible={confirmingDelete}
+        onClose={() => setConfirmingDelete(false)}
+        title="Delete this clinic?"
+        subtitle={pendingDelete ? pendingDelete.clinic_name : undefined}
+        footer={
+          <View style={styles.footer}>
+            <Button
+              label={deleting ? 'Removing…' : 'Remove clinic'}
+              variant="danger"
+              loading={deleting}
+              onPress={() => void handleDeleteClinic()}
+              accessibilityHint="Removes this clinic from the active selection pool"
+            />
+            <Button
+              label="Keep it"
+              variant="ghost"
+              disabled={deleting}
+              onPress={() => setConfirmingDelete(false)}
+            />
+          </View>
+        }
+      >
+        {deleteError ? (
+          <Banner tone="danger" title="Cannot remove this clinic" message={deleteError} />
+        ) : null}
+
+        <Text variant="bodySmall" tone="secondary">
+          Are you sure you want to delete {pendingDelete?.clinic_name ?? 'this clinic'}? Existing
+          slots and historical data linked to this clinic will be preserved.
+        </Text>
+      </Sheet>
     </Screen>
   );
 }
@@ -696,6 +884,109 @@ function describeCatalogEntry(entry: ClinicCatalogEntry): string {
 function titleCaseDay(day: string): string {
   const lower = day.toLowerCase();
   return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+/**
+ * The clinic filter chips, each with rename and remove actions.
+ *
+ * "All clinics" filters nothing and has no actions; every active clinic chip is
+ * a selectable filter (tapping the label) plus two icon buttons — a pencil to
+ * rename it in place and a bin to deactivate it, with confirmation.
+ */
+function ClinicFilterChips({
+  clinics,
+  selected,
+  onSelect,
+  onEdit,
+  onDelete,
+}: {
+  clinics: LongitudinalClinicType[];
+  selected: ClinicFilter;
+  onSelect: (value: ClinicFilter) => void;
+  onEdit: (clinic: LongitudinalClinicType) => void;
+  onDelete: (clinic: LongitudinalClinicType) => void;
+}) {
+  return (
+    <View style={styles.clinicChips} accessibilityRole="radiogroup" accessibilityLabel="Clinic">
+      <Pressable
+        onPress={() => onSelect('ALL')}
+        accessibilityRole="radio"
+        accessibilityState={{ selected: selected === 'ALL' }}
+        accessibilityLabel="All clinics"
+        style={({ pressed }) => [
+          styles.clinicChip,
+          selected === 'ALL' ? styles.clinicChipSelected : null,
+          pressed && selected !== 'ALL' ? styles.clinicChipPressed : null,
+        ]}
+      >
+        {selected === 'ALL' ? <Check color={colors.onPrimary} size={14} strokeWidth={3} /> : null}
+        <Text
+          variant="bodySmall"
+          style={selected === 'ALL' ? styles.clinicChipTextSelected : styles.clinicChipText}
+        >
+          All clinics
+        </Text>
+      </Pressable>
+
+      {clinics.map((clinic) => {
+        const isSelected = selected === String(clinic.id);
+        const actionStyle = ({ pressed }: { pressed: boolean }) => [
+          styles.clinicAction,
+          isSelected ? styles.clinicActionOnSelected : null,
+          pressed ? (isSelected ? styles.clinicActionPressedSelected : styles.clinicActionPressed) : null,
+        ];
+        return (
+          <View
+            key={clinic.id}
+            style={[styles.clinicChipRow, isSelected ? styles.clinicChipRowSelected : null]}
+          >
+            <Pressable
+              onPress={() => onSelect(String(clinic.id))}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: isSelected }}
+              accessibilityLabel={clinic.clinic_name}
+              style={({ pressed }) => [
+                styles.clinicChipMain,
+                pressed && !isSelected ? styles.clinicChipPressed : null,
+              ]}
+            >
+              {isSelected ? <Check color={colors.onPrimary} size={14} strokeWidth={3} /> : null}
+              <Text
+                variant="bodySmall"
+                numberOfLines={2}
+                style={isSelected ? styles.clinicChipTextSelected : styles.clinicChipText}
+              >
+                {clinic.clinic_name}
+              </Text>
+            </Pressable>
+
+            <View style={styles.clinicChipActions}>
+              <Pressable
+                onPress={() => onEdit(clinic)}
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel={`Rename ${clinic.clinic_name}`}
+                accessibilityHint="Opens a form to change this clinic's name"
+                style={actionStyle}
+              >
+                <Pencil color={isSelected ? colors.onPrimary : colors.primary} size={16} />
+              </Pressable>
+              <Pressable
+                onPress={() => onDelete(clinic)}
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel={`Remove ${clinic.clinic_name}`}
+                accessibilityHint="Deactivates this clinic and removes it from the active pool"
+                style={actionStyle}
+              >
+                <Trash2 color={isSelected ? colors.dangerSurface : colors.danger} size={16} />
+              </Pressable>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
 }
 
 /** The residents free to cover a missed session on one academic day. */
@@ -850,6 +1141,87 @@ const styles = StyleSheet.create({
   },
   catalogEmpty: {
     paddingVertical: spacing.lg,
+  },
+  clinicField: {
+    gap: spacing.xs,
+    marginBottom: spacing.lg,
+  },
+  clinicChips: {
+    gap: spacing.sm,
+  },
+  clinicChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xxs,
+    minHeight: 44,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  clinicChipSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  clinicChipPressed: {
+    backgroundColor: colors.primarySoft,
+  },
+  clinicChipText: {
+    color: colors.textSecondary,
+  },
+  clinicChipTextSelected: {
+    color: colors.onPrimary,
+    fontWeight: '600',
+  },
+  clinicChipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+  },
+  clinicChipRowSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  clinicChipMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xxs,
+    alignSelf: 'stretch',
+    paddingLeft: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  clinicChipActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xxs,
+    paddingRight: spacing.xs,
+  },
+  clinicAction: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.sm,
+  },
+  clinicActionOnSelected: {
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  clinicActionPressed: {
+    backgroundColor: colors.surfaceMuted,
+  },
+  clinicActionPressedSelected: {
+    backgroundColor: 'rgba(255, 255, 255, 0.26)',
+  },
+  footer: {
+    gap: spacing.sm,
   },
   pools: {
     gap: spacing.sm,

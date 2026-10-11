@@ -129,6 +129,151 @@ class LongitudinalService {
     }
   }
 
+  /** The `longitudinal_clinic_types` row for an id, scoped to one programme. */
+  static async findClinicType(clinicTypeId, programId) {
+    const [rows] = await db.query(
+      `SELECT id, program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active
+       FROM longitudinal_clinic_types
+       WHERE id = ? AND program_id = ?`,
+      [clinicTypeId, programId]
+    );
+    return rows[0] || null;
+  }
+
+  /**
+   * Rename (or otherwise edit) one of the programme's clinics.
+   *
+   * The row keeps its `id` and `clinic_code`, so the rename is transparent to
+   * everything that already references the clinic by id — slots, supervisor
+   * pairings and resident assignments all keep working; only the label every
+   * screen displays changes. Only fields the caller actually sent are written,
+   * matching `createClinicType`.
+   *
+   * A rename is rejected when the new name already belongs to another row of
+   * the same programme, active or not: the client finds clinics by name, and
+   * two rows answering to the same name would make the chip pool ambiguous.
+   *
+   * @param {number} clinicTypeId
+   * @param {number} programId
+   * @param {object} data
+   * @param {string} [data.clinic_name]
+   * @param {string} [data.default_day_of_week]
+   * @param {string} [data.start_time]
+   * @param {string} [data.end_time]
+   * @param {number} [data.requires_release_letter]
+   */
+  static async updateClinicType(clinicTypeId, programId, data = {}) {
+    const id = Number(clinicTypeId);
+    if (!Number.isInteger(id) || id <= 0) {
+      const error = new Error('A numeric clinic id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const program = Number(programId);
+    if (!Number.isInteger(program) || program <= 0) {
+      const error = new Error('program_id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const existing = await this.findClinicType(id, program);
+    if (!existing) {
+      const error = new Error(`Clinic ${id} was not found for this programme.`);
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const fields = {};
+    if (data.clinic_name !== undefined) {
+      const clinicName = String(data.clinic_name ?? '').trim();
+      if (!clinicName) {
+        const error = new Error('clinic_name cannot be empty.');
+        error.statusCode = 400;
+        throw error;
+      }
+      fields.clinic_name = clinicName;
+
+      const [dupes] = await db.query(
+        `SELECT id FROM longitudinal_clinic_types
+          WHERE program_id = ? AND clinic_name = ? AND id <> ?
+          ORDER BY id ASC LIMIT 1`,
+        [program, clinicName, id]
+      );
+      if (dupes.length > 0) {
+        const error = new Error(`A clinic named "${clinicName}" already exists for this programme.`);
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+    if (data.default_day_of_week !== undefined) {
+      fields.default_day_of_week = data.default_day_of_week || null;
+    }
+    if (data.start_time !== undefined) {
+      fields.start_time = data.start_time ? String(data.start_time).slice(0, 5) : null;
+    }
+    if (data.end_time !== undefined) {
+      fields.end_time = data.end_time ? String(data.end_time).slice(0, 5) : null;
+    }
+    if (data.requires_release_letter !== undefined) {
+      fields.requires_release_letter = data.requires_release_letter ? 1 : 0;
+    }
+
+    if (Object.keys(fields).length === 0) {
+      const error = new Error('Nothing to update. Provide at least one field to change.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const sets = [...Object.keys(fields).map((column) => `${column} = ?`), 'updated_at = CURRENT_TIMESTAMP'];
+    await db.query(
+      `UPDATE longitudinal_clinic_types SET ${sets.join(', ')} WHERE id = ? AND program_id = ?`,
+      [...Object.values(fields), id, program]
+    );
+
+    return this.findClinicType(id, program);
+  }
+
+  /**
+   * Soft-delete a clinic from the programme's available pool.
+   *
+   * The row is deactivated (`is_active = 0`) rather than removed, so the slots,
+   * supervisor pairings and resident assignments that reference it keep their
+   * ids and stay resolvable — historical data is preserved, which is the point
+   * of the confirmation copy the client shows before calling this. A clinic
+   * brought back later (via `createClinicType`) is reactivated with the same
+   * row and code.
+   *
+   * @returns {Promise<{id: number, clinic_name: string, is_active: number}>}
+   */
+  static async deleteClinicType(clinicTypeId, programId) {
+    const id = Number(clinicTypeId);
+    if (!Number.isInteger(id) || id <= 0) {
+      const error = new Error('A numeric clinic id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const program = Number(programId);
+    if (!Number.isInteger(program) || program <= 0) {
+      const error = new Error('program_id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const existing = await this.findClinicType(id, program);
+    if (!existing) {
+      const error = new Error(`Clinic ${id} was not found for this programme.`);
+      error.statusCode = 404;
+      throw error;
+    }
+
+    await db.query(
+      'UPDATE longitudinal_clinic_types SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND program_id = ?',
+      [id, program]
+    );
+
+    return { id, clinic_name: existing.clinic_name, clinic_code: existing.clinic_code, is_active: 0 };
+  }
+
   /**
    * Seed the five standard Primary Care Clinics for every programme.
    *
