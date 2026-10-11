@@ -29,12 +29,11 @@ import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '
  * they are always read together when assigning somebody: "what rotations exist?"
  * and "which blocks do they fit into?".
  *
- * Blocks can be created here; `POST /rotations/blocks` exists and the form is in
- * `../block`. Assigning a resident to a rotation lives in `../assignments/new`,
- * so this screen links rather than writes. The rotation *definitions* are read
- * here and managed in `../rotations/catalogue` — creating, renaming and bulk
- * importing them needs a table of its own, which is why this list opens that
- * screen instead of growing inline edit controls.
+ * The screen links out to the tools built for writing: the Master Rotation Grid,
+ * the Primary Care Clinics matrix, and the Rotations Catalogue. Rotation
+ * *definitions* are read here and managed in `../rotations/catalogue` — creating,
+ * renaming and bulk importing them needs a table of its own, which is why this
+ * list opens that screen instead of growing inline edit controls.
  */
 
 type View2 = 'BLOCKS' | 'ROTATIONS';
@@ -150,38 +149,20 @@ export default function ProgramRotationsScreen() {
             </>
           ) : null}
 
-          {/* Shown even when the list is empty or filtered away: the programme
-              having no blocks at all is exactly when this button is needed. */}
+          {/* Shown even when the list is empty or filtered away: the rotation
+              tools stay reachable whichever blocks happen to be on record. */}
           {blocks.status === 'ready' && needle === '' ? (
             <>
               <Button
-                label="Add academic block"
-                variant="secondary"
-                onPress={() => router.push('/program/block')}
-                style={styles.addButton}
-              />
-              <Button
-                label="Master Grid"
+                label="Master Rotation Grid"
                 variant="outline"
                 onPress={() => router.push('/program/master/grid' as any)}
                 style={styles.addButton}
               />
               <Button
-                label="Longitudinal Matrix"
+                label="Primary Care Clinics"
                 variant="outline"
                 onPress={() => router.push('/program/longitudinal/matrix' as any)}
-                style={styles.addButton}
-              />
-              <Button
-                label="Assign Supervisor"
-                variant="outline"
-                onPress={() => router.push('/program/supervisor/assign' as any)}
-                style={styles.addButton}
-              />
-              <Button
-                label="New Assignment"
-                variant="outline"
-                onPress={() => router.push('/program/assignments/new' as any)}
                 style={styles.addButton}
               />
               <Button
