@@ -27,9 +27,10 @@ import {
   updateCycleSlot,
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
-import { dayOfWeekMatches } from '../../../utils/cccMatrix';
+import { CCC_SCHEDULE_ROWS, dayOfWeekMatches } from '../../../utils/cccMatrix';
+import { formatPgy } from '../../../utils/insights';
 import { residentFullName } from '../../../utils/residents';
-import { colors, spacing } from '../../../theme';
+import { colors, radius, spacing } from '../../../theme';
 import { goBack } from '../../../navigation/back';
 import type {
   PrimaryCareClinicSlot,
@@ -172,6 +173,30 @@ function canonicalDay(value: string | null | undefined): DayName | null {
   return DAYS.find((day) => dayOfWeekMatches(value, DAYS.indexOf(day))) ?? null;
 }
 
+/** A compact pill for a PGY level or an FMC session context. */
+function PgyBadge({ label }: { label: string }) {
+  return (
+    <View style={styles.pgyBadge}>
+      <Text variant="label" tone="brand">
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+/** The two ways a coordinator can read the weekly clinic grid. */
+type ViewMode = 'matrix' | 'roster';
+
+interface ViewModeOption {
+  value: ViewMode;
+  label: string;
+}
+
+const VIEW_MODE_OPTIONS: ViewModeOption[] = [
+  { value: 'matrix', label: 'Matrix Grid' },
+  { value: 'roster', label: 'Operational Roster' },
+];
+
 export default function LongitudinalMatrixScreen() {
   const { session } = useSession();
   const programId = session?.programId ?? 0;
@@ -207,6 +232,9 @@ export default function LongitudinalMatrixScreen() {
 
   const [rotationMonths, setRotationMonths] = useState('3');
   const [rationale, setRationale] = useState('');
+
+  /** Which of the two clinic-grid renderings is active. */
+  const [viewMode, setViewMode] = useState<ViewMode>('matrix');
 
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
@@ -489,6 +517,28 @@ export default function LongitudinalMatrixScreen() {
     return [{ value: trimmed, label: trimmed }, ...options];
   }
 
+  /**
+   * The 24-hour session window for a day, straight from the curriculum rows —
+   * e.g. "10:30 – 14:00". The roster shows this unless the stored daily header
+   * carries its own shift time.
+   */
+  function sessionWindow(day: DayName): string {
+    const weekday = DAYS.indexOf(day);
+    const curriculum = CCC_SCHEDULE_ROWS.find((row) => row.weekday === weekday);
+    return `${curriculum?.startTime ?? '10:30'} – ${curriculum?.endTime ?? '14:00'}`;
+  }
+
+  /** Title-free display name -> PGY level, so the roster can badge each resident. */
+  const residentPgyByName = useMemo(() => {
+    const map = new Map<string, number | null>();
+    for (const resident of residentsResource.data ?? []) {
+      const name = residentFullName(resident).replace(/^Dr\.?\s+/i, '').trim();
+      if (!name || map.has(name)) continue;
+      map.set(name, resident.pgy_level ?? null);
+    }
+    return map;
+  }, [residentsResource.data]);
+
   const isLoading = schedule.isLoading && !data;
 
   return (
@@ -498,6 +548,34 @@ export default function LongitudinalMatrixScreen() {
         subtitle="Weekly clinic matrix, supervisors and backup faculty"
         onBack={goBack}
       />
+
+      <View
+        accessibilityRole="radiogroup"
+        accessibilityLabel="Clinic schedule view"
+        style={styles.viewToggle}
+      >
+        {VIEW_MODE_OPTIONS.map((option) => {
+          const active = viewMode === option.value;
+          return (
+            <Pressable
+              key={option.value}
+              onPress={() => setViewMode(option.value)}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={option.label}
+              style={({ pressed }) => [
+                styles.viewToggleOption,
+                active ? styles.viewToggleOptionActive : null,
+                pressed && !active ? styles.viewToggleOptionPressed : null,
+              ]}
+            >
+              <Text variant="button" align="center" tone={active ? 'brand' : 'secondary'}>
+                {option.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
 
       {actionError ? (
         <Banner tone="danger" title="Something went wrong" message={actionError} />
@@ -557,15 +635,16 @@ export default function LongitudinalMatrixScreen() {
             />
           </Card>
 
-          <Card padded={false}>
-            <View style={styles.cardPad}>
-              <SectionHeader title="Weekly Clinic Matrix" trailing={`${DAYS.length} days`} />
-              <Text variant="caption" tone="muted">
-                Tap a day&apos;s header to edit its day, shift time, PGY level and In-Charge faculty.
-                Tap any cell to assign up to two residents and supervising faculty. WBC and Leaves are
-                the eleventh and twelfth columns.
-              </Text>
-            </View>
+          {viewMode === 'matrix' ? (
+            <Card padded={false}>
+              <View style={styles.cardPad}>
+                <SectionHeader title="Weekly Clinic Matrix" trailing={`${DAYS.length} days`} />
+                <Text variant="caption" tone="muted">
+                  Tap a day&apos;s header to edit its day, shift time, PGY level and In-Charge faculty.
+                  Tap any cell to assign up to two residents and supervising faculty. WBC and Leaves
+                  are the eleventh and twelfth columns.
+                </Text>
+              </View>
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator
@@ -696,9 +775,138 @@ export default function LongitudinalMatrixScreen() {
               </View>
             </ScrollView>
           </Card>
+        ) : (
+          <Card padded={false}>
+            <View style={styles.cardPad}>
+              <SectionHeader title="Operational Roster" trailing={`${DAYS.length} sessions`} />
+              <Text variant="caption" tone="muted">
+                Rows are grouped into session blocks under one day/time heading. Tap any row to assign
+                up to two residents and supervising faculty.
+              </Text>
+            </View>
+            <View style={styles.rosterHeaderRow}>
+              <View style={[styles.rosterHeaderCell, styles.rosterHeaderDay]}>
+                <Text variant="label" tone="secondary" uppercase>
+                  Day / Time & Session
+                </Text>
+              </View>
+              <View style={[styles.rosterHeaderCell, styles.rosterHeaderClinic]}>
+                <Text variant="label" tone="secondary" uppercase>
+                  Clinic
+                </Text>
+              </View>
+              <View style={[styles.rosterHeaderCell, styles.rosterHeaderResidents]}>
+                <Text variant="label" tone="secondary" uppercase>
+                  Resident(s) & PGY
+                </Text>
+              </View>
+              <View style={[styles.rosterHeaderCell, styles.rosterHeaderFaculty]}>
+                <Text variant="label" tone="secondary" uppercase>
+                  Supervising Faculty
+                </Text>
+              </View>
+            </View>
+            {DAYS.map((day) => {
+              const header = headerForDay(day);
+              const shiftLabel = header?.shift_time || sessionWindow(day);
+              const pgyLabel = header?.pgy_level || DAY_CONFIG[day].pgy;
+              return (
+                <View key={day}>
+                  {MATRIX_COLUMNS.map((column, columnIndex) => {
+                    const slot = slotFor(day, column.clinicNumber);
+                    const residents = [slot?.resident_1_name, slot?.resident_2_name].filter(
+                      (name): name is string => Boolean(name),
+                    );
+                    const faculty = withDoctorTitle(slot?.faculty_name);
+                    const clinicLabel =
+                      column.key === 'leaves'
+                        ? 'Leaves'
+                        : column.special && column.subtitle
+                          ? column.subtitle
+                          : column.title;
+                    return (
+                      <Pressable
+                        key={column.key}
+                        onPress={() =>
+                          openSlot({
+                            slot,
+                            day,
+                            columnLabel: clinicLabel,
+                            clinicNumber: column.clinicNumber,
+                            shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
+                            pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
+                          })
+                        }
+                        accessibilityRole="button"
+                        accessibilityLabel={`${day} ${clinicLabel}. ${
+                          residents.length ? residents.join(', ') : 'Unassigned'
+                        }${faculty ? `, supervised by ${faculty}` : ''}. Opens the slot editor.`}
+                        accessibilityHint="Opens a sheet to edit residents and supervising faculty"
+                        style={({ pressed }) => [
+                          styles.rosterRow,
+                          pressed ? styles.cellPressed : null,
+                        ]}
+                      >
+                        <View
+                          style={[
+                            styles.rosterDayCell,
+                            columnIndex === 0 ? styles.rosterSessionStart : null,
+                          ]}
+                        >
+                          {columnIndex === 0 ? (
+                            <>
+                              <Text variant="bodySmall" style={styles.rosterDayText}>
+                                {day}, {shiftLabel}
+                              </Text>
+                              <PgyBadge label={pgyLabel} />
+                            </>
+                          ) : null}
+                        </View>
+                        <View style={styles.rosterClinicCell}>
+                          <Text variant="bodySmall" tone="primary" numberOfLines={2}>
+                            {clinicLabel}
+                          </Text>
+                        </View>
+                        <View style={styles.rosterResidentsCell}>
+                          {residents.length > 0 ? (
+                            residents.map((name, residentIndex) => (
+                              <View key={`${name}-${residentIndex}`} style={styles.residentLine}>
+                                <Text variant="bodySmall" numberOfLines={1}>
+                                  {name}
+                                </Text>
+                                {residentPgyByName.get(name) != null ? (
+                                  <PgyBadge label={formatPgy(residentPgyByName.get(name) ?? null)} />
+                                ) : null}
+                              </View>
+                            ))
+                          ) : (
+                            <Text variant="bodySmall" tone="disabled">
+                              Unassigned
+                            </Text>
+                          )}
+                        </View>
+                        <View style={styles.rosterFacultyCell}>
+                          {faculty ? (
+                            <Text variant="bodySmall" tone="secondary" numberOfLines={2}>
+                              {faculty}
+                            </Text>
+                          ) : (
+                            <Text variant="bodySmall" tone="muted">
+                              — None —
+                            </Text>
+                          )}
+                        </View>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              );
+            })}
+          </Card>
+        )}
 
-          <Card>
-            <SectionHeader title="Backup / Catchup Faculty Pools" />
+        <Card>
+          <SectionHeader title="Backup / Catchup Faculty Pools" />
             <Text variant="caption" tone="muted" style={styles.note}>
               Backup faculty are exempt from regular supervision unless a scheduled supervisor is
               absent, in which case they cover the slot.
@@ -957,6 +1165,10 @@ export default function LongitudinalMatrixScreen() {
 const DAY_COLUMN_WIDTH = 132;
 const CLINIC_COLUMN_WIDTH = 104;
 
+/** Fixed roster columns; the resident and faculty columns flex to fill the width. */
+const ROSTER_DAY_COLUMN_WIDTH = 132;
+const ROSTER_CLINIC_COLUMN_WIDTH = 92;
+
 const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
@@ -1039,6 +1251,116 @@ const styles = StyleSheet.create({
   },
   inCharge: {
     marginTop: spacing.xxs,
+  },
+  pgyBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.primaryBorder,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+  },
+  viewToggle: {
+    flexDirection: 'row',
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    gap: spacing.xxs,
+    padding: spacing.xxs,
+    marginBottom: spacing.md,
+  },
+  viewToggleOption: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.md,
+    borderRadius: radius.sm,
+  },
+  viewToggleOptionActive: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.primaryBorder,
+  },
+  viewToggleOptionPressed: {
+    backgroundColor: colors.surface,
+  },
+  rosterHeaderRow: {
+    flexDirection: 'row',
+    backgroundColor: colors.surfaceMuted,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+  },
+  rosterHeaderCell: {
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+  },
+  rosterHeaderDay: {
+    width: ROSTER_DAY_COLUMN_WIDTH,
+  },
+  rosterHeaderClinic: {
+    width: ROSTER_CLINIC_COLUMN_WIDTH,
+  },
+  rosterHeaderResidents: {
+    flex: 1,
+  },
+  rosterHeaderFaculty: {
+    flex: 1,
+  },
+  rosterRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'stretch',
+  },
+  rosterDayCell: {
+    width: ROSTER_DAY_COLUMN_WIDTH,
+    minHeight: 52,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    justifyContent: 'center',
+    gap: spacing.xxs,
+    borderRightWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  rosterSessionStart: {
+    backgroundColor: colors.surfaceMuted,
+  },
+  rosterDayText: {
+    fontWeight: '600',
+  },
+  rosterClinicCell: {
+    width: ROSTER_CLINIC_COLUMN_WIDTH,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    justifyContent: 'center',
+    borderRightWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  rosterResidentsCell: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    justifyContent: 'center',
+    gap: spacing.xs,
+    borderRightWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  rosterFacultyCell: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+  },
+  residentLine: {
+    gap: spacing.xxs,
   },
   backupRow: {
     flexDirection: 'row',
