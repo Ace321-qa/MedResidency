@@ -27,6 +27,7 @@ import {
   updateCycleSlot,
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
+import { dayOfWeekMatches } from '../../../utils/cccMatrix';
 import { residentFullName } from '../../../utils/residents';
 import { colors, spacing } from '../../../theme';
 import { goBack } from '../../../navigation/back';
@@ -96,6 +97,17 @@ const BACKUP_POOL_MAX = 4;
 /** Web pins the day column; React Native has no sticky positioning. */
 const stickyPosition: 'relative' = Platform.OS === 'web' ? ('sticky' as any) : 'relative';
 
+/** The days a header may be reassigned to, in the order the week runs. */
+const DAY_OPTIONS: SelectOption<DayName>[] = DAYS.map((day) => ({ value: day, label: day }));
+
+/** The PGY levels / contexts a day can carry. A custom value is kept too. */
+const PGY_OPTIONS: SelectOption<string>[] = [
+  { value: 'PGY-3', label: 'PGY-3' },
+  { value: 'PGY-2', label: 'PGY-2' },
+  { value: 'PGY-1', label: 'PGY-1' },
+  { value: 'FMC', label: 'FMC' },
+];
+
 interface SlotEdit {
   /** The stored slot, or null for a cell the schedule has not materialised yet. */
   slot: PrimaryCareClinicSlot | null;
@@ -113,6 +125,24 @@ interface SlotForm {
   faculty: string;
 }
 
+/**
+ * The row a coordinator tapped the header of.
+ *
+ * `day` is the row's own position in the week; `header` is its stored record,
+ * or null for a day the backend has not materialised yet.
+ */
+interface HeaderEdit {
+  day: DayName;
+  header: PrimaryCareDailyHeader | null;
+}
+
+interface HeaderForm {
+  dayOfWeek: DayName;
+  shiftTime: string;
+  pgyLevel: string;
+  inChargeFaculty: string;
+}
+
 const NONE_RESIDENT = '';
 const NONE_FACULTY = '';
 
@@ -127,6 +157,19 @@ function withDoctorTitle(name: string | null | undefined): string {
     .replace(/^Dr\.?\s+/i, '')
     .trim();
   return base ? `Dr. ${base}` : '';
+}
+
+/**
+ * Resolve whatever spelling the backend holds — "SUNDAY", "Sun", "Sunday" —
+ * to the canonical `DayName`, or null when it names no CCC day.
+ *
+ * The row a header belongs to is decided by its `day_of_week`, so a stored
+ * "SUNDAY" must still light up the Sunday row rather than silently falling back
+ * to its default shift and PGY level.
+ */
+function canonicalDay(value: string | null | undefined): DayName | null {
+  if (!value) return null;
+  return DAYS.find((day) => dayOfWeekMatches(value, DAYS.indexOf(day))) ?? null;
 }
 
 export default function LongitudinalMatrixScreen() {
@@ -149,6 +192,14 @@ export default function LongitudinalMatrixScreen() {
     resident1: NONE_RESIDENT,
     resident2: NONE_RESIDENT,
     faculty: NONE_FACULTY,
+  });
+
+  const [headerEdit, setHeaderEdit] = useState<HeaderEdit | null>(null);
+  const [headerForm, setHeaderForm] = useState<HeaderForm>({
+    dayOfWeek: DAYS[0],
+    shiftTime: '',
+    pgyLevel: '',
+    inChargeFaculty: NONE_FACULTY,
   });
 
   const [backupEditDay, setBackupEditDay] = useState<DayName | null>(null);
@@ -193,7 +244,8 @@ export default function LongitudinalMatrixScreen() {
   }, [residentsResource.data]);
 
   function headerForDay(day: DayName): PrimaryCareDailyHeader | null {
-    return data?.dailyHeaders.find((header) => header.day_of_week === day) ?? null;
+    const weekday = DAYS.indexOf(day);
+    return data?.dailyHeaders.find((header) => dayOfWeekMatches(header.day_of_week, weekday)) ?? null;
   }
 
   function slotFor(day: DayName, clinicNumber: number): PrimaryCareClinicSlot | null {
@@ -212,13 +264,14 @@ export default function LongitudinalMatrixScreen() {
     );
   }
 
-  function updateDayHeader(day: DayName, patch: Partial<PrimaryCareDailyHeader>) {
+  /** Patch one day's stored header in place, without refetching the schedule. */
+  function patchDailyHeader(id: number, patch: Partial<PrimaryCareDailyHeader>) {
     schedule.setData((current) =>
       current
         ? {
             ...current,
             dailyHeaders: current.dailyHeaders.map((header) =>
-              header.day_of_week === day ? { ...header, ...patch } : header,
+              header.id === id ? { ...header, ...patch } : header,
             ),
           }
         : current,
@@ -250,6 +303,66 @@ export default function LongitudinalMatrixScreen() {
       schedule.refresh();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not save the cycle header.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Seed the daily-header form from the tapped row, falling back to defaults. */
+  function openHeader(day: DayName) {
+    const header = headerForDay(day);
+    setHeaderEdit({ day, header });
+    setHeaderForm({
+      dayOfWeek: canonicalDay(header?.day_of_week) ?? day,
+      shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
+      pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
+      inChargeFaculty: header?.in_charge_faculty_name ?? NONE_FACULTY,
+    });
+    setActionError(null);
+    setFeedback(null);
+  }
+
+  function closeHeader() {
+    setHeaderEdit(null);
+  }
+
+  async function saveDailyHeader() {
+    if (!headerEdit) return;
+    if (!programId || !cycle) {
+      setActionError('The cycle has not loaded yet. Refresh and try again.');
+      return;
+    }
+    if (!headerEdit.header) {
+      setActionError('This day has not been created on the schedule yet. Refresh and try again.');
+      return;
+    }
+
+    const headerId = headerEdit.header.id;
+    const facultyName = withDoctorTitle(headerForm.inChargeFaculty);
+    const patch: Partial<PrimaryCareDailyHeader> = {
+      day_of_week: headerForm.dayOfWeek,
+      shift_time: headerForm.shiftTime.trim() || null,
+      pgy_level: headerForm.pgyLevel.trim() || null,
+      in_charge_faculty_name: facultyName || null,
+      in_charge_faculty_id: facultyName ? facultyIdByName.get(facultyName) ?? null : null,
+    };
+
+    setSaving(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      await updateCycleHeader({
+        program_id: programId,
+        cycle_id: cycle.id,
+        dailyHeaders: [{ id: headerId, ...patch }],
+      });
+      // Patch the saved header into local state in place, so the row updates
+      // without a full page refresh.
+      patchDailyHeader(headerId, patch);
+      setFeedback('Daily header and In-Charge faculty saved.');
+      setHeaderEdit(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not save the daily header.');
     } finally {
       setSaving(false);
     }
@@ -433,8 +546,8 @@ export default function LongitudinalMatrixScreen() {
               hint="First day of the academic week this cycle opens on."
             />
             <Text variant="caption" tone="muted" style={styles.note}>
-              Saving applies the cycle metadata together with each day shift, PGY level and In-Charge
-              lead set below.
+              Saving applies the cycle metadata together with each day&apos;s shift, PGY level and
+              In-Charge lead. Tap a day header in the matrix to edit a single day.
             </Text>
             <Button
               label="Save Cycle Header"
@@ -448,6 +561,7 @@ export default function LongitudinalMatrixScreen() {
             <View style={styles.cardPad}>
               <SectionHeader title="Weekly Clinic Matrix" trailing={`${DAYS.length} days`} />
               <Text variant="caption" tone="muted">
+                Tap a day&apos;s header to edit its day, shift time, PGY level and In-Charge faculty.
                 Tap any cell to assign up to two residents and supervising faculty. WBC and Leaves are
                 the eleventh and twelfth columns.
               </Text>
@@ -487,24 +601,43 @@ export default function LongitudinalMatrixScreen() {
 
                 {DAYS.map((day) => {
                   const header = headerForDay(day);
+                  const shiftLabel = header?.shift_time || DAY_CONFIG[day].shift;
+                  const pgyLabel = header?.pgy_level || DAY_CONFIG[day].pgy;
+                  const inCharge = withDoctorTitle(header?.in_charge_faculty_name);
                   return (
                     <View key={day} style={styles.matrixRow}>
-                      <View style={[styles.dayCol, styles.frozen, styles.bodyCell]}>
+                      <Pressable
+                        onPress={() => openHeader(day)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${day} daily header. Shift ${shiftLabel}. ${pgyLabel}. Faculty in charge ${
+                          inCharge || 'unassigned'
+                        }. Opens the daily header editor.`}
+                        accessibilityHint="Opens a sheet to edit the day, shift time, PGY level and In-Charge faculty"
+                        style={({ pressed }) => [
+                          styles.dayCol,
+                          styles.frozen,
+                          styles.bodyCell,
+                          pressed ? styles.cellPressed : null,
+                        ]}
+                      >
                         <Text variant="bodySmall" style={styles.dayName}>
                           {DAY_SHORT[day]}
                         </Text>
                         <Text variant="caption" tone="secondary" numberOfLines={1}>
-                          {header?.shift_time || DAY_CONFIG[day].shift}
+                          {shiftLabel}
                         </Text>
                         <Text variant="caption" tone="brand" numberOfLines={1}>
-                          {header?.pgy_level || DAY_CONFIG[day].pgy}
+                          {pgyLabel}
                         </Text>
-                        {header?.in_charge_faculty_name ? (
-                          <Text variant="caption" tone="muted" numberOfLines={1}>
-                            {header.in_charge_faculty_name}
-                          </Text>
-                        ) : null}
-                      </View>
+                        <Text
+                          variant="caption"
+                          tone={inCharge ? 'secondary' : 'muted'}
+                          numberOfLines={2}
+                          style={styles.inCharge}
+                        >
+                          {`Faculty In-charge: ${inCharge || 'Unassigned'}`}
+                        </Text>
+                      </Pressable>
 
                       {MATRIX_COLUMNS.map((column) => {
                         const slot = slotFor(day, column.clinicNumber);
@@ -562,56 +695,6 @@ export default function LongitudinalMatrixScreen() {
                 })}
               </View>
             </ScrollView>
-          </Card>
-
-          <Card>
-            <SectionHeader title="Academic Days — Shift, PGY & In-Charge Lead" />
-            {DAYS.map((day) => {
-              const header = headerForDay(day);
-              return (
-                <View key={day} style={styles.dayEditor}>
-                  <Text variant="body" style={styles.dayEditorTitle}>
-                    {day}
-                  </Text>
-                  <View style={styles.row}>
-                    <View style={styles.half}>
-                      <TextField
-                        label="Shift"
-                        value={header?.shift_time ?? ''}
-                        onChangeText={(value) => updateDayHeader(day, { shift_time: value })}
-                        placeholder={DAY_CONFIG[day].shift}
-                      />
-                    </View>
-                    <View style={styles.half}>
-                      <TextField
-                        label="PGY / Context"
-                        value={header?.pgy_level ?? ''}
-                        onChangeText={(value) => updateDayHeader(day, { pgy_level: value })}
-                        placeholder={DAY_CONFIG[day].pgy}
-                      />
-                    </View>
-                  </View>
-                  <SheetSelectField
-                    label={`In-Charge Faculty (${day})`}
-                    value={header?.in_charge_faculty_name ?? NONE_FACULTY}
-                    options={withCurrent(facultyOptions, header?.in_charge_faculty_name ?? '')}
-                    onChange={(value) =>
-                      updateDayHeader(day, {
-                        in_charge_faculty_name: value || null,
-                        in_charge_faculty_id: value ? facultyIdByName.get(value) ?? null : null,
-                      })
-                    }
-                    placeholder="Select the In-Charge lead"
-                  />
-                </View>
-              );
-            })}
-            <Button
-              label="Save Cycle Header & Day Settings"
-              onPress={saveHeader}
-              loading={saving}
-              disabled={saving}
-            />
           </Card>
 
           <Card>
@@ -761,6 +844,63 @@ export default function LongitudinalMatrixScreen() {
       ) : null}
 
       <Sheet
+        visible={Boolean(headerEdit)}
+        onClose={closeHeader}
+        title="EDIT DAILY HEADER & IN-CHARGE FACULTY"
+        subtitle={headerEdit ? `${headerEdit.day} · weekly CCC day` : undefined}
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label="Save Header"
+              onPress={saveDailyHeader}
+              loading={saving}
+              disabled={saving}
+              style={styles.flex1}
+            />
+            <Button label="Cancel" variant="outline" onPress={closeHeader} style={styles.flex1} />
+          </View>
+        }
+      >
+        {headerEdit ? (
+          <>
+            <SheetSelectField
+              label="Day of Week"
+              value={headerForm.dayOfWeek}
+              options={DAY_OPTIONS}
+              onChange={(value) => setHeaderForm((previous) => ({ ...previous, dayOfWeek: value }))}
+              placeholder="Choose a day"
+              hint="The CCC week runs Sunday to Thursday."
+            />
+            <TextField
+              label="Shift Time"
+              value={headerForm.shiftTime}
+              onChangeText={(value) => setHeaderForm((previous) => ({ ...previous, shiftTime: value }))}
+              placeholder={DAY_CONFIG[headerEdit.day].shift}
+              autoCapitalize="none"
+              hint="e.g. 10:30 - 2:00 or 07:00 - 2:00"
+            />
+            <SheetSelectField
+              label="PGY Level / Context"
+              value={headerForm.pgyLevel || null}
+              options={withCurrent(PGY_OPTIONS, headerForm.pgyLevel)}
+              onChange={(value) => setHeaderForm((previous) => ({ ...previous, pgyLevel: value }))}
+              placeholder="Choose a level"
+            />
+            <SheetSelectField
+              label="Faculty In-charge"
+              value={headerForm.inChargeFaculty || NONE_FACULTY}
+              options={withCurrent(facultyOptions, headerForm.inChargeFaculty)}
+              onChange={(value) =>
+                setHeaderForm((previous) => ({ ...previous, inChargeFaculty: value }))
+              }
+              placeholder="— Unassigned —"
+              hint="A 'Dr.' title is applied automatically."
+            />
+          </>
+        ) : null}
+      </Sheet>
+
+      <Sheet
         visible={Boolean(slotEdit)}
         onClose={closeSlot}
         title="EDIT CLINIC SLOT"
@@ -897,15 +1037,8 @@ const styles = StyleSheet.create({
   cellFaculty: {
     marginTop: spacing.xxs,
   },
-  dayEditor: {
-    marginBottom: spacing.lg,
-    paddingBottom: spacing.md,
-    borderBottomWidth: 1,
-    borderColor: colors.border,
-  },
-  dayEditorTitle: {
-    fontWeight: '600',
-    marginBottom: spacing.sm,
+  inCharge: {
+    marginTop: spacing.xxs,
   },
   backupRow: {
     flexDirection: 'row',

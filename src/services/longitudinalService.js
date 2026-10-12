@@ -930,6 +930,24 @@ class LongitudinalService {
       for (const header of data.dailyHeaders) {
         const sets = [];
         const params = [];
+        if (header.day_of_week !== undefined) {
+          const day = String(header.day_of_week ?? '').trim();
+          if (day) {
+            // Two headers sharing a day would make the matrix ambiguous, since a
+            // row is resolved by its day. Reject rather than silently duplicate.
+            const [clash] = await db.query(
+              'SELECT id FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ? AND id <> ? LIMIT 1',
+              [cycleId, day, header.id]
+            );
+            if (clash.length > 0) {
+              const error = new Error(`The ${day} day already exists on this cycle. Choose a different day.`);
+              error.statusCode = 409;
+              throw error;
+            }
+            sets.push('day_of_week = ?');
+            params.push(day);
+          }
+        }
         if (header.shift_time !== undefined) { sets.push('shift_time = ?'); params.push(header.shift_time); }
         if (header.pgy_level !== undefined) { sets.push('pgy_level = ?'); params.push(header.pgy_level); }
         if (header.in_charge_faculty_name !== undefined) {
