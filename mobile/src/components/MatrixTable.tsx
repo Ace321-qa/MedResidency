@@ -73,6 +73,18 @@ export interface MatrixRowDef {
   accent?: Tone;
   /** Makes the whole row pressable, e.g. to open a resident. */
   onPress?: () => void;
+  /**
+   * Makes each individual grid cell pressable, e.g. to open a slot editor.
+   *
+   * Called with the column key of the tapped cell, so a screen can resolve its
+   * own context (day, shift, clinic number) without the table knowing about any
+   * of it. When set, the row itself stops being the tap target — a cell is the
+   * target — which also avoids nesting web `<button>` elements inside a
+   * row-level button.
+   */
+  onCellPress?: (columnKey: string) => void;
+  /** Announced by screen readers for a cell; falls back to the column title. */
+  cellAccessibilityLabel?: (columnKey: string) => string | undefined;
   accessibilityLabel?: string;
 }
 
@@ -225,35 +237,75 @@ export function MatrixTable({
           </View>
 
           {/* One unified horizontal row per record: name cell + all grid cells,
-              so the two can never drift out of alignment. */}
-          {rows.map((row) => (
-            <Pressable
-              key={`tr-${row.key}`}
-              onPress={row.onPress}
-              disabled={!row.onPress}
-              accessibilityRole={row.onPress ? 'button' : 'text'}
-              accessibilityLabel={row.accessibilityLabel}
-              style={[styles.tableRow, autoHeight ? styles.tableRowAuto : { height: rowHeight }]}
-            >
-              <View style={[styles.residentStickyCell, { width: frozenWidth, minWidth: frozenWidth }]}>
-                {row.accent ? <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} /> : null}
-                {row.frozenContent ?? null}
-              </View>
-              {columns.map((column) => (
-                <View
-                  key={column.key}
-                  style={[
+              so the two can never drift out of alignment. A row is only a
+              Pressable when it has its own handler and its cells do not — making
+              both targets buttons would nest controls a screen reader cannot
+              separate. */}
+          {rows.map((row) => {
+            const rowStyle = [styles.tableRow, autoHeight ? styles.tableRowAuto : { height: rowHeight }];
+            const rowBody = (
+              <>
+                <View style={[styles.residentStickyCell, { width: frozenWidth, minWidth: frozenWidth }]}>
+                  {row.accent ? <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} /> : null}
+                  {row.frozenContent ?? null}
+                </View>
+                {columns.map((column) => {
+                  const content =
+                    row.cells[column.key] ?? (
+                      <Text variant="bodySmall" tone="disabled" align="center">
+                        —
+                      </Text>
+                    );
+                  const cellStyle = [
                     styles.cell,
                     autoHeight ? styles.cellAuto : null,
                     { width: column.width ?? DEFAULT_COLUMN_WIDTH },
                     column.align === 'right' ? styles.alignRight : null,
-                  ]}
+                  ];
+
+                  if (row.onCellPress) {
+                    return (
+                      <Pressable
+                        key={column.key}
+                        onPress={() => row.onCellPress!(column.key)}
+                        accessibilityRole="button"
+                        accessibilityLabel={row.cellAccessibilityLabel?.(column.key) ?? column.title}
+                        style={({ pressed }) => [...cellStyle, pressed ? styles.cellPressed : null]}
+                      >
+                        {content}
+                      </Pressable>
+                    );
+                  }
+
+                  return (
+                    <View key={column.key} style={cellStyle}>
+                      {content}
+                    </View>
+                  );
+                })}
+              </>
+            );
+
+            if (row.onPress && !row.onCellPress) {
+              return (
+                <Pressable
+                  key={`tr-${row.key}`}
+                  onPress={row.onPress}
+                  accessibilityRole="button"
+                  accessibilityLabel={row.accessibilityLabel}
+                  style={rowStyle}
                 >
-                  {row.cells[column.key] ?? <Text variant="bodySmall" tone="disabled" align="center">—</Text>}
-                </View>
-              ))}
-            </Pressable>
-          ))}
+                  {rowBody}
+                </Pressable>
+              );
+            }
+
+            return (
+              <View key={`tr-${row.key}`} style={rowStyle}>
+                {rowBody}
+              </View>
+            );
+          })}
         </View>
       </ScrollView>
     </ScrollView>
@@ -433,6 +485,9 @@ const styles = StyleSheet.create({
   },
   alignRight: {
     alignItems: 'flex-end',
+  },
+  cellPressed: {
+    backgroundColor: colors.primarySoft,
   },
   empty: {
     paddingVertical: spacing.giant,

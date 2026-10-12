@@ -11,6 +11,7 @@ import {
   IconButton,
   Screen,
   SectionHeader,
+  Sheet,
   SheetSelectField,
   Text,
   TextField,
@@ -96,9 +97,14 @@ const BACKUP_POOL_MAX = 4;
 const stickyPosition: 'relative' = Platform.OS === 'web' ? ('sticky' as any) : 'relative';
 
 interface SlotEdit {
-  slot: PrimaryCareClinicSlot;
+  /** The stored slot, or null for a cell the schedule has not materialised yet. */
+  slot: PrimaryCareClinicSlot | null;
   day: DayName;
+  /** Column header, e.g. "Clinic 3" or "WBC". */
+  columnLabel: string;
   clinicNumber: number;
+  shiftTime: string | null;
+  pgyLevel: string | null;
 }
 
 interface SlotForm {
@@ -109,6 +115,19 @@ interface SlotForm {
 
 const NONE_RESIDENT = '';
 const NONE_FACULTY = '';
+
+/**
+ * Faculty are always shown and stored with exactly one `Dr. ` prefix, matching
+ * the server's own normalisation. Stripping first means a display name that
+ * already carries the title is not turned into `Dr. Dr. Areen`.
+ */
+function withDoctorTitle(name: string | null | undefined): string {
+  const base = String(name ?? '')
+    .trim()
+    .replace(/^Dr\.?\s+/i, '')
+    .trim();
+  return base ? `Dr. ${base}` : '';
+}
 
 export default function LongitudinalMatrixScreen() {
   const { session } = useSession();
@@ -144,7 +163,8 @@ export default function LongitudinalMatrixScreen() {
   const facultyOptions = useMemo<SelectOption<string>[]>(() => {
     const options: SelectOption<string>[] = [{ value: NONE_FACULTY, label: '— None —' }];
     for (const faculty of facultyResource.data ?? []) {
-      const value = faculty.display_name ?? `Dr. ${faculty.first_name} ${faculty.last_name}`;
+      const value = withDoctorTitle(faculty.display_name ?? `${faculty.first_name} ${faculty.last_name}`);
+      if (!value) continue;
       options.push({ value, label: value });
     }
     return options;
@@ -153,7 +173,8 @@ export default function LongitudinalMatrixScreen() {
   const facultyIdByName = useMemo(() => {
     const map = new Map<string, number>();
     for (const faculty of facultyResource.data ?? []) {
-      const value = faculty.display_name ?? `Dr. ${faculty.first_name} ${faculty.last_name}`;
+      const value = withDoctorTitle(faculty.display_name ?? `${faculty.first_name} ${faculty.last_name}`);
+      if (!value) continue;
       map.set(value, faculty.id);
     }
     return map;
@@ -237,29 +258,51 @@ export default function LongitudinalMatrixScreen() {
   function openSlot(edit: SlotEdit) {
     setSlotEdit(edit);
     setSlotForm({
-      resident1: edit.slot.resident_1_name ?? NONE_RESIDENT,
-      resident2: edit.slot.resident_2_name ?? NONE_RESIDENT,
-      faculty: edit.slot.faculty_name ?? NONE_FACULTY,
+      resident1: edit.slot?.resident_1_name ?? NONE_RESIDENT,
+      resident2: edit.slot?.resident_2_name ?? NONE_RESIDENT,
+      faculty: edit.slot?.faculty_name ?? NONE_FACULTY,
     });
     setActionError(null);
     setFeedback(null);
   }
 
+  function closeSlot() {
+    setSlotEdit(null);
+  }
+
   async function saveSlot() {
     if (!slotEdit) return;
+    if (!slotEdit.slot) {
+      setActionError('This clinic slot has not been created on the schedule yet. Refresh and try again.');
+      return;
+    }
     setSaving(true);
     setActionError(null);
     setFeedback(null);
     try {
-      await updateCycleSlot(slotEdit.slot.id, {
+      const result = await updateCycleSlot(slotEdit.slot.id, {
+        program_id: programId,
         resident_1_name: slotForm.resident1.trim() || null,
         resident_2_name: slotForm.resident2.trim() || null,
         faculty_name: slotForm.faculty.trim() || null,
         faculty_id: facultyIdByName.get(slotForm.faculty.trim()) ?? null,
       });
-      setFeedback('Clinic slot saved.');
+      // Patch the saved row into local state so the cell updates in place,
+      // without a full page refresh.
+      schedule.setData((current) =>
+        current
+          ? {
+              ...current,
+              slots: current.slots.map((slot) => (slot.id === result.slot.id ? result.slot : slot)),
+            }
+          : current,
+      );
+      setFeedback(
+        result.warnings.length > 0
+          ? `Clinic slot saved. ${result.warnings.join(' ')}`
+          : 'Clinic slot saved.',
+      );
       setSlotEdit(null);
-      schedule.refresh();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not save the clinic slot.');
     } finally {
@@ -474,7 +517,14 @@ export default function LongitudinalMatrixScreen() {
                           <Pressable
                             key={column.key}
                             onPress={() =>
-                              slot && openSlot({ slot, day, clinicNumber: column.clinicNumber })
+                              openSlot({
+                                slot,
+                                day,
+                                columnLabel: column.title,
+                                clinicNumber: column.clinicNumber,
+                                shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
+                                pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
+                              })
                             }
                             accessibilityRole="button"
                             accessibilityLabel={`${day} ${column.title}. ${
@@ -710,38 +760,12 @@ export default function LongitudinalMatrixScreen() {
         </>
       ) : null}
 
-      {slotEdit ? (
-        <Card>
-          <SectionHeader
-            title="Edit Clinic Slot"
-            actionLabel="Close"
-            onActionPress={() => setSlotEdit(null)}
-          />
-          <Text variant="caption" tone="secondary" style={styles.note}>
-            {slotEdit.day} · Clinic {slotEdit.clinicNumber}
-          </Text>
-          <SheetSelectField
-            label="Resident 1"
-            value={slotForm.resident1 || NONE_RESIDENT}
-            options={withCurrent(residentOptions, slotForm.resident1)}
-            onChange={(value) => setSlotForm((previous) => ({ ...previous, resident1: value }))}
-            placeholder="Choose a resident"
-          />
-          <SheetSelectField
-            label="Resident 2 (optional)"
-            value={slotForm.resident2 || NONE_RESIDENT}
-            options={withCurrent(residentOptions, slotForm.resident2)}
-            onChange={(value) => setSlotForm((previous) => ({ ...previous, resident2: value }))}
-            placeholder="Choose a resident"
-          />
-          <SheetSelectField
-            label="Supervising Faculty"
-            value={slotForm.faculty || NONE_FACULTY}
-            options={withCurrent(facultyOptions, slotForm.faculty)}
-            onChange={(value) => setSlotForm((previous) => ({ ...previous, faculty: value }))}
-            placeholder="Choose supervising faculty"
-            hint="A 'Dr.' title is applied automatically."
-          />
+      <Sheet
+        visible={Boolean(slotEdit)}
+        onClose={closeSlot}
+        title="EDIT CLINIC SLOT"
+        subtitle={slotEdit ? `${slotEdit.day} · ${slotEdit.columnLabel}` : undefined}
+        footer={
           <View style={styles.actionRow}>
             <Button
               label="Save Slot"
@@ -750,15 +774,42 @@ export default function LongitudinalMatrixScreen() {
               disabled={saving}
               style={styles.flex1}
             />
-            <Button
-              label="Cancel"
-              variant="outline"
-              onPress={() => setSlotEdit(null)}
-              style={styles.flex1}
-            />
+            <Button label="Cancel" variant="outline" onPress={closeSlot} style={styles.flex1} />
           </View>
-        </Card>
-      ) : null}
+        }
+      >
+        {slotEdit ? (
+          <>
+            <Text variant="caption" tone="secondary" style={styles.note}>
+              {(slotEdit.shiftTime || DAY_CONFIG[slotEdit.day].shift) +
+                ' · ' +
+                (slotEdit.pgyLevel || DAY_CONFIG[slotEdit.day].pgy)}
+            </Text>
+            <SheetSelectField
+              label="Resident 1"
+              value={slotForm.resident1 || NONE_RESIDENT}
+              options={withCurrent(residentOptions, slotForm.resident1)}
+              onChange={(value) => setSlotForm((previous) => ({ ...previous, resident1: value }))}
+              placeholder="— Unassigned —"
+            />
+            <SheetSelectField
+              label="Resident 2 (optional)"
+              value={slotForm.resident2 || NONE_RESIDENT}
+              options={withCurrent(residentOptions, slotForm.resident2)}
+              onChange={(value) => setSlotForm((previous) => ({ ...previous, resident2: value }))}
+              placeholder="— Unassigned —"
+            />
+            <SheetSelectField
+              label="Supervising Faculty"
+              value={slotForm.faculty || NONE_FACULTY}
+              options={withCurrent(facultyOptions, slotForm.faculty)}
+              onChange={(value) => setSlotForm((previous) => ({ ...previous, faculty: value }))}
+              placeholder="— None —"
+              hint="A 'Dr.' title is applied automatically to faculty members."
+            />
+          </>
+        ) : null}
+      </Sheet>
     </Screen>
   );
 }
