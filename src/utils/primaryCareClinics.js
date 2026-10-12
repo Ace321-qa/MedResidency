@@ -1,7 +1,7 @@
 /**
- * Primary Care Clinics: the standard clinic set and catalog.
+ * Continuity of Care Clinics (CCC): the standard clinic set and catalog.
  *
- * Every programme's "Primary Care Clinics" view is born with the five standard
+ * Every programme's "Continuity of Care Clinics (CCC)" view is born with the five standard
  * clinics below. They are the contract that view is built around — the screen
  * draws its default chip pool from them — so they are defined once here and
  * seeded idempotently for every programme at server boot (`ensureDefaultClinics`

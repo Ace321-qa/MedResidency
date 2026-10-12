@@ -19,7 +19,7 @@ class LongitudinalController {
   /**
    * `POST /longitudinal/clinic-types`
    *
-   * Adds a clinic to a programme's Primary Care Clinics catalog — either a
+   * Adds a clinic to a programme's Continuity of Care Clinics (CCC) catalog — either a
    * pre-defined one chosen from the catalog or a hand-typed custom name. Existing
    * rows are reactivated, so this is safe to call for names already on record.
    */
@@ -102,7 +102,7 @@ class LongitudinalController {
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      // Optional: the Primary Care Clinics matrix scopes by year, a resident's
+      // Optional: the Continuity of Care Clinics (CCC) matrix scopes by year, a resident's
       // profile wants the whole longitudinal record.
       const data = await LongitudinalService.getAllLongitudinalAssignments(program_id, academic_year || null);
       return res.status(200).json({ success: true, count: data.length, data });

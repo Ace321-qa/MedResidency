@@ -42,7 +42,7 @@ import type { RotationRequestType } from '../../../types/api';
  *
  *  - **Master grid** — the same assignments laid out as blocks across the top,
  *    for reading the year as one shape instead of scrolling it.
- *  - **Clinic overview** — the Primary Care Clinic (longitudinal) assignments,
+ *  - **Clinic overview** — the Continuity of Care Clinic (CCC) (longitudinal) assignments,
  *    which are *not* rotation assignments and therefore never appear in the block
  *    list. A resident whose only question is "which clinic am I on?" should not
  *    have to infer it from a rota.
@@ -317,7 +317,7 @@ export default function RotationsScreen() {
       {clinicList.length > 0 ? (
         <>
           <SectionHeader
-            title="Clinic overview (Primary Care Clinics)"
+            title="Clinic overview (Continuity of Care Clinics)"
             trailing={`${clinicList.length} session${clinicList.length === 1 ? '' : 's'}`}
             icon={Stethoscope}
           />
@@ -350,7 +350,7 @@ export default function RotationsScreen() {
           <EmptyState
             icon={Stethoscope}
             title="No clinic session yet"
-            message="Your Primary Care Clinic or longitudinal clinic has not been assigned. It appears here as soon as your coordinator schedules one."
+            message="Your Continuity of Care Clinic or longitudinal clinic has not been assigned. It appears here as soon as your coordinator schedules one."
           />
         </Card>
       ) : null}

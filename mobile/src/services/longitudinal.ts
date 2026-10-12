@@ -27,7 +27,7 @@ export async function fetchClinicTypes(
 }
 
 /**
- * Add a clinic to the programme's Primary Care Clinics catalog.
+ * Add a clinic to the programme's Continuity of Care Clinics (CCC) catalog.
  *
  * The name is the identity; an existing clinic — active or not — is reactivated
  * server-side, so this is also how a clinic brought back from the catalog returns

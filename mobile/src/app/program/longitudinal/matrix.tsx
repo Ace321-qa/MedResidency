@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Plus, Shuffle, Trash2 } from 'lucide-react-native';
+import { Minus, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react-native';
 
 import {
   AppHeader,
@@ -10,6 +10,7 @@ import {
   DateField,
   IconButton,
   Screen,
+  SearchInput,
   SectionHeader,
   Sheet,
   SheetSelectField,
@@ -19,20 +20,30 @@ import {
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import {
+  createClinicType,
+  deleteClinicType,
+  fetchClinicTypes,
   fetchCycleSchedule,
   fetchFacultySupervisors,
   randomizeSupervisors,
   updateBackupFaculty,
+  updateClinicType,
   updateCycleHeader,
   updateCycleSlot,
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
 import { CCC_SCHEDULE_ROWS, dayOfWeekMatches } from '../../../utils/cccMatrix';
 import { formatPgy } from '../../../utils/insights';
+import {
+  PRIMARY_CARE_CLINIC_CATALOG,
+  clinicNameKey,
+  type ClinicCatalogEntry,
+} from '../../../utils/primaryCareClinics';
 import { residentFullName } from '../../../utils/residents';
 import { colors, radius, spacing } from '../../../theme';
 import { goBack } from '../../../navigation/back';
 import type {
+  LongitudinalClinicType,
   PrimaryCareClinicSlot,
   PrimaryCareCycle,
   PrimaryCareDailyHeader,
@@ -160,6 +171,45 @@ function withDoctorTitle(name: string | null | undefined): string {
   return base ? `Dr. ${base}` : '';
 }
 
+/** A catalog entry's supporting line: the session, and whether a letter is needed. */
+function describeCatalogEntry(entry: ClinicCatalogEntry): string {
+  const parts: string[] = [];
+  if (entry.defaultDay) {
+    parts.push(
+      `${titleCaseDay(entry.defaultDay)}${
+        entry.startTime && entry.endTime ? ` ${entry.startTime}–${entry.endTime}` : ''
+      }`,
+    );
+  } else if (entry.startTime && entry.endTime) {
+    parts.push(`Any day ${entry.startTime}–${entry.endTime}`);
+  } else {
+    parts.push('No fixed day');
+  }
+  if (entry.requiresReleaseLetter) parts.push('Release letter required');
+  return parts.join(' · ');
+}
+
+/** The one-line summary shown under a catalogued clinic's name. */
+function describeClinicType(clinic: LongitudinalClinicType): string {
+  const parts: string[] = [clinic.clinic_code];
+  if (clinic.default_day_of_week) {
+    parts.push(
+      `${titleCaseDay(clinic.default_day_of_week)}${
+        clinic.start_time && clinic.end_time ? ` ${clinic.start_time.slice(0, 5)}–${clinic.end_time.slice(0, 5)}` : ''
+      }`,
+    );
+  } else {
+    parts.push('No fixed day');
+  }
+  if (clinic.requires_release_letter === 1) parts.push('Release letter');
+  return parts.join(' · ');
+}
+
+function titleCaseDay(day: string): string {
+  const lower = day.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
 /**
  * Resolve whatever spelling the backend holds — "SUNDAY", "Sun", "Sunday" —
  * to the canonical `DayName`, or null when it names no CCC day.
@@ -207,6 +257,17 @@ export default function LongitudinalMatrixScreen() {
     () => fetchResidentList({ programId, limit: 200 }),
     [programId],
   );
+  /**
+   * The programme's clinic catalog, including inactive rows.
+   *
+   * Inactive rows still count as "known": a clinic moved out of the default pool
+   * must not be offered a second time by the add sheet, because the server would
+   * only reactivate the row it already has.
+   */
+  const clinicTypes = useApiResource(
+    () => fetchClinicTypes(programId, { includeInactive: true }),
+    [programId],
+  );
 
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -235,6 +296,17 @@ export default function LongitudinalMatrixScreen() {
 
   /** Which of the two clinic-grid renderings is active. */
   const [viewMode, setViewMode] = useState<ViewMode>('matrix');
+
+  /** The clinic catalog add / rename / remove controls. */
+  const [addClinicOpen, setAddClinicOpen] = useState(false);
+  const [addClinicQuery, setAddClinicQuery] = useState('');
+  const [customClinicName, setCustomClinicName] = useState('');
+  const [addingClinic, setAddingClinic] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<LongitudinalClinicType | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [savingClinicRename, setSavingClinicRename] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<LongitudinalClinicType | null>(null);
+  const [deletingClinic, setDeletingClinic] = useState(false);
 
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
@@ -539,12 +611,180 @@ export default function LongitudinalMatrixScreen() {
     return map;
   }, [residentsResource.data]);
 
+  /** The clinics selectable right now; inactive rows stay out of the catalog. */
+  const activeClinics = useMemo(
+    () => (clinicTypes.data ?? []).filter((clinic) => clinic.is_active === 1),
+    [clinicTypes.data],
+  );
+
+  /** Clinics already on record for the programme, active or not. */
+  const knownClinicKeys = useMemo(
+    () => new Set((clinicTypes.data ?? []).map((clinic) => clinicNameKey(clinic.clinic_name))),
+    [clinicTypes.data],
+  );
+
+  /**
+   * The catalog entries not already on record.
+   *
+   * A clinic that was removed from the pool is still on record, so it is excluded
+   * here — picking it would only reactivate the row it already has.
+   */
+  const clinicCatalogCandidates = useMemo(
+    () => PRIMARY_CARE_CLINIC_CATALOG.filter((entry) => !knownClinicKeys.has(clinicNameKey(entry.name))),
+    [knownClinicKeys],
+  );
+
+  const clinicQueryNeedle = addClinicQuery.trim().toLowerCase();
+  const visibleClinicCatalog = clinicQueryNeedle
+    ? clinicCatalogCandidates.filter((entry) => entry.name.toLowerCase().includes(clinicQueryNeedle))
+    : clinicCatalogCandidates;
+
+  function openAddClinic() {
+    setAddClinicQuery('');
+    setCustomClinicName('');
+    setAddClinicOpen(true);
+    setActionError(null);
+    setFeedback(null);
+  }
+
+  function closeAddClinic() {
+    if (addingClinic) return;
+    setAddClinicOpen(false);
+  }
+
+  /** Add a clinic and patch it into the catalog so the row appears immediately. */
+  async function addClinic(payload: {
+    clinic_name: string;
+    default_day_of_week?: string | null;
+    start_time?: string | null;
+    end_time?: string | null;
+    requires_release_letter?: number;
+  }) {
+    if (!programId) return;
+    setAddingClinic(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      const created = await createClinicType({ program_id: programId, ...payload });
+      clinicTypes.setData((current) => [
+        ...(current ?? []).filter((clinic) => clinic.id !== created.id),
+        created,
+      ]);
+      setAddClinicOpen(false);
+      setFeedback(`${created.clinic_name} is now available in the clinic catalog.`);
+      clinicTypes.refresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not add this clinic.');
+    } finally {
+      setAddingClinic(false);
+    }
+  }
+
+  function addCatalogClinic(entry: ClinicCatalogEntry) {
+    void addClinic({
+      clinic_name: entry.name,
+      default_day_of_week: entry.defaultDay,
+      start_time: entry.startTime,
+      end_time: entry.endTime,
+      requires_release_letter: entry.requiresReleaseLetter ? 1 : 0,
+    });
+  }
+
+  function addCustomClinic() {
+    const name = customClinicName.trim();
+    if (!name) return;
+    void addClinic({ clinic_name: name });
+  }
+
+  function openRenameClinic(clinic: LongitudinalClinicType) {
+    setRenameTarget(clinic);
+    setRenameValue(clinic.clinic_name);
+    setActionError(null);
+    setFeedback(null);
+  }
+
+  function closeRenameClinic() {
+    if (savingClinicRename) return;
+    setRenameTarget(null);
+    setRenameValue('');
+  }
+
+  /** Rename a clinic and patch the row in place, without a page refresh. */
+  async function saveClinicRename() {
+    if (!renameTarget) return;
+    const name = renameValue.trim();
+    if (!name) {
+      setActionError('A clinic name is required.');
+      return;
+    }
+    setSavingClinicRename(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      const updated = await updateClinicType(renameTarget.id, {
+        program_id: programId,
+        clinic_name: name,
+      });
+      clinicTypes.setData((current) =>
+        (current ?? []).map((clinic) => (clinic.id === updated.id ? updated : clinic)),
+      );
+      setRenameTarget(null);
+      setRenameValue('');
+      setFeedback(`${updated.clinic_name} was renamed.`);
+      clinicTypes.refresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not rename this clinic.');
+    } finally {
+      setSavingClinicRename(false);
+    }
+  }
+
+  function askDeleteClinic(clinic: LongitudinalClinicType) {
+    setDeleteTarget(clinic);
+    setActionError(null);
+    setFeedback(null);
+  }
+
+  function closeDeleteClinic() {
+    if (deletingClinic) return;
+    setDeleteTarget(null);
+  }
+
+  /** Soft-delete a clinic, then drop it out of the active catalog in place. */
+  async function removeClinic() {
+    if (!deleteTarget) return;
+    setDeletingClinic(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      await deleteClinicType(deleteTarget.id, programId);
+      clinicTypes.setData((current) =>
+        (current ?? []).map((clinic) =>
+          clinic.id === deleteTarget.id ? { ...clinic, is_active: 0 } : clinic,
+        ),
+      );
+      setDeleteTarget(null);
+      setFeedback('Clinic removed from the active catalog. Existing history is preserved.');
+      clinicTypes.refresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not remove this clinic.');
+    } finally {
+      setDeletingClinic(false);
+    }
+  }
+
   const isLoading = schedule.isLoading && !data;
 
   return (
-    <Screen onRefresh={schedule.refresh} refreshing={schedule.isRefreshing}>
+    <Screen
+      onRefresh={() => {
+        schedule.refresh();
+        clinicTypes.refresh();
+      }}
+      refreshing={schedule.isRefreshing || clinicTypes.isRefreshing}
+    >
       <AppHeader
-        title="Primary Care Clinics (CCC)"
+        title="Continuity of Care Clinics (CCC)"
         subtitle="Weekly clinic matrix, supervisors and backup faculty"
         onBack={goBack}
       />
@@ -818,6 +1058,8 @@ export default function LongitudinalMatrixScreen() {
                       (name): name is string => Boolean(name),
                     );
                     const faculty = withDoctorTitle(slot?.faculty_name);
+                    const inCharge = withDoctorTitle(header?.in_charge_faculty_name);
+                    const isSessionStart = columnIndex === 0;
                     const clinicLabel =
                       column.key === 'leaves'
                         ? 'Leaves'
@@ -825,78 +1067,100 @@ export default function LongitudinalMatrixScreen() {
                           ? column.subtitle
                           : column.title;
                     return (
-                      <Pressable
-                        key={column.key}
-                        onPress={() =>
-                          openSlot({
-                            slot,
-                            day,
-                            columnLabel: clinicLabel,
-                            clinicNumber: column.clinicNumber,
-                            shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
-                            pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
-                          })
-                        }
-                        accessibilityRole="button"
-                        accessibilityLabel={`${day} ${clinicLabel}. ${
-                          residents.length ? residents.join(', ') : 'Unassigned'
-                        }${faculty ? `, supervised by ${faculty}` : ''}. Opens the slot editor.`}
-                        accessibilityHint="Opens a sheet to edit residents and supervising faculty"
-                        style={({ pressed }) => [
-                          styles.rosterRow,
-                          pressed ? styles.cellPressed : null,
-                        ]}
-                      >
-                        <View
-                          style={[
-                            styles.rosterDayCell,
-                            columnIndex === 0 ? styles.rosterSessionStart : null,
+                      <View key={column.key} style={styles.rosterRow}>
+                        {/* Column 1 is the session block: the day, its PGY badge
+                            and the daily in-charge faculty, with the exact same
+                            prefix the Matrix grid uses. Tapping it opens the
+                            daily header editor; the other columns open the slot
+                            editor, so the two are separate pressables rather
+                            than one nested target. */}
+                        {isSessionStart ? (
+                          <Pressable
+                            onPress={() => openHeader(day)}
+                            accessibilityRole="button"
+                            accessibilityLabel={`${day} session, ${shiftLabel}, ${pgyLabel}. Faculty in charge ${
+                              inCharge || 'unassigned'
+                            }. Opens the daily header editor.`}
+                            accessibilityHint="Opens a sheet to edit the day, shift time, PGY level and In-Charge faculty"
+                            style={({ pressed }) => [
+                              styles.rosterDayCell,
+                              styles.rosterSessionStart,
+                              pressed ? styles.cellPressed : null,
+                            ]}
+                          >
+                            <Text variant="bodySmall" style={styles.rosterDayText}>
+                              {day}, {shiftLabel}
+                            </Text>
+                            <PgyBadge label={pgyLabel} />
+                            <Text
+                              variant="caption"
+                              tone={inCharge ? 'secondary' : 'muted'}
+                              numberOfLines={2}
+                              style={styles.inCharge}
+                            >
+                              {`Faculty In-charge: ${inCharge || 'Unassigned'}`}
+                            </Text>
+                          </Pressable>
+                        ) : (
+                          <View style={styles.rosterDayCell} />
+                        )}
+                        <Pressable
+                          onPress={() =>
+                            openSlot({
+                              slot,
+                              day,
+                              columnLabel: clinicLabel,
+                              clinicNumber: column.clinicNumber,
+                              shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
+                              pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
+                            })
+                          }
+                          accessibilityRole="button"
+                          accessibilityLabel={`${day} ${clinicLabel}. ${
+                            residents.length ? residents.join(', ') : 'Unassigned'
+                          }${faculty ? `, supervised by ${faculty}` : ''}. Opens the slot editor.`}
+                          accessibilityHint="Opens a sheet to edit residents and supervising faculty"
+                          style={({ pressed }) => [
+                            styles.rosterRest,
+                            pressed ? styles.cellPressed : null,
                           ]}
                         >
-                          {columnIndex === 0 ? (
-                            <>
-                              <Text variant="bodySmall" style={styles.rosterDayText}>
-                                {day}, {shiftLabel}
+                          <View style={styles.rosterClinicCell}>
+                            <Text variant="bodySmall" tone="primary" numberOfLines={2}>
+                              {clinicLabel}
+                            </Text>
+                          </View>
+                          <View style={styles.rosterResidentsCell}>
+                            {residents.length > 0 ? (
+                              residents.map((name, residentIndex) => (
+                                <View key={`${name}-${residentIndex}`} style={styles.residentLine}>
+                                  <Text variant="bodySmall" numberOfLines={1}>
+                                    {name}
+                                  </Text>
+                                  {residentPgyByName.get(name) != null ? (
+                                    <PgyBadge label={formatPgy(residentPgyByName.get(name) ?? null)} />
+                                  ) : null}
+                                </View>
+                              ))
+                            ) : (
+                              <Text variant="bodySmall" tone="disabled">
+                                Unassigned
                               </Text>
-                              <PgyBadge label={pgyLabel} />
-                            </>
-                          ) : null}
-                        </View>
-                        <View style={styles.rosterClinicCell}>
-                          <Text variant="bodySmall" tone="primary" numberOfLines={2}>
-                            {clinicLabel}
-                          </Text>
-                        </View>
-                        <View style={styles.rosterResidentsCell}>
-                          {residents.length > 0 ? (
-                            residents.map((name, residentIndex) => (
-                              <View key={`${name}-${residentIndex}`} style={styles.residentLine}>
-                                <Text variant="bodySmall" numberOfLines={1}>
-                                  {name}
-                                </Text>
-                                {residentPgyByName.get(name) != null ? (
-                                  <PgyBadge label={formatPgy(residentPgyByName.get(name) ?? null)} />
-                                ) : null}
-                              </View>
-                            ))
-                          ) : (
-                            <Text variant="bodySmall" tone="disabled">
-                              Unassigned
-                            </Text>
-                          )}
-                        </View>
-                        <View style={styles.rosterFacultyCell}>
-                          {faculty ? (
-                            <Text variant="bodySmall" tone="secondary" numberOfLines={2}>
-                              {faculty}
-                            </Text>
-                          ) : (
-                            <Text variant="bodySmall" tone="muted">
-                              — None —
-                            </Text>
-                          )}
-                        </View>
-                      </Pressable>
+                            )}
+                          </View>
+                          <View style={styles.rosterFacultyCell}>
+                            {faculty ? (
+                              <Text variant="bodySmall" tone="secondary" numberOfLines={2}>
+                                {faculty}
+                              </Text>
+                            ) : (
+                              <Text variant="bodySmall" tone="muted">
+                                — None —
+                              </Text>
+                            )}
+                          </View>
+                        </Pressable>
+                      </View>
                     );
                   })}
                 </View>
@@ -904,6 +1168,53 @@ export default function LongitudinalMatrixScreen() {
             })}
           </Card>
         )}
+
+        <Card>
+          <View style={styles.catalogHeader}>
+            <Text variant="label" tone="secondary" uppercase>
+              Clinic Catalog
+            </Text>
+            <IconButton
+              icon={Plus}
+              tone="primary"
+              accessibilityLabel="Add clinic"
+              onPress={openAddClinic}
+            />
+          </View>
+          <Text variant="caption" tone="muted" style={styles.note}>
+            Add a clinic from the catalog or type a custom name. Use the pencil to rename one and the
+            minus to remove it from the active pool; its slots and assignment history stay preserved.
+          </Text>
+          {activeClinics.length === 0 ? (
+            <Text variant="bodySmall" tone="muted">
+              No clinics are active for this programme yet. Tap + to add the first one.
+            </Text>
+          ) : (
+            activeClinics.map((clinic) => (
+              <View key={clinic.id} style={styles.clinicRow}>
+                <View style={styles.flex1}>
+                  <Text variant="bodySmall" numberOfLines={2}>
+                    {clinic.clinic_name}
+                  </Text>
+                  <Text variant="caption" tone="muted" numberOfLines={1}>
+                    {describeClinicType(clinic)}
+                  </Text>
+                </View>
+                <IconButton
+                  icon={Pencil}
+                  accessibilityLabel={`Rename ${clinic.clinic_name}`}
+                  onPress={() => openRenameClinic(clinic)}
+                />
+                <IconButton
+                  icon={Minus}
+                  tone="danger"
+                  accessibilityLabel={`Remove ${clinic.clinic_name}`}
+                  onPress={() => askDeleteClinic(clinic)}
+                />
+              </View>
+            ))
+          )}
+        </Card>
 
         <Card>
           <SectionHeader title="Backup / Catchup Faculty Pools" />
@@ -1158,6 +1469,140 @@ export default function LongitudinalMatrixScreen() {
           </>
         ) : null}
       </Sheet>
+
+      <Sheet
+        visible={addClinicOpen}
+        onClose={closeAddClinic}
+        title="Add Clinic"
+        subtitle="Choose a clinic from the catalog or type an exact name."
+        footer={
+          <Button
+            label="Close"
+            variant="outline"
+            onPress={closeAddClinic}
+            disabled={addingClinic}
+          />
+        }
+      >
+        <TextField
+          label="Other / custom clinic name"
+          value={customClinicName}
+          onChangeText={setCustomClinicName}
+          placeholder="e.g. Al Noor Diabetes Clinic"
+          hint="Use this when the clinic is not in the catalog below. It is stored for this programme and offered to every coordinator."
+        />
+        <Button
+          label={addingClinic ? 'Adding…' : 'Add custom clinic'}
+          onPress={addCustomClinic}
+          disabled={customClinicName.trim().length === 0 || addingClinic}
+          loading={addingClinic}
+          style={styles.customClinicButton}
+        />
+
+        <SectionHeader title="Catalog" trailing={`${visibleClinicCatalog.length} available`} />
+        <SearchInput
+          value={addClinicQuery}
+          onChangeText={setAddClinicQuery}
+          placeholder="Search clinics"
+          accessibilityLabel="Search the clinic catalog"
+        />
+        <View style={styles.catalogList}>
+          {visibleClinicCatalog.map((entry) => (
+            <Pressable
+              key={entry.name}
+              onPress={() => addCatalogClinic(entry)}
+              disabled={addingClinic}
+              accessibilityRole="button"
+              accessibilityLabel={`Add ${entry.name}`}
+              style={({ pressed }) => [
+                styles.catalogRow,
+                pressed && !addingClinic ? styles.catalogRowPressed : null,
+              ]}
+            >
+              <View style={styles.catalogText}>
+                <Text variant="bodySmall" numberOfLines={2}>
+                  {entry.name}
+                </Text>
+                <Text variant="caption" tone="muted" numberOfLines={1}>
+                  {describeCatalogEntry(entry)}
+                </Text>
+              </View>
+              <Plus color={colors.primary} size={18} />
+            </Pressable>
+          ))}
+          {visibleClinicCatalog.length === 0 ? (
+            <Text variant="bodySmall" tone="muted" align="center" style={styles.catalogEmpty}>
+              {clinicQueryNeedle
+                ? `No catalog clinic matches “${addClinicQuery.trim()}”. Type it above to add it.`
+                : 'Every catalog clinic is already in the pool. Type a custom name above to add another.'}
+            </Text>
+          ) : null}
+        </View>
+      </Sheet>
+
+      <Sheet
+        visible={renameTarget !== null}
+        onClose={closeRenameClinic}
+        title="Rename Clinic"
+        subtitle={renameTarget ? `${renameTarget.clinic_name} · ${renameTarget.clinic_code}` : undefined}
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label={savingClinicRename ? 'Saving…' : 'Save name'}
+              loading={savingClinicRename}
+              onPress={saveClinicRename}
+              disabled={savingClinicRename}
+              style={styles.flex1}
+            />
+            <Button
+              label="Cancel"
+              variant="outline"
+              onPress={closeRenameClinic}
+              disabled={savingClinicRename}
+              style={styles.flex1}
+            />
+          </View>
+        }
+      >
+        <TextField
+          label="Clinic name"
+          value={renameValue}
+          onChangeText={setRenameValue}
+          placeholder="e.g. Well Baby Clinic (WBC)"
+          autoCapitalize="words"
+          hint="Renaming updates the chip everywhere this clinic is shown. Slots and assignment history are preserved."
+        />
+      </Sheet>
+
+      <Sheet
+        visible={deleteTarget !== null}
+        onClose={closeDeleteClinic}
+        title="Remove Clinic"
+        subtitle={deleteTarget?.clinic_name}
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label={deletingClinic ? 'Removing…' : 'Remove clinic'}
+              variant="danger"
+              loading={deletingClinic}
+              onPress={removeClinic}
+              disabled={deletingClinic}
+              style={styles.flex1}
+            />
+            <Button
+              label="Keep it"
+              variant="outline"
+              onPress={closeDeleteClinic}
+              disabled={deletingClinic}
+              style={styles.flex1}
+            />
+          </View>
+        }
+      >
+        <Text variant="bodySmall" tone="secondary">
+          {`Are you sure you want to remove ${deleteTarget?.clinic_name ?? 'this clinic'}? Existing slots and historical data linked to this clinic will be preserved.`}
+        </Text>
+      </Sheet>
     </Screen>
   );
 }
@@ -1316,6 +1761,10 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     alignItems: 'stretch',
   },
+  rosterRest: {
+    flex: 1,
+    flexDirection: 'row',
+  },
   rosterDayCell: {
     width: ROSTER_DAY_COLUMN_WIDTH,
     minHeight: 52,
@@ -1393,5 +1842,49 @@ const styles = StyleSheet.create({
   scopeLabel: {
     marginTop: spacing.lg,
     marginBottom: spacing.xs,
+  },
+  catalogHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  clinicRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xxs,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+  },
+  catalogList: {
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  catalogRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    minHeight: 56,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+  },
+  catalogRowPressed: {
+    backgroundColor: colors.primarySoft,
+  },
+  catalogText: {
+    flex: 1,
+    gap: spacing.xxs,
+  },
+  catalogEmpty: {
+    paddingVertical: spacing.lg,
+  },
+  customClinicButton: {
+    marginBottom: spacing.lg,
   },
 });

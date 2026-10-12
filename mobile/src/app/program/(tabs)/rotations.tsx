@@ -30,7 +30,7 @@ import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '
  * and "which blocks do they fit into?".
  *
  * The screen links out to the tools built for writing: the Master Rotation Grid,
- * the Primary Care Clinics matrix, and the Rotations Catalogue. Rotation
+ * the Continuity of Care Clinics (CCC) matrix, and the Rotations Catalogue. Rotation
  * *definitions* are read here and managed in `../rotations/catalogue` — creating,
  * renaming and bulk importing them needs a table of its own, which is why this
  * list opens that screen instead of growing inline edit controls.
@@ -160,7 +160,7 @@ export default function ProgramRotationsScreen() {
                 style={styles.addButton}
               />
               <Button
-                label="Primary Care Clinics"
+                label="Continuity of Care Clinics (CCC)"
                 variant="outline"
                 onPress={() => router.push('/program/longitudinal/matrix' as any)}
                 style={styles.addButton}

@@ -96,7 +96,7 @@ class LongitudinalService {
   /**
    * Add a clinic to a programme's catalog, or bring an existing one back.
    *
-   * The Primary Care Clinics view grows its chip pool from `longitudinal_clinic_types`,
+   * The Continuity of Care Clinics (CCC) view grows its chip pool from `longitudinal_clinic_types`,
    * so "add a clinic" ends here. The name is the identity a coordinator sees, but the
    * table keys on `(program_id, clinic_code)`; a clinic that is already on record —
    * active or not — is therefore found by name (case-insensitively, via the column
@@ -345,7 +345,7 @@ class LongitudinalService {
   }
 
   /**
-   * Seed the five standard Primary Care Clinics for every programme.
+   * Seed the five standard Continuity of Care Clinics (CCC) for every programme.
    *
    * Called at server boot and idempotent by construction: existing rows are
    * matched by name and reactivated (never duplicated, never anything removed),

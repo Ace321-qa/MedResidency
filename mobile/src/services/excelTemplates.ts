@@ -70,7 +70,7 @@ const CATALOGUE_SAMPLE_ROWS: XlsxCellValue[][] = [
 ];
 
 /**
- * The Primary Care Clinics matrix workbook's header row.
+ * The Continuity of Care Clinics (CCC) matrix workbook's header row.
  *
  * The offline copy built on this device must match the one the API serves
  * (`src/utils/excel/grid.js`): the importer reads the first sheet and matches
@@ -438,9 +438,9 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
     ],
   },
   ccc: {
-    fileName: 'primary_care_clinics_matrix_template.xlsx',
+    fileName: 'continuity_of_care_clinics_matrix_template.xlsx',
     endpoint: '/rotations/import/ccc/template',
-    sheetName: 'Primary Care Clinics Matrix',
+    sheetName: 'Continuity of Care Clinics (CCC) Matrix',
     rows: PRIMARY_CARE_CLINICS_ROWS,
   },
   timesheet: {

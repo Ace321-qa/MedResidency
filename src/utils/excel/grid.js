@@ -12,7 +12,7 @@ const {
 } = require('../masterGridCalendar');
 
 /**
- * The master-grid and Primary Care Clinics workbooks.
+ * The master-grid and Continuity of Care Clinics (CCC) workbooks.
  *
  * ## The master grid is a 52-week sheet, not a 13-column one
  *
@@ -602,14 +602,14 @@ function generateMasterGridTemplate(blockCount = BLOCK_COUNT, startDate = MASTER
 }
 
 function generateCccTemplate() {
-  return makeBuffer(CCC_HEADERS, [], 'Primary Care Clinics Matrix');
+  return makeBuffer(CCC_HEADERS, [], 'Continuity of Care Clinics (CCC) Matrix');
 }
 
 /**
  * @returns {{headers:string[], rows:{row:number, dayClinic:string, pairings:string, faculty:string, catchup:string}[]}}
  */
 function parseCcc(buffer) {
-  const { textRows } = headerRow(buffer, 'Primary Care Clinics Matrix');
+  const { textRows } = headerRow(buffer, 'Continuity of Care Clinics (CCC) Matrix');
   if (textRows.length < 1) throw new Error('The file needs a header row.');
 
   const headers = (textRows[0] ?? []).map((header) => String(header ?? '').trim());

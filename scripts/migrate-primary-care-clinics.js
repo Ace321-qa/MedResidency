@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * One-time migration: reconcile the Primary Care Clinics catalog.
+ * One-time migration: reconcile the Continuity of Care Clinics (CCC) catalog.
  *
  * The demo programme shipped seven clinic rows as defaults (`PGY1 Morning
  * Continuity Clinic`, the PGY evening clinics, `Summer Morning Continuity
@@ -29,7 +29,7 @@ const LongitudinalService = require('../src/services/longitudinalService');
 const { LEGACY_NON_DEFAULT_CLINIC_NAMES } = require('../src/utils/primaryCareClinics');
 
 (async () => {
-  console.log('Migrating Primary Care Clinics…');
+  console.log('Migrating Continuity of Care Clinics (CCC)…');
 
   const seeded = await LongitudinalService.ensureDefaultClinics();
   console.log(`  • ensured ${seeded.length} standard clinic record(s) across all programmes.`);

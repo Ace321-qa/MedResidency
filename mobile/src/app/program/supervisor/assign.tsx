@@ -171,7 +171,7 @@ export default function SupervisorAssignScreen() {
         <Banner
           tone="success"
           title="Supervisor assigned"
-          message="The posting now appears in the Primary Care Clinics matrix."
+          message="The posting now appears in the Continuity of Care Clinics (CCC) matrix."
         />
       ) : null}
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Seed supervising faculty for the Primary Care Clinics (CCC) view.
+ * Seed supervising faculty for the Continuity of Care Clinics (CCC) view.
  *
  * The `faculty_supervisors` table ships empty, which leaves every CCC drop-down
  * (clinic-slot supervisor, In-Charge lead, backup / catchup pool) with nothing

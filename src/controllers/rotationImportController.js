@@ -534,7 +534,7 @@ class RotationImportController {
   }
 
   /**
-   * Import the Primary Care Clinics matrix.
+   * Import the Continuity of Care Clinics (CCC) matrix.
    *
    * Each row names an academic day and clinic, the residents paired to it and
    * the faculty leading it. The clinic resolves against this programme's clinic

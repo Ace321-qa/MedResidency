@@ -97,7 +97,7 @@ if (require.main === module) {
 
     await testConnection();
 
-    // Seed the standard Primary Care Clinics for every programme so a fresh
+    // Seed the standard Continuity of Care Clinics (CCC) for every programme so a fresh
     // install (or a programme created after the last boot) starts with its five
     // default clinics. Idempotent: existing rows are matched by name.
     try {

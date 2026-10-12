@@ -1,5 +1,5 @@
 /**
- * The Primary Care Clinics catalog.
+ * The Continuity of Care Clinics (CCC) catalog.
  *
  * The view's default chip pool is exactly the five standard clinics below. Every
  * other clinic a coordinator can pick is listed here as a pre-defined entry, and

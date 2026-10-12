@@ -734,7 +734,7 @@ export interface RotationAssignmentDetail {
 }
 
 /**
- * Primary Care Clinics (CCC) cycle-schedule records.
+ * Continuity of Care Clinics (CCC) cycle-schedule records.
  *
  * These mirror the four `primary_care_*` tables: a cycle, one header per
  * academic day, twelve fixed clinic slots per day (ten clinics plus WBC and
