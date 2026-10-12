@@ -52,6 +52,17 @@ export interface MatrixColumnDef {
   width?: number;
   align?: 'left' | 'center' | 'right';
   pinned?: boolean;
+  /**
+   * Render the cell as a plain container, never a button wrapper.
+   *
+   * Use for columns whose cells carry their own pressable children — an
+   * "assign" chip, an edit icon, a remove bin. On web a cell wrapped in
+   * `accessibilityRole="button"` becomes an HTML `<button>`, and putting one of
+   * those children inside it makes the browser throw a "button cannot contain a
+   * nested button" error. An interactive column therefore opts the whole cell
+   * out of the wrapper and lets the screen's own targets be the tap zones.
+   */
+  interactive?: boolean;
 }
 
 export interface MatrixRowDef {
@@ -71,16 +82,23 @@ export interface MatrixRowDef {
   frozenContent?: ReactNode;
   /** Tints the frozen row header, e.g. a PGY or rotation badge. */
   accent?: Tone;
-  /** Makes the whole row pressable, e.g. to open a resident. */
+  /**
+   * Opens a record when the resident header cell is tapped, e.g. to view the
+   * resident's own page.
+   *
+   * The tap target is the frozen left-hand cell, never the whole row. A row-wide
+   * `<button>` would wrap the grid cells' own action buttons (assign chips, edit
+   * icons) and nest two `<button>` elements on web, which the browser rejects.
+   */
   onPress?: () => void;
   /**
    * Makes each individual grid cell pressable, e.g. to open a slot editor.
    *
    * Called with the column key of the tapped cell, so a screen can resolve its
    * own context (day, shift, clinic number) without the table knowing about any
-   * of it. When set, the row itself stops being the tap target — a cell is the
-   * target — which also avoids nesting web `<button>` elements inside a
-   * row-level button.
+   * of it. The cell becomes a single `<button>` only when it will not contain
+   * another button: mark the column `interactive` when its cells carry their
+   * own pressable children, and the cell stays a plain container instead.
    */
   onCellPress?: (columnKey: string) => void;
   /** Announced by screen readers for a cell; falls back to the column title. */
@@ -237,18 +255,44 @@ export function MatrixTable({
           </View>
 
           {/* One unified horizontal row per record: name cell + all grid cells,
-              so the two can never drift out of alignment. A row is only a
-              Pressable when it has its own handler and its cells do not — making
-              both targets buttons would nest controls a screen reader cannot
-              separate. */}
+              so the two can never drift out of alignment. The row itself is
+              always a plain container — never an HTML <button> — and the only
+              buttons in a row are the pressable cells that ask to be one. A
+              row that opens a record (e.g. the resident page) moves that tap
+              onto the frozen name cell, so a row-level button never wraps the
+              cells' own action buttons and two <button> elements never nest. */}
           {rows.map((row) => {
             const rowStyle = [styles.tableRow, autoHeight ? styles.tableRowAuto : { height: rowHeight }];
-            const rowBody = (
+            const rowHeaderIsButton = Boolean(row.onPress && !row.onCellPress);
+
+            const frozenCellStyle = [
+              styles.residentStickyCell,
+              { width: frozenWidth, minWidth: frozenWidth },
+            ];
+            const frozenCellContent = (
               <>
-                <View style={[styles.residentStickyCell, { width: frozenWidth, minWidth: frozenWidth }]}>
-                  {row.accent ? <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} /> : null}
-                  {row.frozenContent ?? null}
-                </View>
+                {row.accent ? (
+                  <View style={[styles.accentBar, { backgroundColor: accentColors[row.accent] }]} />
+                ) : null}
+                {row.frozenContent ?? null}
+              </>
+            );
+            const frozenCell = rowHeaderIsButton ? (
+              <Pressable
+                onPress={row.onPress}
+                accessibilityRole="button"
+                accessibilityLabel={row.accessibilityLabel}
+                style={({ pressed }) => [...frozenCellStyle, pressed ? styles.frozenCellPressed : null]}
+              >
+                {frozenCellContent}
+              </Pressable>
+            ) : (
+              <View style={frozenCellStyle}>{frozenCellContent}</View>
+            );
+
+            return (
+              <View key={`tr-${row.key}`} style={rowStyle}>
+                {frozenCell}
                 {columns.map((column) => {
                   const content =
                     row.cells[column.key] ?? (
@@ -263,7 +307,11 @@ export function MatrixTable({
                     column.align === 'right' ? styles.alignRight : null,
                   ];
 
-                  if (row.onCellPress) {
+                  // A cell is wrapped in a <button> only when it owns the tap
+                  // handler and the column holds no nested pressable children.
+                  // Interactive columns stay plain containers so the screen's
+                  // own action buttons inside them are never nested.
+                  if (row.onCellPress && !column.interactive) {
                     return (
                       <Pressable
                         key={column.key}
@@ -283,26 +331,6 @@ export function MatrixTable({
                     </View>
                   );
                 })}
-              </>
-            );
-
-            if (row.onPress && !row.onCellPress) {
-              return (
-                <Pressable
-                  key={`tr-${row.key}`}
-                  onPress={row.onPress}
-                  accessibilityRole="button"
-                  accessibilityLabel={row.accessibilityLabel}
-                  style={rowStyle}
-                >
-                  {rowBody}
-                </Pressable>
-              );
-            }
-
-            return (
-              <View key={`tr-${row.key}`} style={rowStyle}>
-                {rowBody}
               </View>
             );
           })}
@@ -487,6 +515,10 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
   },
   cellPressed: {
+    backgroundColor: colors.primarySoft,
+  },
+  /** Feedback for the frozen name cell when the row is a pressable record link. */
+  frozenCellPressed: {
     backgroundColor: colors.primarySoft,
   },
   empty: {
