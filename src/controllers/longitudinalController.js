@@ -226,10 +226,29 @@ class LongitudinalController {
       if (!slot_id) {
         return res.status(400).json({ success: false, error: 'Missing required field: slot_id' });
       }
-      const data = await LongitudinalService.updateCycleSlot(slot_id, req.body);
-      return res.status(200).json({ success: true, data });
+      const result = await LongitudinalService.updateCycleSlot(slot_id, req.body);
+      return res.status(200).json({ success: true, data: result.slot, warnings: result.warnings });
     } catch (error) {
       if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `GET /longitudinal/cycles`
+   *
+   * The programme's CCC cycles, oldest first, for the week navigator's cycle
+   * list and academic-year filter. `start_date` is already a plain `YYYY-MM-DD`.
+   */
+  static async getCycles(req, res) {
+    try {
+      const { program_id } = req.query;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
+      }
+      const data = await LongitudinalService.getCycles(program_id);
+      return res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
   }

@@ -780,6 +780,23 @@ class LongitudinalService {
   }
 
   /**
+   * Every CCC cycle a programme has, oldest first.
+   *
+   * Cycles carry no `academic_year` column — the year falls out of the
+   * `start_date` — so the week navigator builds its academic-year filter from
+   * these start dates rather than a stored value.
+   *
+   * @param {number} programId
+   */
+  static async getCycles(programId) {
+    const [rows] = await db.query(
+      'SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY start_date ASC, id ASC',
+      [programId]
+    );
+    return rows.map((row) => ({ ...row, start_date: toCalendarDate(row.start_date) }));
+  }
+
+  /**
    * The CCC cycle-schedule matrix: one header row per academic day, the clinic
    * slots attached to it, the In-Charge faculty lead, and the backup pools.
    *
@@ -936,25 +953,183 @@ class LongitudinalService {
   }
 
   /**
-   * Update one clinic slot's residents and supervising faculty.
+   * Update one clinic slot's residents, supervising faculty, day or clinic number.
    *
    * Naming rules are enforced here, once: residents are stored without the `Dr.`
    * title and faculty are stored with exactly one, so the rule cannot drift
    * between the web grid, the mobile grid and any future importer.
+   *
+   * A slot can also be moved to another day header (`daily_header_id`) or clinic
+   * number. The move is validated up front: the destination day must belong to
+   * the same programme, the destination clinic number must be free on that day,
+   * a resident can never sit in two clinics of the same day, and the same
+   * resident cannot be listed twice within one slot. A faculty member covering
+   * several clinic groups in one session is legitimate, so cross-slot faculty
+   * overlaps come back as `warnings` rather than rejections.
+   *
+   * @param {number} slotId
+   * @param {object} data
+   * @param {string} [data.resident_1_name]
+   * @param {string} [data.resident_2_name]
+   * @param {string} [data.faculty_name]
+   * @param {number} [data.faculty_id]
+   * @param {number} [data.daily_header_id] - Move the session to another day of the cycle.
+   * @param {number} [data.clinic_number] - Re-number the clinic (1..99).
+   * @param {number} [data.program_id] - Optional; re-checks the destination's programme.
+   * @returns {Promise<{slot: object, warnings: string[]}>}
    */
   static async updateCycleSlot(slotId, data = {}) {
-    if (!slotId) { const e = new Error('slotId required'); e.statusCode = 400; throw e; }
+    if (!slotId) {
+      const e = new Error('slotId required');
+      e.statusCode = 400;
+      throw e;
+    }
+    const [existing] = await db.query('SELECT * FROM primary_care_clinic_slots WHERE id = ?', [slotId]);
+    const slot = existing[0];
+    if (!slot) {
+      const e = new Error('Clinic slot not found.');
+      e.statusCode = 404;
+      throw e;
+    }
+
+    const targetHeaderId =
+      data.daily_header_id !== undefined ? Number(data.daily_header_id) : slot.daily_header_id;
+    if (!Number.isInteger(targetHeaderId) || targetHeaderId <= 0) {
+      const e = new Error('daily_header_id must be a positive integer.');
+      e.statusCode = 400;
+      throw e;
+    }
+
+    // A slot can move between days, so the destination is always re-validated.
+    // The header pins its cycle, and the cycle pins its programme: a coordinator
+    // must not hand a session to another programme's day.
+    const [headers] = await db.query(
+      `SELECT h.id, h.cycle_id, c.program_id AS cycle_program_id
+         FROM primary_care_daily_headers h
+         JOIN primary_care_cycles c ON c.id = h.cycle_id
+        WHERE h.id = ?`,
+      [targetHeaderId]
+    );
+    const header = headers[0];
+    if (!header) {
+      const e = new Error('The destination day does not exist on this schedule.');
+      e.statusCode = 404;
+      throw e;
+    }
+    if (data.program_id !== undefined && Number(data.program_id) !== Number(header.cycle_program_id)) {
+      const e = new Error('The destination day belongs to a different programme.');
+      e.statusCode = 404;
+      throw e;
+    }
+
+    const nextResident1 =
+      data.resident_1_name !== undefined ? formatResidentName(data.resident_1_name) : slot.resident_1_name;
+    const nextResident2 =
+      data.resident_2_name !== undefined ? formatResidentName(data.resident_2_name) : slot.resident_2_name;
+    const nextFaculty =
+      data.faculty_name !== undefined ? formatFacultyName(data.faculty_name) : slot.faculty_name;
+    const nextFacultyId =
+      data.faculty_id !== undefined ? data.faculty_id || null : slot.faculty_id;
+    const nextClinicNumber =
+      data.clinic_number !== undefined ? Number(data.clinic_number) : slot.clinic_number;
+    if (!Number.isInteger(nextClinicNumber) || nextClinicNumber < 1 || nextClinicNumber > 99) {
+      const e = new Error('clinic_number must be a whole number between 1 and 99.');
+      e.statusCode = 400;
+      throw e;
+    }
+
+    // A resident can never be listed twice inside one slot.
+    if (nextResident1 && nextResident1 === nextResident2) {
+      const e = new Error(`${nextResident1} is already the first resident of this clinic. A resident cannot appear twice in one session.`);
+      e.statusCode = 409;
+      throw e;
+    }
+
+    const [sameDay] = await db.query(
+      `SELECT id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id
+         FROM primary_care_clinic_slots
+        WHERE daily_header_id = ? AND id <> ?`,
+      [targetHeaderId, slotId]
+    );
+
+    // A clinic number is used exactly once per day.
+    const clinicTaken = sameDay.find((other) => other.clinic_number === nextClinicNumber);
+    if (clinicTaken) {
+      const e = new Error(`Clinic ${nextClinicNumber} already has a session on this day. Give the moved session a different clinic number, or clear the other slot first.`);
+      e.statusCode = 409;
+      throw e;
+    }
+
+    // A resident can never sit in two clinics on the same day.
+    let clashName = null;
+    const residentClash = sameDay.find((other) => {
+      if (nextResident1 && (other.resident_1_name === nextResident1 || other.resident_2_name === nextResident1)) {
+        clashName = nextResident1;
+        return true;
+      }
+      if (nextResident2 && (other.resident_1_name === nextResident2 || other.resident_2_name === nextResident2)) {
+        clashName = nextResident2;
+        return true;
+      }
+      return false;
+    });
+    if (residentClash && clashName) {
+      const e = new Error(`${clashName} is already assigned to Clinic ${residentClash.clinic_number} on this day. A resident can cover only one clinic per day.`);
+      e.statusCode = 409;
+      throw e;
+    }
+
+    // Faculty supervising several clinic groups in one session is normal, so a
+    // cross-slot faculty repeat is surfaced as a warning, not a rejection.
+    const warnings = [];
+    if (nextFaculty) {
+      const facultyClash = sameDay.find((other) => {
+        if (!other.faculty_name) return false;
+        const sameId =
+          nextFacultyId && other.faculty_id && Number(other.faculty_id) === Number(nextFacultyId);
+        return sameId || other.faculty_name === nextFaculty;
+      });
+      if (facultyClash) {
+        warnings.push(`${nextFaculty} also supervises Clinic ${facultyClash.clinic_number} at the same time on this day.`);
+      }
+    }
+
     const sets = [];
     const params = [];
-    if (data.resident_1_name !== undefined) { sets.push('resident_1_name = ?'); params.push(formatResidentName(data.resident_1_name)); }
-    if (data.resident_2_name !== undefined) { sets.push('resident_2_name = ?'); params.push(formatResidentName(data.resident_2_name)); }
-    if (data.faculty_name !== undefined) { sets.push('faculty_name = ?'); params.push(formatFacultyName(data.faculty_name)); }
-    if (data.faculty_id !== undefined) { sets.push('faculty_id = ?'); params.push(data.faculty_id || null); }
-    if (sets.length === 0) { const e = new Error('Nothing to update'); e.statusCode = 400; throw e; }
+    if (data.resident_1_name !== undefined) {
+      sets.push('resident_1_name = ?');
+      params.push(formatResidentName(data.resident_1_name));
+    }
+    if (data.resident_2_name !== undefined) {
+      sets.push('resident_2_name = ?');
+      params.push(formatResidentName(data.resident_2_name));
+    }
+    if (data.faculty_name !== undefined) {
+      sets.push('faculty_name = ?');
+      params.push(formatFacultyName(data.faculty_name));
+    }
+    if (data.faculty_id !== undefined) {
+      sets.push('faculty_id = ?');
+      params.push(data.faculty_id || null);
+    }
+    if (data.daily_header_id !== undefined) {
+      sets.push('daily_header_id = ?');
+      params.push(targetHeaderId);
+    }
+    if (data.clinic_number !== undefined) {
+      sets.push('clinic_number = ?');
+      params.push(nextClinicNumber);
+    }
+    if (sets.length === 0) {
+      const e = new Error('Nothing to update');
+      e.statusCode = 400;
+      throw e;
+    }
     params.push(slotId);
     await db.query(`UPDATE primary_care_clinic_slots SET ${sets.join(', ')} WHERE id = ?`, params);
+
     const [rows] = await db.query('SELECT * FROM primary_care_clinic_slots WHERE id = ?', [slotId]);
-    return rows[0];
+    return { slot: rows[0], warnings };
   }
 
   /** Resolve (creating if necessary) the day header a backup pool belongs to. */

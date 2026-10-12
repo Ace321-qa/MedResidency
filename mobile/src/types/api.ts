@@ -751,6 +751,12 @@ export interface PrimaryCareCycle {
   updated_at?: string;
 }
 
+/**
+ * `GET /longitudinal/cycles` — the programme's CCC cycles for week navigation,
+ * oldest first. Same shape as `PrimaryCareCycle` with `start_date` pre-normalised.
+ */
+export type PrimaryCareCycleSummary = PrimaryCareCycle;
+
 export interface PrimaryCareDailyHeader {
   id: number;
   cycle_id: number;

@@ -8,6 +8,7 @@ import type {
   LongitudinalClinicSlot,
   LongitudinalSupervisorAssignment,
   PrimaryCareCycle,
+  PrimaryCareCycleSummary,
   PrimaryCareClinicSlot,
   PrimaryCareBackupFaculty,
   PrimaryCareCycleSchedule,
@@ -174,6 +175,17 @@ export async function fetchCycleSchedule(
   return response.data;
 }
 
+/**
+ * The programme's CCC cycles, oldest first, for the week navigator's cycle list
+ * and academic-year filter. The server derives no year column, so the client
+ * groups these rows by the year that falls out of each `start_date`.
+ */
+export async function fetchCycles(programId: number): Promise<PrimaryCareCycleSummary[]> {
+  const path = `/longitudinal/cycles${queryString({ program_id: programId })}`;
+  const response = await request<ApiListResponse<PrimaryCareCycleSummary>>(path);
+  return response.data ?? [];
+}
+
 export interface CycleHeaderUpdate {
   program_id: number;
   cycle_id?: number;
@@ -203,17 +215,32 @@ export interface CycleSlotUpdate {
   resident_2_name?: string | null;
   faculty_name?: string | null;
   faculty_id?: number | null;
+  /** Move the session to another day of the cycle. */
+  daily_header_id?: number;
+  /** Re-number the clinic (1–10 clinic, 11 WBC, 12 away). */
+  clinic_number?: number;
+  /** Scopes the server's destination-day check to this programme. */
+  program_id?: number;
+}
+
+export interface CycleSlotUpdateResult {
+  slot: PrimaryCareClinicSlot;
+  /** Non-blocking notes, e.g. a faculty member supervising two slots at once. */
+  warnings: string[];
 }
 
 export async function updateCycleSlot(
   slotId: number,
   payload: CycleSlotUpdate,
-): Promise<PrimaryCareClinicSlot> {
-  const response = await request<ApiResponse<PrimaryCareClinicSlot>>('/longitudinal/cycle-schedule/slot', {
-    method: 'PUT',
-    data: { slot_id: slotId, ...payload },
-  });
-  return response.data;
+): Promise<CycleSlotUpdateResult> {
+  const response = await request<ApiResponse<PrimaryCareClinicSlot> & { warnings?: string[] }>(
+    '/longitudinal/cycle-schedule/slot',
+    {
+      method: 'PUT',
+      data: { slot_id: slotId, ...payload },
+    },
+  );
+  return { slot: response.data, warnings: response.warnings ?? [] };
 }
 
 export async function updateBackupFaculty(payload: {
