@@ -277,6 +277,51 @@ class LongitudinalController {
    * optional `day_of_week` restricts the shuffle to one CCC day; `rationale` is
    * recorded against every reassignment in the audit trail.
    */
+
+  static async createFacultySupervisor(req, res) {
+    try {
+      const { program_id, first_name, last_name } = req.body || {};
+      if (!program_id || !first_name || !last_name) {
+        return res.status(400).json({ success: false, error: 'Missing required fields: program_id, first_name, last_name' });
+      }
+      const data = await LongitudinalService.createFacultySupervisor(req.body);
+      return res.status(201).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async updateFacultySupervisor(req, res) {
+    try {
+      const { id } = req.params;
+      const { program_id } = req.body || {};
+      if (!id || !program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required fields: program_id' });
+      }
+      const data = await LongitudinalService.updateFacultySupervisor(id, program_id, req.body);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async deleteFacultySupervisor(req, res) {
+    try {
+      const { id } = req.params;
+      const { program_id } = req.query || req.body || {};
+      if (!id || !program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required query param: program_id' });
+      }
+      const data = await LongitudinalService.deleteFacultySupervisor(id, program_id);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async randomizeSupervisors(req, res) {
     try {
       const { program_id } = req.body;

@@ -30,6 +30,9 @@ import {
   updateClinicType,
   updateCycleHeader,
   updateCycleSlot,
+  createFacultySupervisor,
+  updateFacultySupervisor,
+  deleteFacultySupervisor,
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
 import { CCC_SCHEDULE_ROWS, dayOfWeekMatches } from '../../../utils/cccMatrix';
@@ -298,6 +301,13 @@ export default function LongitudinalMatrixScreen() {
   const [viewMode, setViewMode] = useState<ViewMode>('matrix');
 
   /** The clinic catalog add / rename / remove controls. */
+  const [facultyMgrOpen, setFacultyMgrOpen] = useState(false);
+  const [facultyForm, setFacultyForm] = useState({ firstName: "", lastName: "", email: "", phone: "", specialty: "" });
+  const [facultyEditing, setFacultyEditing] = useState<any | null>(null);
+  const [savingFaculty, setSavingFaculty] = useState(false);
+  const [deletingFaculty, setDeletingFaculty] = useState(false);
+  const [facultyDeleteTarget, setFacultyDeleteTarget] = useState<any | null>(null);
+
   const [addClinicOpen, setAddClinicOpen] = useState(false);
   const [addClinicQuery, setAddClinicQuery] = useState('');
   const [customClinicName, setCustomClinicName] = useState('');
@@ -580,6 +590,105 @@ export default function LongitudinalMatrixScreen() {
       setActionError(error instanceof Error ? error.message : 'Could not rotate supervisors.');
     } finally {
       setSaving(false);
+    }
+  }
+
+
+  async function refreshFacultyList() {
+    try {
+      const list = await fetchFacultySupervisors(programId, { includeInactive: true });
+      facultyResource.setData(list as any);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not load faculty list.');
+    }
+  }
+
+  function openFacultyManager() {
+    setFacultyMgrOpen(true);
+    setFacultyEditing(null);
+    setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '' });
+    setFacultyDeleteTarget(null);
+    setActionError(null);
+    setFeedback(null);
+    void refreshFacultyList();
+  }
+
+  function closeFacultyManager() {
+    if (savingFaculty || deletingFaculty) return;
+    setFacultyMgrOpen(false);
+  }
+
+  function startEditFaculty(f: any) {
+    setFacultyEditing(f);
+    setFacultyForm({
+      firstName: f.first_name ?? '',
+      lastName: f.last_name ?? '',
+      email: f.email ?? '',
+      phone: f.phone ?? '',
+      specialty: f.specialty ?? '',
+    });
+  }
+
+  function cancelEditFaculty() {
+    setFacultyEditing(null);
+    setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '' });
+  }
+
+  async function saveFaculty() {
+    if (!programId) return;
+    setSavingFaculty(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      if (facultyEditing) {
+        const updated = await updateFacultySupervisor(facultyEditing.id, {
+          program_id: programId,
+          first_name: facultyForm.firstName,
+          last_name: facultyForm.lastName,
+          email: facultyForm.email || null,
+          phone: facultyForm.phone || null,
+          specialty: facultyForm.specialty || null,
+        });
+        facultyResource.setData((current: any) => (current ?? []).map((x: any) => (x.id === updated.id ? updated : x)) as any);
+        setFeedback('Faculty updated.');
+        cancelEditFaculty();
+      } else {
+        const created = await createFacultySupervisor({
+          program_id: programId,
+          first_name: facultyForm.firstName,
+          last_name: facultyForm.lastName,
+          email: facultyForm.email || null,
+          phone: facultyForm.phone || null,
+          specialty: facultyForm.specialty || null,
+          is_active: 1,
+        });
+        facultyResource.setData((current: any) => [created, ...(current ?? [])] as any);
+        setFeedback('Faculty added.');
+        setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '' });
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not save faculty.');
+    } finally {
+      setSavingFaculty(false);
+    }
+  }
+
+  async function confirmDeleteFaculty() {
+    if (!facultyDeleteTarget || !programId) return;
+    setDeletingFaculty(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      await deleteFacultySupervisor(facultyDeleteTarget.id, programId);
+      facultyResource.setData((current: any) =>
+        (current ?? []).map((x: any) => (x.id === facultyDeleteTarget.id ? { ...x, is_active: 0 } : x)) as any,
+      );
+      setFeedback('Faculty deactivated.');
+      setFacultyDeleteTarget(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not delete faculty.');
+    } finally {
+      setDeletingFaculty(false);
     }
   }
 
@@ -867,6 +976,13 @@ export default function LongitudinalMatrixScreen() {
               Saving applies the cycle metadata together with each day&apos;s shift, PGY level and
               In-Charge lead. Tap a day header in the matrix to edit a single day.
             </Text>
+            <Button
+              label="Manage Faculty Preceptors"
+              variant="outline"
+              onPress={openFacultyManager}
+              disabled={saving}
+              style={{ marginBottom: spacing.sm }}
+            />
             <Button
               label="Save Cycle Header"
               onPress={saveHeader}
@@ -1207,7 +1323,7 @@ export default function LongitudinalMatrixScreen() {
                 />
                 <IconButton
                   icon={Minus}
-                  tone="danger"
+                  
                   accessibilityLabel={`Remove ${clinic.clinic_name}`}
                   onPress={() => askDeleteClinic(clinic)}
                 />
@@ -1269,7 +1385,7 @@ export default function LongitudinalMatrixScreen() {
                     {backupDraft.length > 1 ? (
                       <IconButton
                         icon={Trash2}
-                        tone="danger"
+                        
                         accessibilityLabel={`Remove backup ${index + 1}`}
                         onPress={() =>
                           setBackupDraft((previous) =>
@@ -1415,6 +1531,13 @@ export default function LongitudinalMatrixScreen() {
               placeholder="— Unassigned —"
               hint="A 'Dr.' title is applied automatically."
             />
+            <Button
+              label="+ Add / Rename Faculty"
+              variant="outline"
+              onPress={openFacultyManager}
+              fullWidth={false}
+              style={{ marginTop: spacing.xs }}
+            />
           </>
         ) : null}
       </Sheet>
@@ -1465,6 +1588,13 @@ export default function LongitudinalMatrixScreen() {
               onChange={(value) => setSlotForm((previous) => ({ ...previous, faculty: value }))}
               placeholder="— None —"
               hint="A 'Dr.' title is applied automatically to faculty members."
+            />
+            <Button
+              label="+ Add New Faculty"
+              variant="outline"
+              onPress={openFacultyManager}
+              fullWidth={false}
+              style={{ marginTop: spacing.xs }}
             />
           </>
         ) : null}
@@ -1583,7 +1713,7 @@ export default function LongitudinalMatrixScreen() {
           <View style={styles.actionRow}>
             <Button
               label={deletingClinic ? 'Removing…' : 'Remove clinic'}
-              variant="danger"
+              
               loading={deletingClinic}
               onPress={removeClinic}
               disabled={deletingClinic}
@@ -1603,6 +1733,77 @@ export default function LongitudinalMatrixScreen() {
           {`Are you sure you want to remove ${deleteTarget?.clinic_name ?? 'this clinic'}? Existing slots and historical data linked to this clinic will be preserved.`}
         </Text>
       </Sheet>
+    
+      <Sheet
+        visible={facultyMgrOpen}
+        onClose={closeFacultyManager}
+        title="Manage Faculty Preceptors"
+        subtitle="Add, edit, rename, or deactivate supervising faculty"
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label={facultyEditing ? 'Save Faculty' : 'Add Faculty'}
+              onPress={saveFaculty}
+              loading={savingFaculty}
+              disabled={savingFaculty}
+              style={styles.flex1}
+            />
+            <Button label="Close" variant="outline" onPress={closeFacultyManager} style={styles.flex1} />
+          </View>
+        }
+      >
+        <Card padded>
+          <Text variant="label" tone="secondary" uppercase>
+            {facultyEditing ? 'Edit Faculty' : 'Add New Faculty'}
+          </Text>
+          <TextField label="First Name" value={facultyForm.firstName} onChangeText={(v) => setFacultyForm((p) => ({ ...p, firstName: v }))} />
+          <TextField label="Last Name" value={facultyForm.lastName} onChangeText={(v) => setFacultyForm((p) => ({ ...p, lastName: v }))} />
+          <TextField label="Email" value={facultyForm.email} onChangeText={(v) => setFacultyForm((p) => ({ ...p, email: v }))} autoCapitalize="none" keyboardType="email-address" />
+          <TextField label="Phone" value={facultyForm.phone} onChangeText={(v) => setFacultyForm((p) => ({ ...p, phone: v }))} keyboardType="phone-pad" />
+          <TextField label="Specialty" value={facultyForm.specialty} onChangeText={(v) => setFacultyForm((p) => ({ ...p, specialty: v }))} />
+          {facultyEditing ? (
+            <Button label="Cancel Edit" variant="outline" onPress={cancelEditFaculty} style={{ marginTop: spacing.sm }} />
+          ) : null}
+        </Card>
+        <Card padded={false}>
+          <View style={styles.cardPad}>
+            <Text variant="label" tone="secondary" uppercase>
+              Faculty List
+            </Text>
+          </View>
+          {(facultyResource.data ?? []).map((f: any) => (
+            <View key={f.id} style={styles.clinicRow}>
+              <View style={styles.flex1}>
+                <Text variant="bodySmall">{`Dr. ${f.first_name} ${f.last_name}`}</Text>
+                <Text variant="caption" tone="muted">
+                  {f.specialty || f.email || (f.is_active === 0 ? 'Inactive' : '')}
+                </Text>
+              </View>
+              <IconButton icon={Pencil} accessibilityLabel={`Edit ${f.first_name}`} onPress={() => startEditFaculty(f)} />
+              {f.is_active === 1 ? (
+                <IconButton icon={Minus}  accessibilityLabel={`Deactivate ${f.first_name}`} onPress={() => setFacultyDeleteTarget(f)} />
+              ) : null}
+            </View>
+          ))}
+        </Card>
+      </Sheet>
+
+      <Sheet
+        visible={Boolean(facultyDeleteTarget)}
+        onClose={() => !deletingFaculty && setFacultyDeleteTarget(null)}
+        title="Deactivate Faculty"
+        footer={
+          <View style={styles.actionRow}>
+            <Button label="Deactivate"  onPress={confirmDeleteFaculty} loading={deletingFaculty} disabled={deletingFaculty} style={styles.flex1} />
+            <Button label="Cancel" variant="outline" onPress={() => setFacultyDeleteTarget(null)} disabled={deletingFaculty} style={styles.flex1} />
+          </View>
+        }
+      >
+        <Text variant="bodySmall" tone="secondary">
+          {`Are you sure you want to deactivate ${facultyDeleteTarget ? `Dr. ${facultyDeleteTarget.first_name} ${facultyDeleteTarget.last_name}` : 'this faculty member'}? They will be removed from active dropdowns but historical records will be preserved.`}
+        </Text>
+      </Sheet>
+
     </Screen>
   );
 }

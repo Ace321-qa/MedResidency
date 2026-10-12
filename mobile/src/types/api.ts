@@ -606,6 +606,7 @@ export interface FacultySupervisor {
   is_active: number;
   /** Server-concatenated name carrying the institutional `Dr.` title. */
   display_name?: string;
+  specialty?: string | null;
 }
 
 export interface LongitudinalClinicSlot {

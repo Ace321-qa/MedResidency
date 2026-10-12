@@ -277,3 +277,47 @@ export async function randomizeSupervisors(payload: {
   );
   return response.data;
 }
+
+export async function createFacultySupervisor(payload: {
+  program_id: number;
+  first_name: string;
+  last_name: string;
+  title?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  specialty?: string | null;
+  is_active?: number;
+}): Promise<FacultySupervisor> {
+  const response = await request<ApiResponse<FacultySupervisor>>('/longitudinal/faculty-supervisors', {
+    method: 'POST',
+    data: payload,
+  });
+  return response.data;
+}
+
+export async function updateFacultySupervisor(
+  id: number,
+  payload: {
+    program_id: number;
+    first_name?: string;
+    last_name?: string;
+    title?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    specialty?: string | null;
+    is_active?: number;
+  },
+): Promise<FacultySupervisor> {
+  const response = await request<ApiResponse<FacultySupervisor>>(`/longitudinal/faculty-supervisors/${id}`, {
+    method: 'PUT',
+    data: payload,
+  });
+  return response.data;
+}
+
+export async function deleteFacultySupervisor(id: number, programId: number): Promise<{ id: number; is_active: number }> {
+  const path = `/longitudinal/faculty-supervisors/${id}${queryString({ program_id: programId })}`;
+  const response = await request<ApiResponse<{ id: number; is_active: number }>>(path, { method: 'DELETE' });
+  return response.data;
+}
+

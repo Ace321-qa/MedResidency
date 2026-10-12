@@ -486,7 +486,7 @@ class LongitudinalService {
    */
   static async getFacultySupervisors(programId, { includeInactive = false, clinicTypeId } = {}) {
     let query = `
-      SELECT id, program_id, first_name, last_name, title, email, phone, is_active,
+      SELECT id, program_id, first_name, last_name, title, email, phone, specialty, is_active,
              CONCAT('Dr. ', first_name, ' ', last_name) AS display_name
       FROM faculty_supervisors
       WHERE program_id = ?
@@ -1249,7 +1249,7 @@ class LongitudinalService {
     } = options;
 
     const [faculty] = await db.query(
-      'SELECT id, first_name, last_name, CONCAT(\'Dr. \', first_name, \' \', last_name) AS display_name FROM faculty_supervisors WHERE program_id = ? AND is_active = 1 ORDER BY id ASC',
+      'SELECT id, first_name, last_name, specialty, CONCAT(\'Dr. \', first_name, \' \', last_name) AS display_name FROM faculty_supervisors WHERE program_id = ? AND is_active = 1 ORDER BY id ASC',
       [programId]
     );
     if (faculty.length === 0) return { updated: 0, days: [], reason: 'no_active_faculty' };
@@ -1323,6 +1323,81 @@ class LongitudinalService {
    * deployment without the table must still be able to randomise supervisors,
    * so a failure here is swallowed rather than aborting the reassignment.
    */
+
+  static async createFacultySupervisor(data = {}) {
+    const programId = Number(data.program_id);
+    const firstName = String(data.first_name ?? '').trim();
+    const lastName = String(data.last_name ?? '').trim();
+    if (!programId || !firstName || !lastName) {
+      const error = new Error('program_id, first_name and last_name are required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const [result] = await db.query(
+      `INSERT INTO faculty_supervisors (program_id, first_name, last_name, title, email, phone, specialty, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [programId, firstName, lastName, data.title ? String(data.title).trim() : null, data.email ? String(data.email).trim() : null, data.phone ? String(data.phone).trim() : null, data.specialty ? String(data.specialty).trim() : null, data.is_active !== undefined ? (Number(data.is_active) ? 1 : 0) : 1]
+    );
+    const [rows] = await db.query('SELECT * FROM faculty_supervisors WHERE id = ?', [result.insertId]);
+    return rows[0];
+  }
+
+  static async updateFacultySupervisor(id, programId, data = {}) {
+    const fid = Number(id);
+    const pid = Number(programId);
+    if (!Number.isInteger(fid) || fid <= 0 || !Number.isInteger(pid) || pid <= 0) {
+      const error = new Error('Invalid faculty supervisor id or program_id.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const [existing] = await db.query('SELECT id FROM faculty_supervisors WHERE id = ? AND program_id = ?', [fid, pid]);
+    if (existing.length === 0) {
+      const error = new Error('Faculty supervisor not found.');
+      error.statusCode = 404;
+      throw error;
+    }
+    const sets = [];
+    const params = [];
+    if (data.first_name !== undefined) {
+      const v = String(data.first_name).trim();
+      if (!v) { const err = new Error('first_name cannot be empty.'); err.statusCode = 400; throw err; }
+      sets.push('first_name = ?'); params.push(v);
+    }
+    if (data.last_name !== undefined) {
+      const v = String(data.last_name).trim();
+      if (!v) { const err = new Error('last_name cannot be empty.'); err.statusCode = 400; throw err; }
+      sets.push('last_name = ?'); params.push(v);
+    }
+    if (data.title !== undefined) { sets.push('title = ?'); params.push(String(data.title).trim() || null); }
+    if (data.email !== undefined) { sets.push('email = ?'); params.push(String(data.email).trim() || null); }
+    if (data.phone !== undefined) { sets.push('phone = ?'); params.push(String(data.phone).trim() || null); }
+    if (data.specialty !== undefined) { sets.push('specialty = ?'); params.push(String(data.specialty).trim() || null); }
+    if (data.is_active !== undefined) { sets.push('is_active = ?'); params.push(Number(data.is_active) ? 1 : 0); }
+    if (sets.length === 0) { const err = new Error('Nothing to update.'); err.statusCode = 400; throw err; }
+    sets.push('updated_at = CURRENT_TIMESTAMP');
+    await db.query(`UPDATE faculty_supervisors SET ${sets.join(', ')} WHERE id = ? AND program_id = ?`, [...params, fid, pid]);
+    const [rows] = await db.query('SELECT * FROM faculty_supervisors WHERE id = ? AND program_id = ?', [fid, pid]);
+    return rows[0];
+  }
+
+  static async deleteFacultySupervisor(id, programId) {
+    const fid = Number(id);
+    const pid = Number(programId);
+    if (!Number.isInteger(fid) || fid <= 0 || !Number.isInteger(pid) || pid <= 0) {
+      const error = new Error('Invalid faculty supervisor id or program_id.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const [existing] = await db.query('SELECT id FROM faculty_supervisors WHERE id = ? AND program_id = ?', [fid, pid]);
+    if (existing.length === 0) {
+      const error = new Error('Faculty supervisor not found.');
+      error.statusCode = 404;
+      throw error;
+    }
+    await db.query('UPDATE faculty_supervisors SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND program_id = ?', [fid, pid]);
+    return { id: fid, is_active: 0 };
+  }
+
   static async recordRotationAudit(entry) {
     try {
       if (!LongitudinalService.auditTableReady) {
