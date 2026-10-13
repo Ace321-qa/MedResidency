@@ -1,4 +1,6 @@
+const db = require('../config/db');
 const LongitudinalService = require('../services/longitudinalService');
+const { generateFacultyTemplate, parseFacultyFile } = require('../utils/excel/faculty');
 
 class LongitudinalController {
   static async getClinicTypes(req, res) {
@@ -319,6 +321,147 @@ class LongitudinalController {
     } catch (error) {
       if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
       return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `GET /longitudinal/faculty-supervisors/template`
+   *
+   * The downloadable `.xlsx` sample preceptor list: five columns and three
+   * realistic rows that demonstrate the expected formats.
+   */
+  static async downloadFacultyTemplate(req, res) {
+    try {
+      const buffer = generateFacultyTemplate();
+      res.setHeader('Content-Disposition', 'attachment; filename="faculty_preceptors_template.xlsx"');
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      return res.send(buffer);
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `POST /longitudinal/faculty-supervisors/import`
+   *
+   * Bulk-register preceptors from an uploaded workbook. The whole file is
+   * validated before a single row is written, and the batch runs inside one
+   * transaction: a rejected file rolls back and names the offending rows
+   * (`Row 4: First Name and Last Name are required`) rather than leaving a
+   * half-imported faculty pool behind.
+   */
+  static async importFacultySupervisors(req, res) {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file was uploaded.' });
+    }
+
+    const programId = Number((req.body ?? {}).program_id);
+    if (!Number.isInteger(programId) || programId <= 0) {
+      return res.status(400).json({ success: false, error: 'program_id is required to import faculty.' });
+    }
+
+    let parsed;
+    try {
+      parsed = parseFacultyFile(req.file.buffer);
+    } catch (error) {
+      return res.status(400).json({ success: false, issues: [{ message: error.message }] });
+    }
+
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const issues = [...parsed.errors];
+
+      // Duplicates *within the file* are caught here; duplicates against the
+      // database need a query, done once for the whole batch.
+      const byName = new Map();
+      const byEmail = new Map();
+      const clean = new Set();
+      for (const row of parsed.rows) {
+        const nameKey = `${row.first_name} ${row.last_name}`.toLowerCase();
+        const emailKey = row.email ? row.email.toLowerCase() : null;
+
+        const nameDup = byName.get(nameKey);
+        const emailDup = emailKey ? byEmail.get(emailKey) : undefined;
+        if (nameDup || emailDup) {
+          issues.push({
+            row: row.row,
+            field: nameDup ? 'Name' : 'Email',
+            message: `duplicates row ${nameDup ?? emailDup} in this file`,
+          });
+          continue;
+        }
+        byName.set(nameKey, row.row);
+        if (emailKey) byEmail.set(emailKey, row.row);
+        clean.add(row.row);
+      }
+
+      const [existing] = await conn.query(
+        'SELECT first_name, last_name, email FROM faculty_supervisors WHERE program_id = ?',
+        [programId],
+      );
+      const existingNames = new Set(
+        existing.map((f) => `${f.first_name} ${f.last_name}`.toLowerCase()),
+      );
+      const existingEmails = new Set(
+        existing.filter((f) => f.email).map((f) => String(f.email).toLowerCase()),
+      );
+
+      for (const row of parsed.rows) {
+        if (!clean.has(row.row)) continue;
+        const nameKey = `${row.first_name} ${row.last_name}`.toLowerCase();
+        const emailKey = row.email ? row.email.toLowerCase() : null;
+        if (existingNames.has(nameKey)) {
+          issues.push({
+            row: row.row,
+            field: 'Name',
+            message: `Dr. ${row.first_name} ${row.last_name} already exists in this programme`,
+          });
+        } else if (emailKey && existingEmails.has(emailKey)) {
+          issues.push({
+            row: row.row,
+            field: 'Email',
+            message: `${row.email} already belongs to a faculty member`,
+          });
+        }
+      }
+
+      if (issues.length > 0) {
+        await conn.rollback();
+        return res.status(400).json({ success: false, issues });
+      }
+
+      const added = [];
+      for (const row of parsed.rows) {
+        const [result] = await conn.query(
+          `INSERT INTO faculty_supervisors
+             (program_id, first_name, last_name, title, email, phone, specialty, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, 'Dr.', ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [programId, row.first_name, row.last_name, row.email, row.phone, row.specialty],
+        );
+        added.push(result.insertId);
+      }
+
+      await conn.commit();
+
+      return res.status(201).json({
+        success: true,
+        added,
+        count: added.length,
+        summary: `Successfully imported ${added.length} faculty preceptor${added.length === 1 ? '' : 's'}.`,
+      });
+    } catch (error) {
+      await conn.rollback();
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
+      return res.status(500).json({ success: false, error: error.message });
+    } finally {
+      conn.release();
     }
   }
 

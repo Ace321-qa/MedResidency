@@ -22,8 +22,8 @@ import { allWeeks, formatDmy, MASTER_GRID_START } from '../utils/masterGridCalen
  * required" — rather than a JSON blob nobody can read.
  */
 
-/** The five workbooks this app hands out. */
-export type TemplateKind = 'roster' | 'master' | 'ccc' | 'timesheet' | 'catalogue';
+/** The six workbooks this app hands out. */
+export type TemplateKind = 'roster' | 'master' | 'ccc' | 'timesheet' | 'catalogue' | 'faculty';
 
 export interface TemplateSpec {
   fileName: string;
@@ -53,6 +53,26 @@ export const CATALOGUE_COLUMNS = [
   'Hospital Department',
   'Abbreviation',
 ] as const;
+
+/**
+ * The faculty preceptor workbook's five columns, in the order the API parses
+ * them. `src/utils/excel/faculty.js` builds the same header strings, so a sheet
+ * made on this device and one downloaded from the API are the same file.
+ */
+export const FACULTY_COLUMNS = [
+  'First Name',
+  'Last Name',
+  'Email',
+  'Phone',
+  'Specialty',
+] as const;
+
+/** The three realistic rows the server's template ships. */
+const FACULTY_SAMPLE_ROWS: XlsxCellValue[][] = [
+  ['Hassan', 'Al-Hussein', 'hassan.alhussein@hamad.qa', '+974 4439 1111', 'Family Medicine'],
+  ['Areen', 'Al-Mansouri', 'areen.almansouri@hamad.qa', '+974 4439 2222', 'Family Medicine'],
+  ['Omar', 'Siddiqui', 'omar.siddiqui@hamad.qa', '+974 4439 3333', 'Internal Medicine'],
+];
 
 /**
  * Sample catalogue rows — identical to the ones `src/utils/excel/catalogue.js`
@@ -115,6 +135,12 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
     endpoint: '/rotations/catalogue/template',
     sheetName: 'Rotations',
     rows: [[...CATALOGUE_COLUMNS], ...CATALOGUE_SAMPLE_ROWS],
+  },
+  faculty: {
+    fileName: 'faculty_preceptors_template.xlsx',
+    endpoint: '/longitudinal/faculty-supervisors/template',
+    sheetName: 'Faculty',
+    rows: [[...FACULTY_COLUMNS], ...FACULTY_SAMPLE_ROWS],
   },
   master: {
     fileName: 'master_grid_template.xlsx',
@@ -720,6 +746,7 @@ export const downloadMasterGridTemplate = () => downloadTemplate('master');
 export const downloadCccTemplate = () => downloadTemplate('ccc');
 export const downloadMonthlyTimesheetTemplate = () => downloadTemplate('timesheet');
 export const downloadCatalogueTemplate = () => downloadTemplate('catalogue');
+export const downloadFacultyTemplate = () => downloadTemplate('faculty');
 
 export const uploadRoster = (file: DocumentPicker.DocumentPickerAsset, programId?: number) =>
   uploadSpreadsheet('/roster/import', file, programId ? { program_id: programId } : {});
@@ -745,3 +772,15 @@ export const uploadTimesheet = (file: DocumentPicker.DocumentPickerAsset, reside
  */
 export const uploadCatalogue = (file: DocumentPicker.DocumentPickerAsset, programId: number) =>
   uploadSpreadsheet('/rotations/catalogue/import', file, { program_id: programId });
+
+/**
+ * Upload a filled-in faculty preceptor workbook.
+ *
+ * The server validates the whole file and inserts inside one transaction, so a
+ * rejected sheet rolls back and names the offending rows instead of leaving a
+ * half-imported faculty pool behind.
+ */
+export const uploadFacultySupervisors = (
+  file: DocumentPicker.DocumentPickerAsset,
+  programId: number,
+) => uploadSpreadsheet('/longitudinal/faculty-supervisors/import', file, { program_id: programId });

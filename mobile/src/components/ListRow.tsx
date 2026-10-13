@@ -13,6 +13,11 @@ import { Text } from './Text';
  * text block (title + one or two supporting lines), and an optional trailing
  * element (a badge, a chevron, a value). Because the structure is identical
  * everywhere, a resident learns it once.
+ *
+ * The pressable body and the trailing slot are siblings under the row `View`,
+ * never nested. On web a pressable renders a real `<button>`, and trailing
+ * elements are frequently buttons themselves (edit, delete, archive); nesting
+ * them would produce `<button>` inside `<button>`, which the DOM forbids.
  */
 
 interface ListRowProps {

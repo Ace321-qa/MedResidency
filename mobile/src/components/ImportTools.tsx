@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Download, Upload } from 'lucide-react-native';
 
@@ -44,6 +44,12 @@ interface ImportToolsProps {
   hint?: string;
   /** Workbook options, e.g. the master grid's chosen start date. */
   downloadOptions?: TemplateOptions;
+  /**
+   * When set, a successful import's banner clears itself after this many
+   * milliseconds. Errors never auto-dismiss: the coordinator needs the row
+   * list on screen while they fix the workbook.
+   */
+  autoDismissSuccessMs?: number;
   style?: object;
 }
 
@@ -55,6 +61,7 @@ export function ImportTools({
   uploadLabel = 'Upload Excel',
   hint,
   downloadOptions,
+  autoDismissSuccessMs,
   style,
 }: ImportToolsProps) {
   const { notify } = useInAppNotifications();
@@ -62,6 +69,12 @@ export function ImportTools({
   const [uploading, setUploading] = useState(false);
   const [issues, setIssues] = useState<string[] | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!summary || !autoDismissSuccessMs) return;
+    const timer = setTimeout(() => setSummary(null), autoDismissSuccessMs);
+    return () => clearTimeout(timer);
+  }, [summary, autoDismissSuccessMs]);
 
   async function handleDownload() {
     setDownloading(true);

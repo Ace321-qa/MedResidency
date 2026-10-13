@@ -8,7 +8,9 @@ import {
   Button,
   Card,
   DateField,
+  Divider,
   IconButton,
+  ImportTools,
   Screen,
   SearchInput,
   SectionHeader,
@@ -35,6 +37,7 @@ import {
   deleteFacultySupervisor,
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
+import { uploadFacultySupervisors } from '../../../services/excelTemplates';
 import { CCC_SCHEDULE_ROWS, dayOfWeekMatches } from '../../../utils/cccMatrix';
 import { formatPgy } from '../../../utils/insights';
 import {
@@ -601,6 +604,14 @@ export default function LongitudinalMatrixScreen() {
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not load faculty list.');
     }
+  }
+
+  /**
+   * After a bulk upload, re-pull the programme's faculty so the new preceptors
+   * populate every In-Charge and Supervising Faculty dropdown without a reload.
+   */
+  async function handleFacultyImported() {
+    await refreshFacultyList();
   }
 
   function openFacultyManager() {
@@ -1752,6 +1763,23 @@ export default function LongitudinalMatrixScreen() {
           </View>
         }
       >
+        <ImportTools
+          template="faculty"
+          downloadLabel="Download Excel Template (.xlsx)"
+          uploadLabel="Upload Faculty List (.xlsx)"
+          upload={(file) => uploadFacultySupervisors(file, programId)}
+          onImported={() => void handleFacultyImported()}
+          autoDismissSuccessMs={6000}
+          hint="Five columns: First Name, Last Name, Email, Phone, Specialty. First and Last Name are required; Specialty defaults to Family Medicine."
+        />
+
+        <View style={styles.facultyDivider}>
+          <Divider />
+          <Text variant="label" tone="secondary" uppercase style={styles.facultyDividerLabel}>
+            Or add individual faculty manually
+          </Text>
+        </View>
+
         <Card padded>
           <Text variant="label" tone="secondary" uppercase>
             {facultyEditing ? 'Edit Faculty' : 'Add New Faculty'}
@@ -1832,6 +1860,14 @@ const styles = StyleSheet.create({
   cardPad: {
     padding: spacing.lg,
     paddingBottom: 0,
+  },
+  facultyDivider: {
+    marginTop: spacing.xs,
+    marginBottom: spacing.md,
+    gap: spacing.md,
+  },
+  facultyDividerLabel: {
+    textAlign: 'center',
   },
   matrixScroll: {
     paddingBottom: spacing.lg,
