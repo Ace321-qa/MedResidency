@@ -195,6 +195,8 @@ export interface CycleHeaderUpdate {
   cycle_number?: string;
   week_number?: string;
   start_date?: string;
+  /** The cycle's rotation window; the server converts it at 4 weeks per month. */
+  rotation_window_months?: number;
   dailyHeaders?: {
     id: number;
     day_of_week?: string;

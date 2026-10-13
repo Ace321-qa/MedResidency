@@ -26,6 +26,11 @@ import {
   type CccScheduleRow,
 } from '../src/utils/cccMatrix';
 import { ACADEMIC_DAYS, academicDayForPgy } from '../src/utils/academicYear';
+import {
+  calculateEndDateFromWeeks,
+  convertMonthsToWeeks,
+} from '../src/utils/dateCalc';
+import { rotationWindowForMonths } from '../src/utils/masterGridCalendar';
 
 const failures: string[] = [];
 
@@ -196,6 +201,40 @@ assert('there are seven full names', WEEKDAY_NAMES.length, 7);
 assert('there are seven short names', WEEKDAY_SHORT.length, 7);
 assert('the tables are aligned', WEEKDAY_NAMES.map((n) => n.slice(0, 3)), [...WEEKDAY_SHORT]);
 assert('both start at Sunday', [WEEKDAY_NAMES[0], WEEKDAY_SHORT[0]], ['Sunday', 'Sun']);
+
+/* ------------------------------------------------------------------ *
+ * The CCC rotation window: months -> 4 weeks each, inclusive end date.
+ * ------------------------------------------------------------------ */
+
+console.log('\n-- the rotation window converts months into whole weeks --');
+assert('three months is twelve weeks', convertMonthsToWeeks(3), 12);
+assert('six months is twenty-four weeks', convertMonthsToWeeks(6), 24);
+assert('one month is four weeks', convertMonthsToWeeks(1), 4);
+assert('a fractional month converts exactly', convertMonthsToWeeks(1.5), 6);
+assert('a non-month value converts to NaN', Number.isNaN(convertMonthsToWeeks(Number.NaN)), true);
+
+console.log('\n-- the inclusive end date owns every day of the window --');
+{
+  // The window guards its own days: end = start + (weeks*7 - 1). A Sunday start
+  // ends on the Saturday of the last week, a Monday start on its Sunday.
+  assert('Sun 11 Oct 2026 + 3 months ends Sat 02 Jan 2027', calculateEndDateFromWeeks('2026-10-11', 12), '2027-01-02');
+  assert('Mon 12 Oct 2026 + 3 months ends Sun 03 Jan 2027', calculateEndDateFromWeeks('2026-10-12', 12), '2027-01-03');
+  assert('the window is full and inclusive (84 days)', calculateEndDateFromWeeks('2026-10-11', 12), '2027-01-02');
+  assert('a bad start date yields nothing', calculateEndDateFromWeeks('2026-13-99', 12), null);
+  assert('a missing start date yields nothing', calculateEndDateFromWeeks('', 12), null);
+  assert('a non-positive window yields nothing', calculateEndDateFromWeeks('2026-10-11', 0), null);
+}
+
+console.log('\n-- the single rotation-window helper ties both rules together --');
+{
+  const window = rotationWindowForMonths('2026-10-11', 3);
+  assert('total_weeks is three months at four weeks', window?.totalWeeks, 12);
+  assert('total_days counts every day', window?.totalDays, 84);
+  assert('the end date is the Saturday of the last week', window?.endDate, '2027-01-02');
+  assert('it names the start weekday', window?.startsOn, 'Sunday');
+  assert('and the end weekday', window?.endsOn, 'Saturday');
+  assert('a blank start or window resolves to nothing', rotationWindowForMonths('', 3), null);
+}
 
 if (failures.length > 0) {
   console.error(`\n${failures.length} check(s) failed:\n  - ${failures.join('\n  - ')}`);

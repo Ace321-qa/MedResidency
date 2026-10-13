@@ -755,6 +755,12 @@ export interface PrimaryCareCycle {
   week_number: string;
   /** Plain `YYYY-MM-DD`, normalised server-side. */
   start_date: string;
+  /** The rotation window in calendar months; `months × 4` = total_weeks. */
+  rotation_window_months?: number | null;
+  /** Whole weeks the cycle runs, derived from rotation_window_months. */
+  total_weeks?: number | null;
+  /** Inclusive `YYYY-MM-DD` end date, derived as start + (total_weeks × 7 − 1). */
+  end_date?: string | null;
   created_at?: string;
   updated_at?: string;
 }

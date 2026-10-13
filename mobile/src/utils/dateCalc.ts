@@ -237,6 +237,43 @@ export function calculateBlockEndDate(startDate: Date | string, weeks = 4): stri
   return calculateEndDate(startDate, Math.round(count) * 7);
 }
 
+/**
+ * The standard rotation conversion: `months * 4` weeks per calendar month.
+ *
+ * A 3-month rotation window is therefore 12 weeks (84 days), matching the rule
+ * the Master Rotation Grid runs on (13 blocks × 4 weeks = 52 weekly columns).
+ * Only whole months are expected in practice; fractional months are kept exact
+ * so the caller can round at the boundary it renders.
+ *
+ * @returns {number} `NaN` when `months` is not a finite number.
+ */
+export function convertMonthsToWeeks(months: number): number {
+  const value = Number(months);
+  return Number.isFinite(value) ? value * 4 : NaN;
+}
+
+/**
+ * The inclusive end date of a `weeks`-week rotation window from `startDate`.
+ *
+ * Composition of the two rules above: `W = months × 4` weeks, then the window
+ * owns its own days, so the end date is `start + (W × 7 - 1)` days.
+ *
+ * ```ts
+ * calculateEndDateFromWeeks('2026-10-11', 12) === '2027-01-02'  (Sun -> Sat)
+ * calculateEndDateFromWeeks('2026-10-12', 12) === '2027-01-03'  (Mon -> Sun)
+ * ```
+ *
+ * @param startDate A `Date` or `YYYY-MM-DD` string.
+ * @param weeks Positive whole weeks; fractional values round to whole days.
+ * @returns {string|null} `YYYY-MM-DD`, or null for a bad date or a non-positive
+ *   duration.
+ */
+export function calculateEndDateFromWeeks(startDate: Date | string, weeks: number): string | null {
+  const count = Number(weeks);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return calculateEndDate(startDate, count * 7);
+}
+
 /** One contiguous 7-day window of a yearly sequence. */
 export interface WeeklySubRange {
   /** 1-based index across the sequence. */

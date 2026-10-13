@@ -1,5 +1,10 @@
 const db = require('../config/db');
-const { addMonths, describeWindow } = require('../utils/blockDates');
+const {
+  addMonths,
+  calculateEndDateFromWeeks,
+  convertMonthsToWeeks,
+  describeWindow,
+} = require('../utils/blockDates');
 const RotationService = require('./rotationService');
 const { PRIMARY_IDENTIFIER_SQL } = RotationService;
 const {
@@ -215,6 +220,28 @@ class LongitudinalService {
         UNIQUE KEY uq_primary_care_clinic_columns_program_number (program_id, clinic_number)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+
+    // The CCC cycle now owns its rotation window: `rotation_window_months`
+    // (4 weeks per month), the derived `total_weeks` and the inclusive
+    // `end_date` (`start_date + total_weeks * 7 - 1` days). All three are
+    // additive, so older databases get the columns on the next read.
+    const cycleColumns = [
+      ['rotation_window_months', 'INT NULL'],
+      ['total_weeks', 'INT NULL'],
+      ['end_date', 'DATE NULL'],
+    ];
+    for (const [column, definition] of cycleColumns) {
+      const [existingColumn] = await db.query(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'primary_care_cycles'
+            AND COLUMN_NAME = ?`,
+        [column]
+      );
+      if (existingColumn.length === 0) {
+        await db.query(`ALTER TABLE primary_care_cycles ADD COLUMN ${column} ${definition}`);
+      }
+    }
 
     this._schemaReady = true;
   }
@@ -1336,11 +1363,56 @@ class LongitudinalService {
       }
     }
 
+    const [currentRows] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ?', [cycleId]);
+    const current = currentRows[0];
+    if (!current) {
+      const e = new Error('Cycle not found.');
+      e.statusCode = 404;
+      throw e;
+    }
+
     const cycleSets = [];
     const cycleParams = [];
     if (data.cycle_number !== undefined) { cycleSets.push('cycle_number = ?'); cycleParams.push(data.cycle_number); }
     if (data.week_number !== undefined) { cycleSets.push('week_number = ?'); cycleParams.push(data.week_number); }
+
+    // The rotation window is the source of truth for the cycle's length: it is
+    // converted at `months * 4` weeks, and the inclusive end date is
+    // `start + (total_weeks * 7 - 1)` days. The server re-derives both so the
+    // stored values can never disagree with the date the coordinator picked.
     if (data.start_date !== undefined) { cycleSets.push('start_date = ?'); cycleParams.push(data.start_date); }
+
+    const monthsProvided = data.rotation_window_months !== undefined;
+    const months = monthsProvided
+      ? Number(data.rotation_window_months)
+      : current.rotation_window_months != null
+        ? Number(current.rotation_window_months)
+        : NaN;
+    if (monthsProvided && (!Number.isFinite(months) || months <= 0)) {
+      const e = new Error('rotation_window_months must be a positive number of months.');
+      e.statusCode = 400;
+      throw e;
+    }
+
+    const effectiveStart = data.start_date !== undefined ? data.start_date : current.start_date;
+    const weeks = Number.isFinite(months) && months > 0 ? convertMonthsToWeeks(months) : NaN;
+
+    if (monthsProvided) {
+      cycleSets.push('rotation_window_months = ?');
+      cycleParams.push(months);
+      if (Number.isFinite(weeks)) {
+        cycleSets.push('total_weeks = ?');
+        cycleParams.push(Math.round(weeks));
+      }
+    }
+    if (Number.isFinite(weeks) && effectiveStart) {
+      const endDate = calculateEndDateFromWeeks(effectiveStart, weeks);
+      if (endDate) {
+        cycleSets.push('end_date = ?');
+        cycleParams.push(endDate);
+      }
+    }
+
     if (cycleSets.length > 0) {
       cycleParams.push(cycleId, programId);
       await db.query(`UPDATE primary_care_cycles SET ${cycleSets.join(', ')} WHERE id = ? AND program_id = ?`, cycleParams);

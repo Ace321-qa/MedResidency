@@ -271,6 +271,43 @@ function calculateBlockEndDate(startDate, weeks) {
 }
 
 /**
+ * The standard rotation conversion: `months * 4` weeks per calendar month.
+ *
+ * A 3-month rotation window is therefore 12 weeks (84 days), matching the
+ * Master Rotation Grid's 13 blocks × 4 weeks = 52 weekly columns. The mobile
+ * mirror `mobile/src/utils/dateCalc.ts` ships the same helper, and the CCC
+ * cycle header derives its `total_weeks` and `end_date` from it.
+ *
+ * @param {number} months
+ * @returns {number} `NaN` when `months` is not a finite number.
+ */
+function convertMonthsToWeeks(months) {
+  const value = Number(months);
+  return Number.isFinite(value) ? value * 4 : NaN;
+}
+
+/**
+ * The inclusive end date of a `weeks`-week rotation window from `startDate`.
+ *
+ * `W = months × 4` weeks, and the window owns its own days, so the end date is
+ * `startDate + (W × 7 - 1)` days — always the weekday before `startDate`'s.
+ *
+ * ```js
+ * calculateEndDateFromWeeks('2026-10-11', 12) === '2027-01-02'  // Sun -> Sat
+ * calculateEndDateFromWeeks('2026-10-12', 12) === '2027-01-03'  // Mon -> Sun
+ * ```
+ *
+ * @param {Date|string} startDate
+ * @param {number} weeks Positive whole weeks; fractional values round to days.
+ * @returns {string|null}
+ */
+function calculateEndDateFromWeeks(startDate, weeks) {
+  const count = Number(weeks);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return calculateEndDate(startDate, count * 7);
+}
+
+/**
  * The `totalWeeks` contiguous 7-day windows that begin at `startDate`, each
  * following whatever weekday the start date falls on.
  *
@@ -469,7 +506,9 @@ module.exports = {
   addMonths,
   calculateBlockEndDate,
   calculateEndDate,
+  calculateEndDateFromWeeks,
   calculateWeeklySubRanges,
+  convertMonthsToWeeks,
   dayNameOf,
   describeWindow,
   diffDays,

@@ -1,4 +1,12 @@
-import { addDays, diffDays, parseCalendarDate, resolveCalendarDate } from './dateCalc';
+import {
+  addDays,
+  calculateEndDateFromWeeks,
+  convertMonthsToWeeks,
+  dayNameOf,
+  diffDays,
+  parseCalendarDate,
+  resolveCalendarDate,
+} from './dateCalc';
 
 /**
  * The Master Rotation Grid calendar: 13 blocks × 4 weeks = 52 weekly columns.
@@ -188,6 +196,57 @@ export function formatShortRange(startDate: string | null | undefined, endDate: 
   const to = parseCalendarDate(endDate);
   if (!from || !to) return '';
   return `${pad(from.day)}/${pad(from.month)}–${pad(to.day)}/${pad(to.month)}`;
+}
+
+/**
+ * A calendar-aligned rotation window derived from months and a start date.
+ *
+ * This is the boundary rule the Country Clinics' "Cycle Header & Rotation"
+ * section previews: `months` × 4 weeks = `total_weeks`, and the window owns
+ * every one of its days, so the inclusive end date is the start date plus
+ * `totalDays - 1` days and always lands on the weekday *before* the start.
+ * A Sunday 11 Oct 2026 start over 3 months runs to Saturday 02 Jan 2027.
+ */
+export interface RotationWindow {
+  /** The resolved `YYYY-MM-DD` start date. */
+  startDate: string;
+  /** Inclusive `YYYY-MM-DD` end date. */
+  endDate: string;
+  /** `months × 4`, the whole weeks the window runs. */
+  totalWeeks: number;
+  /** `totalWeeks × 7`, the inclusive day count. */
+  totalDays: number;
+  /** e.g. 'Sunday'. */
+  startsOn: string;
+  /** e.g. 'Saturday'. */
+  endsOn: string;
+}
+
+/**
+ * Resolve a rotation window for a start date and a duration in months, or null
+ * when either half is missing or the duration is not a positive number.
+ */
+export function rotationWindowForMonths(
+  startDate: Date | string | null | undefined,
+  months: number,
+): RotationWindow | null {
+  const start = resolveCalendarDate(startDate ?? null);
+  const value = Number(months);
+  if (!start || !Number.isFinite(value) || value <= 0) return null;
+
+  const totalWeeks = convertMonthsToWeeks(value);
+  const totalDays = Math.round(totalWeeks) * 7;
+  const endDate = calculateEndDateFromWeeks(start, totalWeeks);
+  if (!endDate) return null;
+
+  return {
+    startDate: start,
+    endDate,
+    totalWeeks,
+    totalDays,
+    startsOn: dayNameOf(start) ?? 'Sunday',
+    endsOn: dayNameOf(endDate) ?? 'Saturday',
+  };
 }
 
 function pad(value: number): string {

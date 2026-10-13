@@ -39,6 +39,7 @@ import {
 import { fetchResidentList } from '../../../services/residents';
 import { uploadFacultySupervisors } from '../../../services/excelTemplates';
 import { CCC_SCHEDULE_ROWS, dayOfWeekMatches } from '../../../utils/cccMatrix';
+import { rotationWindowForMonths } from '../../../utils/masterGridCalendar';
 import { formatPgy } from '../../../utils/insights';
 import { residentFullName } from '../../../utils/residents';
 import { colors, radius, spacing } from '../../../theme';
@@ -296,6 +297,7 @@ export default function LongitudinalMatrixScreen() {
   const [backupDraft, setBackupDraft] = useState<string[]>([]);
 
   const [rotationMonths, setRotationMonths] = useState('3');
+  const [rotationTouched, setRotationTouched] = useState(false);
   const [rationale, setRationale] = useState('');
 
   /** Which of the two clinic-grid renderings is active. */
@@ -327,6 +329,22 @@ export default function LongitudinalMatrixScreen() {
 
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
+
+  // The rotation input is a free-typed draft until the coordinator touches it;
+  // once a saved cycle carries its own window, that value wins instead. Deriving
+  // (rather than syncing in an effect) keeps the field, the badge, the end date
+  // and the randomize payload reading the same source on every render.
+  const rotationValue = rotationTouched
+    ? rotationMonths
+    : cycle?.rotation_window_months != null
+      ? String(cycle.rotation_window_months)
+      : rotationMonths;
+
+  /** The whole calendar window the current rotation covers. */
+  const rotation = useMemo(
+    () => rotationWindowForMonths(cycle?.start_date ?? null, Number(rotationValue)),
+    [cycle?.start_date, rotationValue],
+  );
 
   const facultyOptions = useMemo<SelectOption<string>[]>(() => {
     const options: SelectOption<string>[] = [{ value: NONE_FACULTY, label: '— None —' }];
@@ -418,6 +436,7 @@ export default function LongitudinalMatrixScreen() {
         cycle_number: cycle.cycle_number,
         week_number: cycle.week_number,
         start_date: cycle.start_date,
+        rotation_window_months: Number(rotationValue) || undefined,
         dailyHeaders: data.dailyHeaders.map((header) => ({
           id: header.id,
           day_of_week: header.day_of_week,
@@ -684,7 +703,7 @@ export default function LongitudinalMatrixScreen() {
         program_id: programId,
         cycle_id: cycle?.id,
         day_of_week: day,
-        rotation_months: Number(rotationMonths) || 3,
+        rotation_months: Number(rotationValue) || 3,
         randomize: true,
         rationale: rationale.trim() || undefined,
       });
@@ -1019,7 +1038,13 @@ export default function LongitudinalMatrixScreen() {
       {data ? (
         <>
           <Card>
-            <SectionHeader title="Cycle Header & Metadata" />
+            <SectionHeader title="Cycle Header & Rotation" />
+            <Text variant="caption" tone="muted" style={styles.note}>
+              Cycle metadata, the rotation window and each day&apos;s boundary are saved together.
+              Week End Date and Total Weeks follow the master rotation rule of four weeks per
+              month; randomisation then redistributes supervising faculty across clinic slots and
+              records every reassignment with your rationale.
+            </Text>
             <View style={styles.row}>
               <View style={styles.half}>
                 <TextField
@@ -1038,31 +1063,111 @@ export default function LongitudinalMatrixScreen() {
                 />
               </View>
             </View>
-            <DateField
-              label="Week Start Date"
-              value={cycle?.start_date ?? ''}
-              onChangeText={(value) => updateCycleField({ start_date: value })}
-              weekStartDay="SUNDAY"
-              placeholder="YYYY-MM-DD"
-              hint="First day of the academic week this cycle opens on."
+
+            <View style={styles.row}>
+              <View style={styles.half}>
+                <TextField
+                  label="Rotation Window (Months)"
+                  value={rotationValue}
+                  onChangeText={(value) => {
+                    setRotationTouched(true);
+                    setRotationMonths(value);
+                  }}
+                  keyboardType="number-pad"
+                  placeholder="3"
+                  hint="Converted at 4 weeks per month."
+                />
+              </View>
+              <View style={styles.half}>
+                <Text variant="label" tone="secondary" uppercase>
+                  Duration / Total Weeks
+                </Text>
+                <View style={styles.durationBadge}>
+                  <Text variant="label" tone="brand">
+                    {rotation
+                      ? `${Math.round(rotation.totalWeeks)} Weeks (${rotation.totalDays} Days)`
+                      : 'Not set'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.dateRangeRow}>
+              <View style={styles.half}>
+                <DateField
+                  label="Week Start Date"
+                  value={cycle?.start_date ?? ''}
+                  onChangeText={(value) => updateCycleField({ start_date: value })}
+                  weekStartDay="SUNDAY"
+                  durationWeeks={rotation ? Math.round(rotation.totalWeeks) : null}
+                  placeholder="YYYY-MM-DD"
+                  hint="First day of the academic week this cycle opens on."
+                />
+              </View>
+              <View style={styles.half}>
+                <TextField
+                  label="Week End Date"
+                  value={rotation?.endDate ?? ''}
+                  onChangeText={() => undefined}
+                  editable={false}
+                  placeholder="YYYY-MM-DD"
+                  hint={
+                    rotation
+                      ? `Starts on ${rotation.startsOn}, ends on ${rotation.endsOn}.`
+                      : 'Set a start date and rotation window.'
+                  }
+                />
+              </View>
+            </View>
+
+            <TextField
+              label="Rationale"
+              value={rationale}
+              onChangeText={setRationale}
+              multiline
+              placeholder="e.g. Q3 fair rotation across PGY-2 faculty"
+              hint="Recorded against every reassignment when you randomize."
             />
-            <Text variant="caption" tone="muted" style={styles.note}>
-              Saving applies the cycle metadata together with each day&apos;s shift, PGY level and
-              In-Charge lead. Tap a day header in the matrix to edit a single day.
-            </Text>
+
+            <View style={styles.actionRow}>
+              <Button
+                label="Randomize All Days"
+                icon={Shuffle}
+                onPress={() => runRandomize()}
+                loading={saving}
+                disabled={saving}
+                style={styles.flex1}
+              />
+              <Button
+                label="Save Cycle Header"
+                onPress={saveHeader}
+                loading={saving}
+                disabled={saving}
+                style={styles.flex1}
+              />
+            </View>
             <Button
               label="Manage Faculty Preceptors"
               variant="outline"
               onPress={openFacultyManager}
               disabled={saving}
-              style={{ marginBottom: spacing.sm }}
+              style={{ marginTop: spacing.sm }}
             />
-            <Button
-              label="Save Cycle Header"
-              onPress={saveHeader}
-              loading={saving}
-              disabled={saving}
-            />
+            <Text variant="label" tone="secondary" uppercase style={styles.scopeLabel}>
+              Rotate a single day
+            </Text>
+            <View style={styles.actionRow}>
+              {DAYS.map((day) => (
+                <Button
+                  key={day}
+                  label={DAY_SHORT[day]}
+                  variant="outline"
+                  fullWidth={false}
+                  onPress={() => runRandomize(day)}
+                  disabled={saving}
+                />
+              ))}
+            </View>
           </Card>
 
           {viewMode === 'matrix' ? (
@@ -1540,54 +1645,6 @@ export default function LongitudinalMatrixScreen() {
               </View>
             ) : null}
           </Card>
-
-          <Card>
-            <SectionHeader title="Supervisor Randomisation & Rotation" />
-            <Text variant="caption" tone="muted" style={styles.note}>
-              Redistributes supervising faculty across clinic slots so coverage rotates fairly. Each
-              reassignment is recorded with the rationale you provide.
-            </Text>
-            <View style={styles.row}>
-              <View style={styles.half}>
-                <TextField
-                  label="Rotation window (months)"
-                  value={rotationMonths}
-                  onChangeText={setRotationMonths}
-                  keyboardType="number-pad"
-                  placeholder="3"
-                />
-              </View>
-            </View>
-            <TextField
-              label="Rationale"
-              value={rationale}
-              onChangeText={setRationale}
-              multiline
-              placeholder="e.g. Q3 fair rotation across PGY-2 faculty"
-            />
-            <Button
-              label="Randomize All Days"
-              icon={Shuffle}
-              onPress={() => runRandomize()}
-              loading={saving}
-              disabled={saving}
-            />
-            <Text variant="label" tone="secondary" uppercase style={styles.scopeLabel}>
-              Rotate a single day
-            </Text>
-            <View style={styles.actionRow}>
-              {DAYS.map((day) => (
-                <Button
-                  key={day}
-                  label={DAY_SHORT[day]}
-                  variant="outline"
-                  fullWidth={false}
-                  onPress={() => runRandomize(day)}
-                  disabled={saving}
-                />
-              ))}
-            </View>
-          </Card>
         </>
       ) : null}
 
@@ -2002,6 +2059,20 @@ const styles = StyleSheet.create({
   },
   note: {
     marginBottom: spacing.md,
+  },
+  dateRangeRow: {
+    flexDirection: Platform.OS === 'web' ? 'row' : 'column',
+    gap: spacing.md,
+  },
+  durationBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.primaryBorder,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    marginTop: spacing.sm,
   },
   cardPad: {
     padding: spacing.lg,
