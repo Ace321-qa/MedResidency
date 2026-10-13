@@ -12,6 +12,9 @@ import type {
   PrimaryCareClinicSlot,
   PrimaryCareBackupFaculty,
   PrimaryCareCycleSchedule,
+  PrimaryCareAbsence,
+  PrimaryCareAbsenceInput,
+  PrimaryCareMatrixColumn,
   RandomizeSupervisorsResult,
 } from '../types/api';
 
@@ -254,6 +257,98 @@ export async function updateBackupFaculty(payload: {
     data: payload,
   });
   return response.data;
+}
+
+/**
+ * `GET /longitudinal/cycle-schedule/absences` — the leave registry for a cycle.
+ *
+ * One row per resident or faculty member absent on a CCC day. Pass `cycleId` to
+ * scope to a single week; omit it for the programme-wide list. The Leaves column
+ * derives each day's badge from these rows.
+ */
+/**
+ * `GET /longitudinal/cycle-schedule/columns` — the numbered clinic columns.
+ *
+ * The grid is built from these plus the Leaves column. Also embedded in every
+ * `fetchCycleSchedule` response.
+ */
+export async function fetchMatrixColumns(programId: number): Promise<PrimaryCareMatrixColumn[]> {
+  const path = `/longitudinal/cycle-schedule/columns${queryString({ program_id: programId })}`;
+  const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(path);
+  return response.data ?? [];
+}
+
+/**
+ * `POST /longitudinal/cycle-schedule/columns` — append a new clinic column at
+ * the end of the grid (`Clinic N+1`). The caller should refresh the schedule so
+ * the new column's slot rows are materialised.
+ */
+export async function addClinicColumn(programId: number): Promise<PrimaryCareMatrixColumn[]> {
+  const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(
+    '/longitudinal/cycle-schedule/columns',
+    { method: 'POST', data: { program_id: programId } },
+  );
+  return response.data ?? [];
+}
+
+/**
+ * `PUT /longitudinal/cycle-schedule/columns/:clinic_number` — rename a column's
+ * label. An empty label reverts it to "Clinic <number>".
+ */
+export async function renameClinicColumn(
+  programId: number,
+  clinicNumber: number,
+  label: string,
+): Promise<PrimaryCareMatrixColumn[]> {
+  const path = `/longitudinal/cycle-schedule/columns/${clinicNumber}`;
+  const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(path, {
+    method: 'PUT',
+    data: { program_id: programId, label },
+  });
+  return response.data ?? [];
+}
+
+/**
+ * `DELETE /longitudinal/cycle-schedule/columns/:clinic_number` — remove a
+ * clinic column. Its historical slot rows are preserved server-side.
+ */
+export async function deleteClinicColumn(
+  programId: number,
+  clinicNumber: number,
+): Promise<PrimaryCareMatrixColumn[]> {
+  const path = `/longitudinal/cycle-schedule/columns/${clinicNumber}${queryString({
+    program_id: programId,
+  })}`;
+  const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(path, { method: 'DELETE' });
+  return response.data ?? [];
+}
+
+export async function fetchCycleAbsences(
+  programId: number,
+  cycleId?: number,
+): Promise<PrimaryCareAbsence[]> {
+  const params: Record<string, string | number> = { program_id: programId };
+  if (cycleId) params.cycle_id = cycleId;
+  const path = `/longitudinal/cycle-schedule/absences${queryString(params)}`;
+  const response = await request<ApiListResponse<PrimaryCareAbsence>>(path);
+  return response.data ?? [];
+}
+
+/**
+ * `POST /longitudinal/cycle-schedule/absences` — replace one CCC day's absences.
+ *
+ * The whole day is rewritten, so the modal's selection is exactly what is
+ * stored. Resident absences are mirrored into the attendance log server-side.
+ * Returns the day's rows after the write.
+ */
+export async function updateDayAbsences(
+  payload: PrimaryCareAbsenceInput,
+): Promise<PrimaryCareAbsence[]> {
+  const response = await request<ApiListResponse<PrimaryCareAbsence>>(
+    '/longitudinal/cycle-schedule/absences',
+    { method: 'POST', data: payload },
+  );
+  return response.data ?? [];
 }
 
 /**

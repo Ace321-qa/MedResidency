@@ -102,6 +102,9 @@ if (require.main === module) {
     // default clinics. Idempotent: existing rows are matched by name.
     try {
       const LongitudinalService = require('./services/longitudinalService');
+      // Bring the CCC schema up to date first: `display_order` and the absence
+      // registry must exist before the default clinics are seeded.
+      await LongitudinalService.ensureSchema();
       const seeded = await LongitudinalService.ensureDefaultClinics();
       console.log(`[primary-care] ensured ${seeded.length} default clinic record(s).`);
     } catch (error) {

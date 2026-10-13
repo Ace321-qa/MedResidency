@@ -57,8 +57,59 @@ function defaultPgyForDay(day) {
   }
 }
 
-/** Number of fixed columns on the CCC matrix: 10 clinics + WBC + Leaves. */
-const CCC_SLOT_COUNT = 12;
+/**
+ * The CCC grid's clinic columns are numbered positions — `Clinic 1`, `Clinic 2`,
+ * ... — not clinic *types*. A programme starts with ten of them and a coordinator
+ * can add, rename or remove columns; each column is stored in
+ * `primary_care_clinic_columns` keyed by its `clinic_number`, which is also the
+ * `primary_care_clinic_slots.clinic_number` it reads and writes. Named clinics
+ * (WBC, ANC, ...) belong to the clinic catalog, which lives outside this grid.
+ */
+const DEFAULT_CLINIC_COLUMN_COUNT = 10;
+const MAX_CLINIC_COLUMN_COUNT = 99;
+
+/** The leave reasons the Leaves column can record: the `leave_type` enum set. */
+const ABSENCE_LEAVE_TYPES = [
+  'ANNUAL_LEAVE',
+  'CASUAL_LEAVE',
+  'SICK_LEAVE',
+  'EMERGENCY_LEAVE',
+  'HAJJ_LEAVE',
+  'ACADEMIC_LEAVE',
+  'STUDY_LEAVE',
+  'EXAM_LEAVE',
+  'OTHER_LEAVE',
+];
+
+/** Marker written into `resident_attendance_logs.notes` for rows this feature owns. */
+const CCC_LEAVE_NOTE = '[CCC Leave Registry]';
+
+/** `Date.getDay()` index for a CCC day name, or -1 when it names no CCC day. */
+function cccWeekdayIndex(dayOfWeek) {
+  const normalized = String(dayOfWeek ?? '').trim().toLowerCase();
+  if (!normalized) return -1;
+  return CCC_DAYS.findIndex((day) => {
+    const full = day.toLowerCase();
+    return normalized === full || normalized === full.slice(0, 3) || normalized.startsWith(full.slice(0, 3));
+  });
+}
+
+/**
+ * The calendar date of a weekday within the cycle's week.
+ *
+ * The cycle's `start_date` is the first day of the academic week; the CCC days
+ * run Sunday through Thursday. Resolving the *next* occurrence on or after the
+ * start date keeps the date correct whichever weekday the week opens on.
+ */
+function dateForWeekday(startDate, weekdayIndex) {
+  const base = toCalendarDate(startDate);
+  if (!base || weekdayIndex < 0) return null;
+  const date = new Date(`${base}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  const delta = (weekdayIndex - date.getDay() + 7) % 7;
+  date.setDate(date.getDate() + delta);
+  return toCalendarDate(date);
+}
 
 /**
  * Normalise a MySQL DATE (returned as a JS `Date` at local midnight) to a plain
@@ -78,9 +129,100 @@ function toCalendarDate(value) {
 }
 
 class LongitudinalService {
+  /**
+   * Bring the CCC tables up to the shape this feature needs.
+   *
+   * Two additive, idempotent changes, safe to call on every request:
+   *
+   *  - `longitudinal_clinic_types.display_order` gives every clinic a stable
+   *    matrix column position. Renaming a clinic never moves its column, and
+   *    deleting one never re-numbers the rest — which matters because a column's
+   *    slot data is stored by `primary_care_clinic_slots.clinic_number`.
+   *  - `primary_care_absences` is the leave registry the Leaves column writes to:
+   *    one row per person (resident or faculty) absent on a CCC day.
+   */
+  static async ensureSchema() {
+    if (this._schemaReady) return;
+
+    const [orderColumn] = await db.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'longitudinal_clinic_types'
+          AND COLUMN_NAME = 'display_order'`
+    );
+    if (orderColumn.length === 0) {
+      await db.query(
+        'ALTER TABLE longitudinal_clinic_types ADD COLUMN display_order INT NULL AFTER clinic_name'
+      );
+    }
+
+    // Backfill a position for any clinic that has none yet, per programme, in
+    // creation order so the seeded defaults keep their published order.
+    const [unordered] = await db.query(
+      'SELECT id, program_id FROM longitudinal_clinic_types WHERE display_order IS NULL ORDER BY program_id ASC, id ASC'
+    );
+    const nextByProgram = new Map();
+    for (const row of unordered) {
+      const program = Number(row.program_id);
+      if (!nextByProgram.has(program)) {
+        const [maxRows] = await db.query(
+          'SELECT COALESCE(MAX(display_order), 0) AS max_order FROM longitudinal_clinic_types WHERE program_id = ?',
+          [program]
+        );
+        nextByProgram.set(program, Number(maxRows[0]?.max_order) || 0);
+      }
+      const next = nextByProgram.get(program) + 1;
+      await db.query('UPDATE longitudinal_clinic_types SET display_order = ? WHERE id = ?', [next, row.id]);
+      nextByProgram.set(program, next);
+    }
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS primary_care_absences (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        program_id BIGINT UNSIGNED NOT NULL,
+        cycle_id BIGINT UNSIGNED NULL,
+        daily_header_id BIGINT UNSIGNED NULL,
+        day_of_week VARCHAR(20) NOT NULL,
+        absence_date DATE NULL,
+        person_type ENUM('RESIDENT','FACULTY') NOT NULL,
+        resident_id BIGINT UNSIGNED NULL,
+        faculty_id BIGINT UNSIGNED NULL,
+        person_name VARCHAR(200) NOT NULL,
+        leave_type VARCHAR(40) NOT NULL DEFAULT 'OTHER_LEAVE',
+        coverage_notes VARCHAR(255) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_primary_care_absences_program_day (program_id, day_of_week),
+        KEY idx_primary_care_absences_header (daily_header_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // The numbered clinic columns of the CCC grid. A row per column position,
+    // with `clinic_number` doubling as the slot key. `label` may be null, in
+    // which case the column renders as "Clinic N". A hidden sentinel row at
+    // clinic_number 0 marks a programme whose defaults have been materialised,
+    // so removing a default column is never undone by a later read.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS primary_care_clinic_columns (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        program_id BIGINT UNSIGNED NOT NULL,
+        clinic_number INT NOT NULL,
+        label VARCHAR(120) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_primary_care_clinic_columns_program_number (program_id, clinic_number)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    this._schemaReady = true;
+  }
+
   static async getClinicTypes(programId, { includeInactive = false } = {}) {
+    await this.ensureSchema();
     let query = `
-      SELECT id, program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active
+      SELECT id, program_id, clinic_code, clinic_name, display_order, default_day_of_week, start_time, end_time, requires_release_letter, is_active
       FROM longitudinal_clinic_types
       WHERE program_id = ?
     `;
@@ -88,7 +230,7 @@ class LongitudinalService {
     if (!includeInactive) {
       query += ' AND is_active = 1';
     }
-    query += ' ORDER BY clinic_name ASC';
+    query += ' ORDER BY (display_order IS NULL) ASC, display_order ASC, clinic_name ASC';
     const [rows] = await db.query(query, params);
     return rows;
   }
@@ -159,14 +301,22 @@ class LongitudinalService {
     } else {
       const baseCode = deriveClinicCode(fields.clinic_code || clinicName);
       const code = await this.ensureUniqueClinicCode(programId, baseCode);
+      // A new clinic takes the next free column position, so it is appended to
+      // the matrix rather than landing in the middle of the existing columns.
+      const [maxRows] = await db.query(
+        'SELECT COALESCE(MAX(display_order), 0) AS max_order FROM longitudinal_clinic_types WHERE program_id = ?',
+        [programId]
+      );
+      const displayOrder = (Number(maxRows[0]?.max_order) || 0) + 1;
       const [result] = await db.query(
         `INSERT INTO longitudinal_clinic_types
-           (program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+           (program_id, clinic_code, clinic_name, display_order, default_day_of_week, start_time, end_time, requires_release_letter, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [
           programId,
           code,
           fields.clinic_name,
+          displayOrder,
           fields.default_day_of_week || null,
           fields.start_time || null,
           fields.end_time || null,
@@ -177,7 +327,7 @@ class LongitudinalService {
     }
 
     const [rows] = await db.query(
-      `SELECT id, program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active
+      `SELECT id, program_id, clinic_code, clinic_name, display_order, default_day_of_week, start_time, end_time, requires_release_letter, is_active
        FROM longitudinal_clinic_types WHERE id = ?`,
       [clinicId]
     );
@@ -202,7 +352,7 @@ class LongitudinalService {
   /** The `longitudinal_clinic_types` row for an id, scoped to one programme. */
   static async findClinicType(clinicTypeId, programId) {
     const [rows] = await db.query(
-      `SELECT id, program_id, clinic_code, clinic_name, default_day_of_week, start_time, end_time, requires_release_letter, is_active
+      `SELECT id, program_id, clinic_code, clinic_name, display_order, default_day_of_week, start_time, end_time, requires_release_letter, is_active
        FROM longitudinal_clinic_types
        WHERE id = ? AND program_id = ?`,
       [clinicTypeId, programId]
@@ -809,7 +959,117 @@ class LongitudinalService {
    * @param {object} [options]
    * @param {number|string} [options.cycleId] - Defaults to the latest cycle.
    */
+  /**
+   * The numbered clinic columns of the CCC grid, e.g. `Clinic 1` .. `Clinic 12`.
+   *
+   * A programme with no columns yet gets the default ten on first read. Columns
+   * are never renumbered: `clinic_number` is the stable slot key, so renaming a
+   * column never moves its slot data and adding or deleting one never shifts the
+   * others.
+   */
+  static async getMatrixColumns(programId) {
+    await this.ensureClinicColumns(programId);
+    const [rows] = await db.query(
+      `SELECT clinic_number, label FROM primary_care_clinic_columns
+        WHERE program_id = ? AND clinic_number > 0
+        ORDER BY clinic_number ASC`,
+      [programId]
+    );
+    return rows;
+  }
+
+  /**
+   * Materialise the default `Clinic 1..N` columns once per programme.
+   *
+   * Guarded by a sentinel row at `clinic_number = 0`, so the defaults are created
+   * exactly once — deleting one later stays deleted rather than being resurrected
+   * on the next read.
+   */
+  static async ensureClinicColumns(programId) {
+    const [flag] = await db.query(
+      'SELECT 1 FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_number = 0 LIMIT 1',
+      [programId]
+    );
+    if (flag.length > 0) return;
+    const params = [];
+    const values = [];
+    for (let number = 0; number <= DEFAULT_CLINIC_COLUMN_COUNT; number += 1) {
+      params.push(programId, number);
+      values.push('(?, ?)');
+    }
+    await db.query(
+      `INSERT IGNORE INTO primary_care_clinic_columns (program_id, clinic_number) VALUES ${values.join(', ')}`,
+      params
+    );
+  }
+
+  /**
+   * Append a new column (`Clinic N+1`) at the end of the grid.
+   *
+   * Returns the full column list afterwards so the caller can refresh its grid
+   * from one response.
+   */
+  static async addClinicColumn(programId) {
+    await this.ensureClinicColumns(programId);
+    const [maxRows] = await db.query(
+      'SELECT MAX(clinic_number) AS max_number FROM primary_care_clinic_columns WHERE program_id = ?',
+      [programId]
+    );
+    const next = (Number(maxRows[0]?.max_number) || DEFAULT_CLINIC_COLUMN_COUNT) + 1;
+    if (next > MAX_CLINIC_COLUMN_COUNT) {
+      const error = new Error(`A CCC grid can hold at most ${MAX_CLINIC_COLUMN_COUNT} clinic columns.`);
+      error.statusCode = 400;
+      throw error;
+    }
+    await db.query(
+      'INSERT INTO primary_care_clinic_columns (program_id, clinic_number) VALUES (?, ?)',
+      [programId, next]
+    );
+    return this.getMatrixColumns(programId);
+  }
+
+  /** Rename a clinic column's label. An empty label reverts to "Clinic N". */
+  static async renameClinicColumn(programId, clinicNumber, label) {
+    const number = Number(clinicNumber);
+    if (!Number.isInteger(number) || number < 1 || number > MAX_CLINIC_COLUMN_COUNT) {
+      const error = new Error('clinic_number must be a whole number between 1 and 99.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const [rows] = await db.query(
+      'SELECT 1 FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_number = ? AND clinic_number > 0 LIMIT 1',
+      [programId, number]
+    );
+    if (rows.length === 0) {
+      const error = new Error('clinic column not found.');
+      error.statusCode = 404;
+      throw error;
+    }
+    const clean = String(label ?? '').trim().slice(0, 120) || null;
+    await db.query(
+      'UPDATE primary_care_clinic_columns SET label = ? WHERE program_id = ? AND clinic_number = ?',
+      [clean, programId, number]
+    );
+    return this.getMatrixColumns(programId);
+  }
+
+  /** Remove a clinic column from the grid. Its historical slot rows are kept. */
+  static async deleteClinicColumn(programId, clinicNumber) {
+    const number = Number(clinicNumber);
+    if (!Number.isInteger(number) || number < 1 || number > MAX_CLINIC_COLUMN_COUNT) {
+      const error = new Error('clinic_number must be a whole number between 1 and 99.');
+      error.statusCode = 400;
+      throw error;
+    }
+    await db.query(
+      'DELETE FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_number = ?',
+      [programId, number]
+    );
+    return this.getMatrixColumns(programId);
+  }
+
   static async getCycleSchedule(programId, options = {}) {
+    await this.ensureSchema();
     const { cycleId } = options;
     let cycle = null;
     if (cycleId) {
@@ -852,6 +1112,16 @@ class LongitudinalService {
       [cycle.id, ...CCC_DAYS]
     );
 
+    // The grid needs a slot for every clinic column, so a programme that has
+    // added columns beyond the defaults still gets a cell to write into. Leaves
+    // is not a slot, so the count is the columns themselves.
+    const columns = await this.getMatrixColumns(programId);
+    const maxClinicNumber = columns.reduce(
+      (highest, column) => Math.max(highest, column.clinic_number),
+      0
+    );
+    const requiredSlotCount = Math.max(DEFAULT_CLINIC_COLUMN_COUNT, maxClinicNumber);
+
     const allSlots = [];
     const headerIds = [];
     for (const header of headers) {
@@ -860,10 +1130,10 @@ class LongitudinalService {
         'SELECT * FROM primary_care_clinic_slots WHERE daily_header_id = ? ORDER BY clinic_number',
         [header.id]
       );
-      if (slots.length < CCC_SLOT_COUNT) {
+      if (slots.length < requiredSlotCount) {
         const inserts = [];
         const existingNumbers = new Set(slots.map((slot) => slot.clinic_number));
-        for (let i = 1; i <= CCC_SLOT_COUNT; i += 1) {
+        for (let i = 1; i <= requiredSlotCount; i += 1) {
           if (!existingNumbers.has(i)) inserts.push([header.id, i, null, null, null, null]);
         }
         if (inserts.length > 0) {
@@ -892,7 +1162,157 @@ class LongitudinalService {
       backupsByDay[backup.day_of_week].push(backup);
     }
 
-    return { cycle, dailyHeaders: headers, slots: allSlots, backups: backupsByDay };
+    // The Leaves column reads its badge summary from the absence registry; the
+    // rows are returned with the rest of the cycle schedule so the grid needs a
+    // single request.
+    const [absenceRows] = await db.query(
+      `SELECT * FROM primary_care_absences
+        WHERE program_id = ? AND (cycle_id = ? OR cycle_id IS NULL)
+        ORDER BY day_of_week ASC, person_type ASC, person_name ASC`,
+      [programId, cycle.id]
+    );
+    const absences = absenceRows.map((row) => ({ ...row, absence_date: toCalendarDate(row.absence_date) }));
+
+    return { cycle, dailyHeaders: headers, slots: allSlots, backups: backupsByDay, absences, columns };
+  }
+
+  /**
+   * The absence / leave registry for a programme's CCC week.
+   *
+   * One row per person absent on a day, resident or faculty. Scoping by cycle
+   * keeps two weeks' absences apart; `cycleId` may be omitted for a programme-wide
+   * read.
+   */
+  static async getCycleAbsences(programId, cycleId = null) {
+    await this.ensureSchema();
+    const params = [programId];
+    let query = 'SELECT * FROM primary_care_absences WHERE program_id = ?';
+    if (cycleId) {
+      query += ' AND (cycle_id = ? OR cycle_id IS NULL)';
+      params.push(cycleId);
+    }
+    query += ' ORDER BY day_of_week ASC, person_type ASC, person_name ASC';
+    const [rows] = await db.query(query, params);
+    return rows.map((row) => ({ ...row, absence_date: toCalendarDate(row.absence_date) }));
+  }
+
+  /**
+   * Replace one CCC day's absences — the write behind the Leaves column.
+   *
+   * The whole day is rewritten (delete-then-insert) so the modal's selection is
+   * exactly what is stored: removing a name drops it, adding one records it, and
+   * the leave reason applies to the batch. Resident absences are also mirrored
+   * into `resident_attendance_logs` (marked with {@link CCC_LEAVE_NOTE}), which is
+   * the canonical attendance record; faculty have no such table, so their rows
+   * live only in the registry.
+   *
+   * @param {number} programId
+   * @param {object} data
+   * @param {number} [data.cycle_id]
+   * @param {string} data.day_of_week
+   * @param {string} [data.leave_type]
+   * @param {string} [data.coverage_notes]
+   * @param {{resident_id?:number, resident_name?:string, leave_type?:string}[]} [data.residents]
+   * @param {{faculty_id?:number, faculty_name?:string, leave_type?:string}[]} [data.faculty]
+   */
+  static async updateDayAbsences(programId, data = {}) {
+    await this.ensureSchema();
+    const program = Number(programId);
+    if (!Number.isInteger(program) || program <= 0) {
+      const error = new Error('program_id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const dayOfWeek = String(data.day_of_week ?? '').trim();
+    if (!dayOfWeek) {
+      const error = new Error('day_of_week is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const cycleId = data.cycle_id ? Number(data.cycle_id) : null;
+    const defaultType = ABSENCE_LEAVE_TYPES.includes(data.leave_type) ? data.leave_type : 'OTHER_LEAVE';
+    const coverageNotes = data.coverage_notes ? String(data.coverage_notes).slice(0, 255) : null;
+    const residents = Array.isArray(data.residents) ? data.residents : [];
+    const faculty = Array.isArray(data.faculty) ? data.faculty : [];
+
+    const header = await this.resolveDailyHeader(program, cycleId, dayOfWeek);
+    const resolvedCycleId = header?.cycle_id ?? cycleId;
+
+    // The day's calendar date, for the attendance mirror. The CCC week starts on
+    // the cycle's `start_date`; the CCC days run Sunday..Thursday.
+    let absenceDate = null;
+    if (resolvedCycleId) {
+      const [cycleRows] = await db.query('SELECT start_date FROM primary_care_cycles WHERE id = ?', [resolvedCycleId]);
+      absenceDate = dateForWeekday(cycleRows[0]?.start_date, cccWeekdayIndex(dayOfWeek));
+    }
+
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      if (resolvedCycleId) {
+        await connection.query(
+          'DELETE FROM primary_care_absences WHERE program_id = ? AND cycle_id = ? AND day_of_week = ?',
+          [program, resolvedCycleId, dayOfWeek]
+        );
+      } else {
+        await connection.query(
+          'DELETE FROM primary_care_absences WHERE program_id = ? AND cycle_id IS NULL AND day_of_week = ?',
+          [program, dayOfWeek]
+        );
+      }
+
+      for (const person of residents) {
+        const name = formatResidentName(person.resident_name ?? person.name);
+        if (!name) continue;
+        const leaveType = ABSENCE_LEAVE_TYPES.includes(person.leave_type) ? person.leave_type : defaultType;
+        const residentId = person.resident_id ? Number(person.resident_id) : null;
+        await connection.query(
+          `INSERT INTO primary_care_absences
+             (program_id, cycle_id, daily_header_id, day_of_week, absence_date, person_type, resident_id, person_name, leave_type, coverage_notes)
+           VALUES (?, ?, ?, ?, ?, 'RESIDENT', ?, ?, ?, ?)`,
+          [program, resolvedCycleId, header?.id ?? null, dayOfWeek, absenceDate, residentId, name, leaveType, coverageNotes]
+        );
+
+        // Mirror into the canonical attendance log. Only rows this feature owns
+        // are replaced, so a manually logged shift is never touched.
+        if (residentId && absenceDate) {
+          await connection.query(
+            'DELETE FROM resident_attendance_logs WHERE resident_id = ? AND shift_date = ? AND notes = ?',
+            [residentId, absenceDate, CCC_LEAVE_NOTE]
+          );
+          await connection.query(
+            `INSERT INTO resident_attendance_logs
+               (resident_id, shift_date, attendance_status, other_leave_specify, approval_status, notes)
+             VALUES (?, ?, ?, ?, 'APPROVED', ?)`,
+            [residentId, absenceDate, leaveType, coverageNotes, CCC_LEAVE_NOTE]
+          );
+        }
+      }
+
+      for (const person of faculty) {
+        const name = formatFacultyName(person.faculty_name ?? person.name);
+        if (!name) continue;
+        const leaveType = ABSENCE_LEAVE_TYPES.includes(person.leave_type) ? person.leave_type : defaultType;
+        const facultyId = person.faculty_id ? Number(person.faculty_id) : null;
+        await connection.query(
+          `INSERT INTO primary_care_absences
+             (program_id, cycle_id, daily_header_id, day_of_week, absence_date, person_type, faculty_id, person_name, leave_type, coverage_notes)
+           VALUES (?, ?, ?, ?, ?, 'FACULTY', ?, ?, ?, ?)`,
+          [program, resolvedCycleId, header?.id ?? null, dayOfWeek, absenceDate, facultyId, name, leaveType, coverageNotes]
+        );
+      }
+
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    return this.getCycleAbsences(program, resolvedCycleId);
   }
 
   /**

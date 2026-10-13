@@ -255,6 +255,116 @@ class LongitudinalController {
     }
   }
 
+  /**
+   * `GET /longitudinal/cycle-schedule/absences`
+   *
+   * The leave registry for a cycle: one row per resident or faculty member
+   * absent on a CCC day, feeding the Leaves column's badge summary.
+   */
+  static async getCycleAbsences(req, res) {
+    try {
+      const { program_id, cycle_id } = req.query;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
+      }
+      const data = await LongitudinalService.getCycleAbsences(program_id, cycle_id || null);
+      return res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `POST /longitudinal/cycle-schedule/absences`
+   *
+   * Replace one CCC day's absences from the Leaves column modal. The payload
+   * carries the selected residents and faculty plus the leave reason and an
+   * optional coverage note; resident absences are mirrored into the attendance
+   * log server-side.
+   */
+  static async updateDayAbsences(req, res) {
+    try {
+      const { program_id, day_of_week } = req.body || {};
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      if (!day_of_week) {
+        return res.status(400).json({ success: false, error: 'Missing required field: day_of_week' });
+      }
+      const data = await LongitudinalService.updateDayAbsences(program_id, req.body);
+      return res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `GET /longitudinal/cycle-schedule/columns`
+   *
+   * The numbered clinic columns of the CCC grid (`Clinic 1..N`), plus any
+   * coordinator-set labels. Also embedded in every cycle-schedule response.
+   */
+  static async getMatrixColumns(req, res) {
+    try {
+      const { program_id } = req.query;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
+      }
+      const data = await LongitudinalService.getMatrixColumns(program_id);
+      return res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /** `POST /longitudinal/cycle-schedule/columns` — append a clinic column. */
+  static async addClinicColumn(req, res) {
+    try {
+      const { program_id } = req.body || {};
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      const data = await LongitudinalService.addClinicColumn(program_id);
+      return res.status(201).json({ success: true, count: data.length, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /** `PUT /longitudinal/cycle-schedule/columns/:clinic_number` — rename a column. */
+  static async renameClinicColumn(req, res) {
+    try {
+      const { program_id, label } = req.body || {};
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      const data = await LongitudinalService.renameClinicColumn(program_id, req.params.clinic_number, label ?? '');
+      return res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /** `DELETE /longitudinal/cycle-schedule/columns/:clinic_number` — remove a column. */
+  static async deleteClinicColumn(req, res) {
+    try {
+      const { program_id } = req.query;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
+      }
+      const data = await LongitudinalService.deleteClinicColumn(program_id, req.params.clinic_number);
+      return res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async updateBackupFaculty(req, res) {
     try {
       const { program_id, day_of_week } = req.body;

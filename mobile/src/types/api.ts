@@ -566,6 +566,13 @@ export interface LongitudinalClinicType {
   program_id: number;
   clinic_code: string;
   clinic_name: string;
+  /**
+   * Stable matrix column position. Each active clinic maps to one clinic column
+   * and the slot stored at `primary_care_clinic_slots.clinic_number` equal to
+   * this order, so renaming a clinic never moves its column and deleting one
+   * never re-numbers the rest.
+   */
+  display_order?: number | null;
   default_day_of_week: string | null;
   start_time: string | null;
   end_time: string | null;
@@ -787,11 +794,58 @@ export interface PrimaryCareBackupFaculty {
   priority_order: number;
 }
 
+/**
+ * One person absent from a CCC day, resident or faculty. Written by the Leaves
+ * column and surfaced as that day's leave badge. Resident absences are mirrored
+ * into the attendance log server-side.
+ */
+export interface PrimaryCareAbsence {
+  id: number;
+  program_id: number;
+  cycle_id: number | null;
+  daily_header_id: number | null;
+  day_of_week: string;
+  /** Plain `YYYY-MM-DD`, normalised server-side; `null` when the cycle is unknown. */
+  absence_date: string | null;
+  person_type: 'RESIDENT' | 'FACULTY';
+  resident_id: number | null;
+  faculty_id: number | null;
+  person_name: string;
+  leave_type: string;
+  coverage_notes: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** Payload for `POST /longitudinal/cycle-schedule/absences`. */
+export interface PrimaryCareAbsenceInput {
+  program_id: number;
+  cycle_id?: number | null;
+  day_of_week: string;
+  leave_type?: string;
+  coverage_notes?: string | null;
+  residents?: { resident_id?: number; resident_name?: string; leave_type?: string }[];
+  faculty?: { faculty_id?: number; faculty_name?: string; leave_type?: string }[];
+}
+
+/**
+ * One numbered clinic column of the CCC grid (`Clinic 1..N`). `clinic_number` is
+ * also the `PrimaryCareClinicSlot.clinic_number` it reads and writes; `label` is
+ * the coordinator-set name, or null to render as "Clinic <number>".
+ */
+export interface PrimaryCareMatrixColumn {
+  clinic_number: number;
+  label: string | null;
+}
+
 export interface PrimaryCareCycleSchedule {
   cycle: PrimaryCareCycle;
   dailyHeaders: PrimaryCareDailyHeader[];
   slots: PrimaryCareClinicSlot[];
   backups: Record<string, PrimaryCareBackupFaculty[]>;
+  absences?: PrimaryCareAbsence[];
+  /** The numbered clinic columns of the grid. */
+  columns?: PrimaryCareMatrixColumn[];
 }
 
 export interface RandomizeSupervisorsResult {

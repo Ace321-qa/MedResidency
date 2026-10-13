@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Minus, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react-native';
+import { Check, Minus, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react-native';
 
 import {
   AppHeader,
@@ -22,16 +22,16 @@ import {
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import {
-  createClinicType,
-  deleteClinicType,
-  fetchClinicTypes,
+  addClinicColumn,
+  deleteClinicColumn,
   fetchCycleSchedule,
   fetchFacultySupervisors,
   randomizeSupervisors,
+  renameClinicColumn,
   updateBackupFaculty,
-  updateClinicType,
   updateCycleHeader,
   updateCycleSlot,
+  updateDayAbsences,
   createFacultySupervisor,
   updateFacultySupervisor,
   deleteFacultySupervisor,
@@ -40,16 +40,12 @@ import { fetchResidentList } from '../../../services/residents';
 import { uploadFacultySupervisors } from '../../../services/excelTemplates';
 import { CCC_SCHEDULE_ROWS, dayOfWeekMatches } from '../../../utils/cccMatrix';
 import { formatPgy } from '../../../utils/insights';
-import {
-  PRIMARY_CARE_CLINIC_CATALOG,
-  clinicNameKey,
-  type ClinicCatalogEntry,
-} from '../../../utils/primaryCareClinics';
 import { residentFullName } from '../../../utils/residents';
 import { colors, radius, spacing } from '../../../theme';
 import { goBack } from '../../../navigation/back';
+import { LEAVE_TYPES } from '../../../types/api';
 import type {
-  LongitudinalClinicType,
+  PrimaryCareAbsence,
   PrimaryCareClinicSlot,
   PrimaryCareCycle,
   PrimaryCareDailyHeader,
@@ -58,10 +54,12 @@ import type {
 /**
  * The CCC weekly schedule.
  *
- * A five-day by twelve-clinic grid is wider than any phone, so the whole table
- * scrolls horizontally while the day column stays pinned. Every cell is a
- * single tap away from editing; the cycle header, per-day boundaries and the
- * backup pools sit below it.
+ * A five-day grid of numbered clinic columns is wider than any phone, so the
+ * whole table scrolls horizontally while the day column stays pinned. The clinic
+ * columns are numbered positions a coordinator can add to, rename or remove;
+ * the final Leaves column records who is away each day. Every cell is a single
+ * tap away from editing; the cycle header, per-day boundaries and the backup
+ * pools sit below it.
  */
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'] as const;
@@ -90,24 +88,72 @@ interface MatrixColumn {
   key: string;
   title: string;
   subtitle: string | null;
+  /**
+   * Which `primary_care_clinic_slots.clinic_number` this column reads and
+   * writes. `0`/unused for the Leaves column, which is not a clinic slot.
+   */
   clinicNumber: number;
   special: boolean;
+  /** The single Leaves column, backed by the absence registry. */
+  isLeaves: boolean;
 }
 
-const CLINIC_COLUMNS: MatrixColumn[] = Array.from({ length: 10 }, (_, index) => ({
-  key: `clinic-${index + 1}`,
-  title: `Clinic ${index + 1}`,
-  subtitle: null,
-  clinicNumber: index + 1,
-  special: false,
+/**
+ * Build the matrix columns from the numbered clinic columns the server holds.
+ *
+ * The grid's clinic columns are numbered positions (`Clinic 1..N`), each with an
+ * optional coordinator-set label; slot data lives under `clinic_number`, so
+ * renaming never moves a column's data and adding/removing never shifts others.
+ * The Leaves column is pinned to the end and is not a slot.
+ */
+function buildMatrixColumns(raw: { clinic_number: number; label: string | null }[]): MatrixColumn[] {
+  const columns: MatrixColumn[] = (raw ?? [])
+    .filter((entry) => entry.clinic_number >= 1)
+    .sort((a, b) => a.clinic_number - b.clinic_number)
+    .map((entry) => ({
+      key: `clinic-${entry.clinic_number}`,
+      clinicNumber: entry.clinic_number,
+      title: entry.label?.trim() || `Clinic ${entry.clinic_number}`,
+      subtitle: null,
+      special: false,
+      isLeaves: false,
+    }));
+  columns.push({
+    key: 'leaves',
+    clinicNumber: 0,
+    title: 'Leaves',
+    subtitle: 'Away',
+    special: true,
+    isLeaves: true,
+  });
+  return columns;
+}
+
+/** The default label a column has before a coordinator renames it. */
+function defaultColumnLabel(clinicNumber: number): string {
+  return `Clinic ${clinicNumber}`;
+}
+
+/** Human label for a `leave_type` enum, e.g. `SICK_LEAVE` -> "Sick Leave". */
+function humanizeLeaveType(value: string): string {
+  return value
+    .toLowerCase()
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+const LEAVE_TYPE_OPTIONS: SelectOption<string>[] = LEAVE_TYPES.map((type) => ({
+  value: type,
+  label: humanizeLeaveType(type),
 }));
 
-const SPECIAL_COLUMNS: MatrixColumn[] = [
-  { key: 'wbc', title: 'WBC', subtitle: 'Well Baby Clinic', clinicNumber: 11, special: true },
-  { key: 'leaves', title: 'Leaves', subtitle: 'Away', clinicNumber: 12, special: true },
-];
-
-const MATRIX_COLUMNS: MatrixColumn[] = [...CLINIC_COLUMNS, ...SPECIAL_COLUMNS];
+/** The user-facing name for a stored leave type, falling back to the raw value. */
+function leaveTypeLabel(value: string | null | undefined): string {
+  if (!value) return 'Leave';
+  return humanizeLeaveType(value);
+}
 
 const BACKUP_POOL_MIN = 3;
 const BACKUP_POOL_MAX = 4;
@@ -177,44 +223,7 @@ function withDoctorTitle(name: string | null | undefined): string {
   return base ? `Dr. ${base}` : '';
 }
 
-/** A catalog entry's supporting line: the session, and whether a letter is needed. */
-function describeCatalogEntry(entry: ClinicCatalogEntry): string {
-  const parts: string[] = [];
-  if (entry.defaultDay) {
-    parts.push(
-      `${titleCaseDay(entry.defaultDay)}${
-        entry.startTime && entry.endTime ? ` ${entry.startTime}–${entry.endTime}` : ''
-      }`,
-    );
-  } else if (entry.startTime && entry.endTime) {
-    parts.push(`Any day ${entry.startTime}–${entry.endTime}`);
-  } else {
-    parts.push('No fixed day');
-  }
-  if (entry.requiresReleaseLetter) parts.push('Release letter required');
-  return parts.join(' · ');
-}
 
-/** The one-line summary shown under a catalogued clinic's name. */
-function describeClinicType(clinic: LongitudinalClinicType): string {
-  const parts: string[] = [clinic.clinic_code];
-  if (clinic.default_day_of_week) {
-    parts.push(
-      `${titleCaseDay(clinic.default_day_of_week)}${
-        clinic.start_time && clinic.end_time ? ` ${clinic.start_time.slice(0, 5)}–${clinic.end_time.slice(0, 5)}` : ''
-      }`,
-    );
-  } else {
-    parts.push('No fixed day');
-  }
-  if (clinic.requires_release_letter === 1) parts.push('Release letter');
-  return parts.join(' · ');
-}
-
-function titleCaseDay(day: string): string {
-  const lower = day.toLowerCase();
-  return lower.charAt(0).toUpperCase() + lower.slice(1);
-}
 
 /**
  * Resolve whatever spelling the backend holds — "SUNDAY", "Sun", "Sunday" —
@@ -263,17 +272,6 @@ export default function LongitudinalMatrixScreen() {
     () => fetchResidentList({ programId, limit: 200 }),
     [programId],
   );
-  /**
-   * The programme's clinic catalog, including inactive rows.
-   *
-   * Inactive rows still count as "known": a clinic moved out of the default pool
-   * must not be offered a second time by the add sheet, because the server would
-   * only reactivate the row it already has.
-   */
-  const clinicTypes = useApiResource(
-    () => fetchClinicTypes(programId, { includeInactive: true }),
-    [programId],
-  );
 
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -311,15 +309,21 @@ export default function LongitudinalMatrixScreen() {
   const [deletingFaculty, setDeletingFaculty] = useState(false);
   const [facultyDeleteTarget, setFacultyDeleteTarget] = useState<any | null>(null);
 
-  const [addClinicOpen, setAddClinicOpen] = useState(false);
-  const [addClinicQuery, setAddClinicQuery] = useState('');
-  const [customClinicName, setCustomClinicName] = useState('');
-  const [addingClinic, setAddingClinic] = useState(false);
-  const [renameTarget, setRenameTarget] = useState<LongitudinalClinicType | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-  const [savingClinicRename, setSavingClinicRename] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<LongitudinalClinicType | null>(null);
-  const [deletingClinic, setDeletingClinic] = useState(false);
+  /** The numbered clinic-column editor: rename a column's label, or remove it. */
+  const [columnManage, setColumnManage] = useState<MatrixColumn | null>(null);
+  const [columnLabelValue, setColumnLabelValue] = useState('');
+  const [savingColumn, setSavingColumn] = useState(false);
+  const [removingColumn, setRemovingColumn] = useState(false);
+
+  /** The Leaves column editor: one CCC day's resident and faculty absences. */
+  const [leavesEditDay, setLeavesEditDay] = useState<DayName | null>(null);
+  const [leavesLeaveType, setLeavesLeaveType] = useState<string>('SICK_LEAVE');
+  const [leavesNotes, setLeavesNotes] = useState('');
+  const [leavesResidentNames, setLeavesResidentNames] = useState<string[]>([]);
+  const [leavesFacultyNames, setLeavesFacultyNames] = useState<string[]>([]);
+  const [leavesResidentQuery, setLeavesResidentQuery] = useState('');
+  const [leavesFacultyQuery, setLeavesFacultyQuery] = useState('');
+  const [savingLeaves, setSavingLeaves] = useState(false);
 
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
@@ -354,6 +358,17 @@ export default function LongitudinalMatrixScreen() {
       options.push({ value: name, label: name });
     }
     return options;
+  }, [residentsResource.data]);
+
+  /** Title-free display name -> resident id, so absences can be written back. */
+  const residentIdByName = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const resident of residentsResource.data ?? []) {
+      const name = residentFullName(resident).replace(/^Dr\.?\s+/i, '').trim();
+      if (!name || map.has(name)) continue;
+      map.set(name, resident.resident_id);
+    }
+    return map;
   }, [residentsResource.data]);
 
   function headerForDay(day: DayName): PrimaryCareDailyHeader | null {
@@ -533,6 +548,93 @@ export default function LongitudinalMatrixScreen() {
       setActionError(error instanceof Error ? error.message : 'Could not save the clinic slot.');
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Open the Leaves editor for a day, seeding it from the recorded absences so a
+   * coordinator sees and can amend exactly what is already there.
+   */
+  function openLeaves(day: DayName) {
+    const rows = absencesForDay(day);
+    setLeavesResidentNames(
+      rows.filter((row) => row.person_type === 'RESIDENT').map((row) => row.person_name.replace(/^Dr\.?\s+/i, '').trim()),
+    );
+    setLeavesFacultyNames(
+      rows.filter((row) => row.person_type === 'FACULTY').map((row) => row.person_name.trim()),
+    );
+    const firstType = rows.find((row) => row.leave_type)?.leave_type;
+    setLeavesLeaveType(firstType || 'SICK_LEAVE');
+    setLeavesNotes(rows.find((row) => row.coverage_notes)?.coverage_notes ?? '');
+    setLeavesResidentQuery('');
+    setLeavesFacultyQuery('');
+    setLeavesEditDay(day);
+    setActionError(null);
+    setFeedback(null);
+  }
+
+  function closeLeaves() {
+    if (savingLeaves) return;
+    setLeavesEditDay(null);
+  }
+
+  function toggleLeavesResident(name: string) {
+    setLeavesResidentNames((previous) =>
+      previous.includes(name) ? previous.filter((entry) => entry !== name) : [...previous, name],
+    );
+  }
+
+  function toggleLeavesFaculty(name: string) {
+    setLeavesFacultyNames((previous) =>
+      previous.includes(name) ? previous.filter((entry) => entry !== name) : [...previous, name],
+    );
+  }
+
+  /**
+   * Save the day's Leaves: replace the registry rows for that day and patch the
+   * result into the schedule so the cell and the slot dropdowns update in place.
+   */
+  async function saveLeaves() {
+    if (!programId || !leavesEditDay) return;
+    setSavingLeaves(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      const day = leavesEditDay;
+      const updated = await updateDayAbsences({
+        program_id: programId,
+        cycle_id: cycle?.id ?? null,
+        day_of_week: day,
+        leave_type: leavesLeaveType,
+        coverage_notes: leavesNotes.trim() || null,
+        residents: leavesResidentNames.map((name) => ({
+          resident_id: residentIdByName.get(name),
+          resident_name: name,
+        })),
+        faculty: leavesFacultyNames.map((name) => ({
+          faculty_id: facultyIdByName.get(name),
+          faculty_name: name,
+        })),
+      });
+      const weekday = DAYS.indexOf(day);
+      schedule.setData((current) =>
+        current
+          ? {
+              ...current,
+              absences: [
+                ...(current.absences ?? []).filter((row) => !dayOfWeekMatches(row.day_of_week, weekday)),
+                ...updated,
+              ],
+            }
+          : current,
+      );
+      const total = updated.length;
+      setFeedback(total > 0 ? `${day} leave saved: ${total} person(s) away.` : `${day} leave cleared.`);
+      setLeavesEditDay(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not save the leave record.');
+    } finally {
+      setSavingLeaves(false);
     }
   }
 
@@ -731,165 +833,126 @@ export default function LongitudinalMatrixScreen() {
     return map;
   }, [residentsResource.data]);
 
-  /** The clinics selectable right now; inactive rows stay out of the catalog. */
-  const activeClinics = useMemo(
-    () => (clinicTypes.data ?? []).filter((clinic) => clinic.is_active === 1),
-    [clinicTypes.data],
+  /**
+   * The matrix columns: the numbered clinic columns from the schedule, plus the
+   * Leaves column at the end. Recomputed so an add, rename or remove is shown
+   * immediately after a schedule refresh.
+   */
+  const matrixColumns = useMemo(
+    () => buildMatrixColumns(data?.columns ?? []),
+    [data?.columns],
   );
 
-  /** Clinics already on record for the programme, active or not. */
-  const knownClinicKeys = useMemo(
-    () => new Set((clinicTypes.data ?? []).map((clinic) => clinicNameKey(clinic.clinic_name))),
-    [clinicTypes.data],
-  );
+  /** The absences recorded for one CCC day, residents and faculty together. */
+  function absencesForDay(day: DayName): PrimaryCareAbsence[] {
+    const weekday = DAYS.indexOf(day);
+    return (data?.absences ?? []).filter((row) => dayOfWeekMatches(row.day_of_week, weekday));
+  }
+
+  /** Resident names marked away on a day, title-free to match the dropdowns. */
+  function absentResidentNamesForDay(day: DayName): Set<string> {
+    return new Set(
+      absencesForDay(day)
+        .filter((row) => row.person_type === 'RESIDENT')
+        .map((row) => row.person_name.replace(/^Dr\.?\s+/i, '').trim()),
+    );
+  }
+
+  /** Faculty names marked away on a day, kept in their stored `Dr.` form. */
+  function absentFacultyNamesForDay(day: DayName): Set<string> {
+    return new Set(
+      absencesForDay(day)
+        .filter((row) => row.person_type === 'FACULTY')
+        .map((row) => row.person_name.trim()),
+    );
+  }
 
   /**
-   * The catalog entries not already on record.
-   *
-   * A clinic that was removed from the pool is still on record, so it is excluded
-   * here — picking it would only reactivate the row it already has.
+   * The resident dropdown for a day, minus anyone recorded as away that day.
+   * A resident cannot be assigned to a clinic on a day they are absent.
    */
-  const clinicCatalogCandidates = useMemo(
-    () => PRIMARY_CARE_CLINIC_CATALOG.filter((entry) => !knownClinicKeys.has(clinicNameKey(entry.name))),
-    [knownClinicKeys],
-  );
-
-  const clinicQueryNeedle = addClinicQuery.trim().toLowerCase();
-  const visibleClinicCatalog = clinicQueryNeedle
-    ? clinicCatalogCandidates.filter((entry) => entry.name.toLowerCase().includes(clinicQueryNeedle))
-    : clinicCatalogCandidates;
-
-  function openAddClinic() {
-    setAddClinicQuery('');
-    setCustomClinicName('');
-    setAddClinicOpen(true);
-    setActionError(null);
-    setFeedback(null);
+  function residentOptionsForDay(day: DayName): SelectOption<string>[] {
+    const absent = absentResidentNamesForDay(day);
+    if (absent.size === 0) return residentOptions;
+    return residentOptions.filter((option) => option.value === NONE_RESIDENT || !absent.has(option.value));
   }
 
-  function closeAddClinic() {
-    if (addingClinic) return;
-    setAddClinicOpen(false);
+  /** The faculty dropdown for a day, minus anyone recorded as away that day. */
+  function facultyOptionsForDay(day: DayName): SelectOption<string>[] {
+    const absent = absentFacultyNamesForDay(day);
+    if (absent.size === 0) return facultyOptions;
+    return facultyOptions.filter((option) => option.value === NONE_FACULTY || !absent.has(option.value));
   }
 
-  /** Add a clinic and patch it into the catalog so the row appears immediately. */
-  async function addClinic(payload: {
-    clinic_name: string;
-    default_day_of_week?: string | null;
-    start_time?: string | null;
-    end_time?: string | null;
-    requires_release_letter?: number;
-  }) {
+  /** Append a new numbered clinic column at the end of the grid. */
+  async function addMatrixColumn() {
     if (!programId) return;
-    setAddingClinic(true);
+    setSavingColumn(true);
     setActionError(null);
     setFeedback(null);
     try {
-      const created = await createClinicType({ program_id: programId, ...payload });
-      clinicTypes.setData((current) => [
-        ...(current ?? []).filter((clinic) => clinic.id !== created.id),
-        created,
-      ]);
-      setAddClinicOpen(false);
-      setFeedback(`${created.clinic_name} is now available in the clinic catalog.`);
-      clinicTypes.refresh();
+      await addClinicColumn(programId);
+      setFeedback('A new clinic column was added at the end. Tap its header to rename it.');
+      schedule.refresh();
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not add this clinic.');
+      setActionError(error instanceof Error ? error.message : 'Could not add a clinic column.');
     } finally {
-      setAddingClinic(false);
+      setSavingColumn(false);
     }
   }
 
-  function addCatalogClinic(entry: ClinicCatalogEntry) {
-    void addClinic({
-      clinic_name: entry.name,
-      default_day_of_week: entry.defaultDay,
-      start_time: entry.startTime,
-      end_time: entry.endTime,
-      requires_release_letter: entry.requiresReleaseLetter ? 1 : 0,
-    });
-  }
-
-  function addCustomClinic() {
-    const name = customClinicName.trim();
-    if (!name) return;
-    void addClinic({ clinic_name: name });
-  }
-
-  function openRenameClinic(clinic: LongitudinalClinicType) {
-    setRenameTarget(clinic);
-    setRenameValue(clinic.clinic_name);
+  /** Open the rename/remove sheet for one clinic column. */
+  function openColumnManage(column: MatrixColumn) {
+    setColumnManage(column);
+    setColumnLabelValue(
+      column.title === defaultColumnLabel(column.clinicNumber) ? '' : column.title,
+    );
     setActionError(null);
     setFeedback(null);
   }
 
-  function closeRenameClinic() {
-    if (savingClinicRename) return;
-    setRenameTarget(null);
-    setRenameValue('');
+  function closeColumnManage() {
+    if (savingColumn || removingColumn) return;
+    setColumnManage(null);
   }
 
-  /** Rename a clinic and patch the row in place, without a page refresh. */
-  async function saveClinicRename() {
-    if (!renameTarget) return;
-    const name = renameValue.trim();
-    if (!name) {
-      setActionError('A clinic name is required.');
-      return;
-    }
-    setSavingClinicRename(true);
+  /** Rename the column being edited; an empty label reverts to "Clinic N". */
+  async function saveColumnRename() {
+    if (!programId || !columnManage) return;
+    setSavingColumn(true);
     setActionError(null);
     setFeedback(null);
     try {
-      const updated = await updateClinicType(renameTarget.id, {
-        program_id: programId,
-        clinic_name: name,
-      });
-      clinicTypes.setData((current) =>
-        (current ?? []).map((clinic) => (clinic.id === updated.id ? updated : clinic)),
+      await renameClinicColumn(programId, columnManage.clinicNumber, columnLabelValue.trim());
+      setFeedback(`${columnManage.title} column updated.`);
+      setColumnManage(null);
+      schedule.refresh();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : 'Could not rename this clinic column.',
       );
-      setRenameTarget(null);
-      setRenameValue('');
-      setFeedback(`${updated.clinic_name} was renamed.`);
-      clinicTypes.refresh();
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not rename this clinic.');
     } finally {
-      setSavingClinicRename(false);
+      setSavingColumn(false);
     }
   }
 
-  function askDeleteClinic(clinic: LongitudinalClinicType) {
-    setDeleteTarget(clinic);
-    setActionError(null);
-    setFeedback(null);
-  }
-
-  function closeDeleteClinic() {
-    if (deletingClinic) return;
-    setDeleteTarget(null);
-  }
-
-  /** Soft-delete a clinic, then drop it out of the active catalog in place. */
-  async function removeClinic() {
-    if (!deleteTarget) return;
-    setDeletingClinic(true);
+  /** Remove the column being edited. Its historical slots are preserved. */
+  async function confirmRemoveColumn() {
+    if (!programId || !columnManage) return;
+    setRemovingColumn(true);
     setActionError(null);
     setFeedback(null);
     try {
-      await deleteClinicType(deleteTarget.id, programId);
-      clinicTypes.setData((current) =>
-        (current ?? []).map((clinic) =>
-          clinic.id === deleteTarget.id ? { ...clinic, is_active: 0 } : clinic,
-        ),
-      );
-      setDeleteTarget(null);
-      setFeedback('Clinic removed from the active catalog. Existing history is preserved.');
-      clinicTypes.refresh();
+      await deleteClinicColumn(programId, columnManage.clinicNumber);
+      setFeedback(`${columnManage.title} column removed. Its historical slots are preserved.`);
+      setColumnManage(null);
+      schedule.refresh();
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not remove this clinic.');
+      setActionError(
+        error instanceof Error ? error.message : 'Could not remove this clinic column.',
+      );
     } finally {
-      setDeletingClinic(false);
+      setRemovingColumn(false);
     }
   }
 
@@ -899,9 +962,9 @@ export default function LongitudinalMatrixScreen() {
     <Screen
       onRefresh={() => {
         schedule.refresh();
-        clinicTypes.refresh();
+        facultyResource.refresh();
       }}
-      refreshing={schedule.isRefreshing || clinicTypes.isRefreshing}
+      refreshing={schedule.isRefreshing || facultyResource.isRefreshing}
     >
       <AppHeader
         title="Continuity of Care Clinics (CCC)"
@@ -1008,9 +1071,20 @@ export default function LongitudinalMatrixScreen() {
                 <SectionHeader title="Weekly Clinic Matrix" trailing={`${DAYS.length} days`} />
                 <Text variant="caption" tone="muted">
                   Tap a day&apos;s header to edit its day, shift time, PGY level and In-Charge faculty.
-                  Tap any cell to assign up to two residents and supervising faculty. WBC and Leaves
-                  are the eleventh and twelfth columns.
+                  Tap a clinic cell to assign up to two residents and supervising faculty. The columns
+                  are numbered clinic positions — add one, or tap a column header to rename or remove
+                  it. The final Leaves column records who is away, and anyone marked away is hidden
+                  from that day&apos;s dropdowns.
                 </Text>
+                <Button
+                  label={savingColumn ? 'Adding…' : 'Add clinic column'}
+                  icon={Plus}
+                  variant="outline"
+                  fullWidth={false}
+                  onPress={addMatrixColumn}
+                  disabled={savingColumn}
+                  style={styles.matrixAddColumnButton}
+                />
               </View>
             <ScrollView
               horizontal
@@ -1024,25 +1098,46 @@ export default function LongitudinalMatrixScreen() {
                       Day
                     </Text>
                   </View>
-                  {MATRIX_COLUMNS.map((column) => (
-                    <View
-                      key={column.key}
-                      style={[
-                        styles.colHeader,
-                        styles.headerCell,
-                        column.special ? styles.specialColumn : null,
-                      ]}
-                    >
-                      <Text variant="label" numberOfLines={1} align="center">
-                        {column.title}
-                      </Text>
-                      {column.subtitle ? (
-                        <Text variant="caption" tone="secondary" numberOfLines={1} align="center">
-                          {column.subtitle}
+                  {matrixColumns.map((column) => {
+                    const inner = (
+                      <>
+                        <Text variant="label" numberOfLines={2} align="center">
+                          {column.title}
                         </Text>
-                      ) : null}
-                    </View>
-                  ))}
+                        {column.subtitle ? (
+                          <Text variant="caption" tone="secondary" numberOfLines={1} align="center">
+                            {column.subtitle}
+                          </Text>
+                        ) : null}
+                      </>
+                    );
+                    if (column.isLeaves) {
+                      return (
+                        <View
+                          key={column.key}
+                          style={[styles.colHeader, styles.headerCell, styles.specialColumn]}
+                        >
+                          {inner}
+                        </View>
+                      );
+                    }
+                    return (
+                      <Pressable
+                        key={column.key}
+                        onPress={() => openColumnManage(column)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Manage ${column.title} clinic column`}
+                        accessibilityHint="Opens a sheet to rename or remove this clinic column"
+                        style={({ pressed }) => [
+                          styles.colHeader,
+                          styles.headerCell,
+                          pressed ? styles.cellPressed : null,
+                        ]}
+                      >
+                        {inner}
+                      </Pressable>
+                    );
+                  })}
                 </View>
 
                 {DAYS.map((day) => {
@@ -1085,8 +1180,49 @@ export default function LongitudinalMatrixScreen() {
                         </Text>
                       </Pressable>
 
-                      {MATRIX_COLUMNS.map((column) => {
-                        const slot = slotFor(day, column.clinicNumber);
+                      {matrixColumns.map((column) => {
+                        if (column.isLeaves) {
+                          const dayAbsences = absencesForDay(day);
+                          const awayNames = dayAbsences.map((row) => row.person_name);
+                          const hasAbsences = awayNames.length > 0;
+                          return (
+                            <Pressable
+                              key={column.key}
+                              onPress={() => openLeaves(day)}
+                              accessibilityRole="button"
+                              accessibilityLabel={`${day} Leaves. ${
+                                hasAbsences ? `${awayNames.length} away: ${awayNames.join(', ')}` : 'No one away'
+                              }. Opens the leave editor.`}
+                              style={({ pressed }) => [
+                                styles.cell,
+                                styles.bodyCell,
+                                styles.specialColumn,
+                                pressed ? styles.cellPressed : null,
+                              ]}
+                            >
+                              <Text
+                                variant="bodySmall"
+                                tone={hasAbsences ? 'primary' : 'disabled'}
+                                numberOfLines={1}
+                              >
+                                {hasAbsences ? `${awayNames.length} away` : 'No leave'}
+                              </Text>
+                              {hasAbsences ? (
+                                <Text
+                                  variant="caption"
+                                  tone="secondary"
+                                  numberOfLines={3}
+                                  style={styles.cellFaculty}
+                                >
+                                  {awayNames.join(', ')}
+                                </Text>
+                              ) : null}
+                            </Pressable>
+                          );
+                        }
+
+                        const slot =
+                          column.clinicNumber == null ? null : slotFor(day, column.clinicNumber);
                         const residents = [slot?.resident_1_name, slot?.resident_2_name].filter(
                           (name): name is string => Boolean(name),
                         );
@@ -1100,7 +1236,7 @@ export default function LongitudinalMatrixScreen() {
                                 slot,
                                 day,
                                 columnLabel: column.title,
-                                clinicNumber: column.clinicNumber,
+                                clinicNumber: column.clinicNumber ?? 0,
                                 shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
                                 pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
                               })
@@ -1179,20 +1315,27 @@ export default function LongitudinalMatrixScreen() {
               const pgyLabel = header?.pgy_level || DAY_CONFIG[day].pgy;
               return (
                 <View key={day}>
-                  {MATRIX_COLUMNS.map((column, columnIndex) => {
-                    const slot = slotFor(day, column.clinicNumber);
-                    const residents = [slot?.resident_1_name, slot?.resident_2_name].filter(
-                      (name): name is string => Boolean(name),
-                    );
+                  {matrixColumns.map((column, columnIndex) => {
+                    const isLeaves = column.isLeaves;
+                    const dayAbsences = isLeaves ? absencesForDay(day) : [];
+                    const slot =
+                      column.clinicNumber == null ? null : slotFor(day, column.clinicNumber);
+                    const residents = isLeaves
+                      ? dayAbsences.map((row) => row.person_name)
+                      : [slot?.resident_1_name, slot?.resident_2_name].filter(
+                          (name): name is string => Boolean(name),
+                        );
                     const faculty = withDoctorTitle(slot?.faculty_name);
+                    const facultySummary = isLeaves
+                      ? Array.from(new Set(dayAbsences.map((row) => leaveTypeLabel(row.leave_type)))).join(', ')
+                      : faculty;
                     const inCharge = withDoctorTitle(header?.in_charge_faculty_name);
                     const isSessionStart = columnIndex === 0;
-                    const clinicLabel =
-                      column.key === 'leaves'
-                        ? 'Leaves'
-                        : column.special && column.subtitle
-                          ? column.subtitle
-                          : column.title;
+                    const clinicLabel = isLeaves
+                      ? 'Leaves'
+                      : column.special && column.subtitle
+                        ? column.subtitle
+                        : column.title;
                     return (
                       <View key={column.key} style={styles.rosterRow}>
                         {/* Column 1 is the session block: the day, its PGY badge
@@ -1233,20 +1376,26 @@ export default function LongitudinalMatrixScreen() {
                         )}
                         <Pressable
                           onPress={() =>
-                            openSlot({
-                              slot,
-                              day,
-                              columnLabel: clinicLabel,
-                              clinicNumber: column.clinicNumber,
-                              shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
-                              pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
-                            })
+                            isLeaves
+                              ? openLeaves(day)
+                              : openSlot({
+                                  slot,
+                                  day,
+                                  columnLabel: clinicLabel,
+                                  clinicNumber: column.clinicNumber ?? 0,
+                                  shiftTime: header?.shift_time ?? DAY_CONFIG[day].shift,
+                                  pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
+                                })
                           }
                           accessibilityRole="button"
                           accessibilityLabel={`${day} ${clinicLabel}. ${
                             residents.length ? residents.join(', ') : 'Unassigned'
-                          }${faculty ? `, supervised by ${faculty}` : ''}. Opens the slot editor.`}
-                          accessibilityHint="Opens a sheet to edit residents and supervising faculty"
+                          }${facultySummary ? `, ${facultySummary}` : ''}. Opens the editor.`}
+                          accessibilityHint={
+                            isLeaves
+                              ? 'Opens the leave editor for this day'
+                              : 'Opens a sheet to edit residents and supervising faculty'
+                          }
                           style={({ pressed }) => [
                             styles.rosterRest,
                             pressed ? styles.cellPressed : null,
@@ -1264,25 +1413,25 @@ export default function LongitudinalMatrixScreen() {
                                   <Text variant="bodySmall" numberOfLines={1}>
                                     {name}
                                   </Text>
-                                  {residentPgyByName.get(name) != null ? (
+                                  {!isLeaves && residentPgyByName.get(name) != null ? (
                                     <PgyBadge label={formatPgy(residentPgyByName.get(name) ?? null)} />
                                   ) : null}
                                 </View>
                               ))
                             ) : (
                               <Text variant="bodySmall" tone="disabled">
-                                Unassigned
+                                {isLeaves ? 'No one away' : 'Unassigned'}
                               </Text>
                             )}
                           </View>
                           <View style={styles.rosterFacultyCell}>
-                            {faculty ? (
+                            {facultySummary ? (
                               <Text variant="bodySmall" tone="secondary" numberOfLines={2}>
-                                {faculty}
+                                {facultySummary}
                               </Text>
                             ) : (
                               <Text variant="bodySmall" tone="muted">
-                                — None —
+                                {isLeaves ? '—' : '— None —'}
                               </Text>
                             )}
                           </View>
@@ -1295,53 +1444,6 @@ export default function LongitudinalMatrixScreen() {
             })}
           </Card>
         )}
-
-        <Card>
-          <View style={styles.catalogHeader}>
-            <Text variant="label" tone="secondary" uppercase>
-              Clinic Catalog
-            </Text>
-            <IconButton
-              icon={Plus}
-              tone="primary"
-              accessibilityLabel="Add clinic"
-              onPress={openAddClinic}
-            />
-          </View>
-          <Text variant="caption" tone="muted" style={styles.note}>
-            Add a clinic from the catalog or type a custom name. Use the pencil to rename one and the
-            minus to remove it from the active pool; its slots and assignment history stay preserved.
-          </Text>
-          {activeClinics.length === 0 ? (
-            <Text variant="bodySmall" tone="muted">
-              No clinics are active for this programme yet. Tap + to add the first one.
-            </Text>
-          ) : (
-            activeClinics.map((clinic) => (
-              <View key={clinic.id} style={styles.clinicRow}>
-                <View style={styles.flex1}>
-                  <Text variant="bodySmall" numberOfLines={2}>
-                    {clinic.clinic_name}
-                  </Text>
-                  <Text variant="caption" tone="muted" numberOfLines={1}>
-                    {describeClinicType(clinic)}
-                  </Text>
-                </View>
-                <IconButton
-                  icon={Pencil}
-                  accessibilityLabel={`Rename ${clinic.clinic_name}`}
-                  onPress={() => openRenameClinic(clinic)}
-                />
-                <IconButton
-                  icon={Minus}
-                  
-                  accessibilityLabel={`Remove ${clinic.clinic_name}`}
-                  onPress={() => askDeleteClinic(clinic)}
-                />
-              </View>
-            ))
-          )}
-        </Card>
 
         <Card>
           <SectionHeader title="Backup / Catchup Faculty Pools" />
@@ -1581,24 +1683,25 @@ export default function LongitudinalMatrixScreen() {
             <SheetSelectField
               label="Resident 1"
               value={slotForm.resident1 || NONE_RESIDENT}
-              options={withCurrent(residentOptions, slotForm.resident1)}
+              options={withCurrent(residentOptionsForDay(slotEdit.day), slotForm.resident1)}
               onChange={(value) => setSlotForm((previous) => ({ ...previous, resident1: value }))}
               placeholder="— Unassigned —"
+              hint="Anyone recorded as away on this day is hidden from the list."
             />
             <SheetSelectField
               label="Resident 2 (optional)"
               value={slotForm.resident2 || NONE_RESIDENT}
-              options={withCurrent(residentOptions, slotForm.resident2)}
+              options={withCurrent(residentOptionsForDay(slotEdit.day), slotForm.resident2)}
               onChange={(value) => setSlotForm((previous) => ({ ...previous, resident2: value }))}
               placeholder="— Unassigned —"
             />
             <SheetSelectField
               label="Supervising Faculty"
               value={slotForm.faculty || NONE_FACULTY}
-              options={withCurrent(facultyOptions, slotForm.faculty)}
+              options={withCurrent(facultyOptionsForDay(slotEdit.day), slotForm.faculty)}
               onChange={(value) => setSlotForm((previous) => ({ ...previous, faculty: value }))}
               placeholder="— None —"
-              hint="A 'Dr.' title is applied automatically to faculty members."
+              hint="A 'Dr.' title is applied automatically to faculty members. Faculty away that day are hidden."
             />
             <Button
               label="+ Add New Faculty"
@@ -1612,136 +1715,179 @@ export default function LongitudinalMatrixScreen() {
       </Sheet>
 
       <Sheet
-        visible={addClinicOpen}
-        onClose={closeAddClinic}
-        title="Add Clinic"
-        subtitle="Choose a clinic from the catalog or type an exact name."
-        footer={
-          <Button
-            label="Close"
-            variant="outline"
-            onPress={closeAddClinic}
-            disabled={addingClinic}
-          />
-        }
-      >
-        <TextField
-          label="Other / custom clinic name"
-          value={customClinicName}
-          onChangeText={setCustomClinicName}
-          placeholder="e.g. Al Noor Diabetes Clinic"
-          hint="Use this when the clinic is not in the catalog below. It is stored for this programme and offered to every coordinator."
-        />
-        <Button
-          label={addingClinic ? 'Adding…' : 'Add custom clinic'}
-          onPress={addCustomClinic}
-          disabled={customClinicName.trim().length === 0 || addingClinic}
-          loading={addingClinic}
-          style={styles.customClinicButton}
-        />
-
-        <SectionHeader title="Catalog" trailing={`${visibleClinicCatalog.length} available`} />
-        <SearchInput
-          value={addClinicQuery}
-          onChangeText={setAddClinicQuery}
-          placeholder="Search clinics"
-          accessibilityLabel="Search the clinic catalog"
-        />
-        <View style={styles.catalogList}>
-          {visibleClinicCatalog.map((entry) => (
-            <Pressable
-              key={entry.name}
-              onPress={() => addCatalogClinic(entry)}
-              disabled={addingClinic}
-              accessibilityRole="button"
-              accessibilityLabel={`Add ${entry.name}`}
-              style={({ pressed }) => [
-                styles.catalogRow,
-                pressed && !addingClinic ? styles.catalogRowPressed : null,
-              ]}
-            >
-              <View style={styles.catalogText}>
-                <Text variant="bodySmall" numberOfLines={2}>
-                  {entry.name}
-                </Text>
-                <Text variant="caption" tone="muted" numberOfLines={1}>
-                  {describeCatalogEntry(entry)}
-                </Text>
-              </View>
-              <Plus color={colors.primary} size={18} />
-            </Pressable>
-          ))}
-          {visibleClinicCatalog.length === 0 ? (
-            <Text variant="bodySmall" tone="muted" align="center" style={styles.catalogEmpty}>
-              {clinicQueryNeedle
-                ? `No catalog clinic matches “${addClinicQuery.trim()}”. Type it above to add it.`
-                : 'Every catalog clinic is already in the pool. Type a custom name above to add another.'}
-            </Text>
-          ) : null}
-        </View>
-      </Sheet>
-
-      <Sheet
-        visible={renameTarget !== null}
-        onClose={closeRenameClinic}
-        title="Rename Clinic"
-        subtitle={renameTarget ? `${renameTarget.clinic_name} · ${renameTarget.clinic_code}` : undefined}
+        visible={Boolean(leavesEditDay)}
+        onClose={closeLeaves}
+        title="EDIT LEAVES & ABSENCES"
+        subtitle={leavesEditDay ? `${leavesEditDay} · who is away` : undefined}
         footer={
           <View style={styles.actionRow}>
             <Button
-              label={savingClinicRename ? 'Saving…' : 'Save name'}
-              loading={savingClinicRename}
-              onPress={saveClinicRename}
-              disabled={savingClinicRename}
+              label="Save Leaves"
+              onPress={saveLeaves}
+              loading={savingLeaves}
+              disabled={savingLeaves}
               style={styles.flex1}
             />
             <Button
               label="Cancel"
               variant="outline"
-              onPress={closeRenameClinic}
-              disabled={savingClinicRename}
+              onPress={closeLeaves}
+              disabled={savingLeaves}
+              style={styles.flex1}
+            />
+          </View>
+        }
+      >
+        {leavesEditDay ? (
+          <>
+            <Text variant="caption" tone="secondary" style={styles.note}>
+              {`Mark everyone away on ${leavesEditDay}. Residents and faculty recorded here are hidden from that day's clinic dropdowns.`}
+            </Text>
+            <SheetSelectField
+              label="Leave reason"
+              value={leavesLeaveType}
+              options={LEAVE_TYPE_OPTIONS}
+              onChange={(value) => setLeavesLeaveType(value)}
+              placeholder="Choose a reason"
+              hint="Applied to everyone selected below."
+            />
+            <TextField
+              label="Coverage notes (optional)"
+              value={leavesNotes}
+              onChangeText={setLeavesNotes}
+              placeholder="e.g. Dr. X covering; swap arranged"
+              multiline
+            />
+
+            <SectionHeader
+              title="Residents"
+              trailing={`${leavesResidentNames.length} selected`}
+            />
+            <SearchInput
+              value={leavesResidentQuery}
+              onChangeText={setLeavesResidentQuery}
+              placeholder="Search residents"
+              accessibilityLabel="Search residents to mark away"
+            />
+            <View style={styles.catalogList}>
+              {residentOptions
+                .filter((option) => option.value !== NONE_RESIDENT)
+                .filter((option) =>
+                  option.value.toLowerCase().includes(leavesResidentQuery.trim().toLowerCase()),
+                )
+                .map((option) => {
+                  const selected = leavesResidentNames.includes(option.value);
+                  return (
+                    <Pressable
+                      key={option.value}
+                      onPress={() => toggleLeavesResident(option.value)}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: selected }}
+                      accessibilityLabel={`Mark ${option.value} away`}
+                      style={({ pressed }) => [
+                        styles.catalogRow,
+                        selected ? styles.catalogRowSelected : null,
+                        pressed ? styles.catalogRowPressed : null,
+                      ]}
+                    >
+                      <View style={styles.catalogText}>
+                        <Text variant="bodySmall" numberOfLines={1}>
+                          {option.value}
+                        </Text>
+                      </View>
+                      {selected ? <Check color={colors.primary} size={18} /> : null}
+                    </Pressable>
+                  );
+                })}
+            </View>
+
+            <SectionHeader
+              title="Faculty"
+              trailing={`${leavesFacultyNames.length} selected`}
+            />
+            <SearchInput
+              value={leavesFacultyQuery}
+              onChangeText={setLeavesFacultyQuery}
+              placeholder="Search faculty"
+              accessibilityLabel="Search faculty to mark away"
+            />
+            <View style={styles.catalogList}>
+              {facultyOptions
+                .filter((option) => option.value !== NONE_FACULTY)
+                .filter((option) =>
+                  option.value.toLowerCase().includes(leavesFacultyQuery.trim().toLowerCase()),
+                )
+                .map((option) => {
+                  const selected = leavesFacultyNames.includes(option.value);
+                  return (
+                    <Pressable
+                      key={option.value}
+                      onPress={() => toggleLeavesFaculty(option.value)}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: selected }}
+                      accessibilityLabel={`Mark ${option.value} away`}
+                      style={({ pressed }) => [
+                        styles.catalogRow,
+                        selected ? styles.catalogRowSelected : null,
+                        pressed ? styles.catalogRowPressed : null,
+                      ]}
+                    >
+                      <View style={styles.catalogText}>
+                        <Text variant="bodySmall" numberOfLines={1}>
+                          {option.value}
+                        </Text>
+                      </View>
+                      {selected ? <Check color={colors.primary} size={18} /> : null}
+                    </Pressable>
+                  );
+                })}
+            </View>
+          </>
+        ) : null}
+      </Sheet>
+
+      <Sheet
+        visible={columnManage !== null}
+        onClose={closeColumnManage}
+        title="Manage Clinic Column"
+        subtitle={columnManage ? `${columnManage.title} · clinic column ${columnManage.clinicNumber}` : undefined}
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label={savingColumn ? 'Saving…' : 'Save label'}
+              onPress={saveColumnRename}
+              loading={savingColumn}
+              disabled={savingColumn}
+              style={styles.flex1}
+            />
+            <Button
+              label="Cancel"
+              variant="outline"
+              onPress={closeColumnManage}
+              disabled={savingColumn}
               style={styles.flex1}
             />
           </View>
         }
       >
         <TextField
-          label="Clinic name"
-          value={renameValue}
-          onChangeText={setRenameValue}
-          placeholder="e.g. Well Baby Clinic (WBC)"
+          label="Column label"
+          value={columnLabelValue}
+          onChangeText={setColumnLabelValue}
+          placeholder={columnManage ? defaultColumnLabel(columnManage.clinicNumber) : 'Clinic N'}
           autoCapitalize="words"
-          hint="Renaming updates the chip everywhere this clinic is shown. Slots and assignment history are preserved."
+          hint="Blank restores the default name. Renaming never moves this column's slots or assignments."
         />
-      </Sheet>
-
-      <Sheet
-        visible={deleteTarget !== null}
-        onClose={closeDeleteClinic}
-        title="Remove Clinic"
-        subtitle={deleteTarget?.clinic_name}
-        footer={
-          <View style={styles.actionRow}>
-            <Button
-              label={deletingClinic ? 'Removing…' : 'Remove clinic'}
-              
-              loading={deletingClinic}
-              onPress={removeClinic}
-              disabled={deletingClinic}
-              style={styles.flex1}
-            />
-            <Button
-              label="Keep it"
-              variant="outline"
-              onPress={closeDeleteClinic}
-              disabled={deletingClinic}
-              style={styles.flex1}
-            />
-          </View>
-        }
-      >
-        <Text variant="bodySmall" tone="secondary">
-          {`Are you sure you want to remove ${deleteTarget?.clinic_name ?? 'this clinic'}? Existing slots and historical data linked to this clinic will be preserved.`}
+        <Button
+          label={removingColumn ? 'Removing…' : 'Remove column'}
+          variant="outline"
+          onPress={confirmRemoveColumn}
+          disabled={columnManage === null || savingColumn}
+          loading={removingColumn}
+          style={{ marginTop: spacing.md }}
+        />
+        <Text variant="caption" tone="muted" style={styles.note}>
+          Removing deletes the column from the grid. Its historical slots are preserved.
         </Text>
       </Sheet>
     
@@ -2080,11 +2226,9 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg,
     marginBottom: spacing.xs,
   },
-  catalogHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
+  matrixAddColumnButton: {
+    marginBottom: spacing.md,
+    marginTop: spacing.xs,
   },
   clinicRow: {
     flexDirection: 'row',
@@ -2114,14 +2258,12 @@ const styles = StyleSheet.create({
   catalogRowPressed: {
     backgroundColor: colors.primarySoft,
   },
+  catalogRowSelected: {
+    borderColor: colors.primaryBorder,
+    backgroundColor: colors.primarySoft,
+  },
   catalogText: {
     flex: 1,
     gap: spacing.xxs,
-  },
-  catalogEmpty: {
-    paddingVertical: spacing.lg,
-  },
-  customClinicButton: {
-    marginBottom: spacing.lg,
   },
 });

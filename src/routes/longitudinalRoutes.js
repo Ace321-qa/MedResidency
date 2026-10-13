@@ -25,6 +25,12 @@ router.get('/cycles', LongitudinalController.getCycles);
 router.put('/cycle-schedule/header', LongitudinalController.updateCycleHeader);
 router.put('/cycle-schedule/slot', LongitudinalController.updateCycleSlot);
 router.post('/cycle-schedule/backup', LongitudinalController.updateBackupFaculty);
+router.get('/cycle-schedule/absences', LongitudinalController.getCycleAbsences);
+router.post('/cycle-schedule/absences', LongitudinalController.updateDayAbsences);
+router.get('/cycle-schedule/columns', LongitudinalController.getMatrixColumns);
+router.post('/cycle-schedule/columns', LongitudinalController.addClinicColumn);
+router.put('/cycle-schedule/columns/:clinic_number', LongitudinalController.renameClinicColumn);
+router.delete('/cycle-schedule/columns/:clinic_number', LongitudinalController.deleteClinicColumn);
 router.post('/cycle-schedule/randomize', LongitudinalController.randomizeSupervisors);
 
 module.exports = router;
