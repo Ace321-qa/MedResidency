@@ -14,8 +14,10 @@ import {
   Screen,
   SearchInput,
   SectionHeader,
+  SelectField,
   Sheet,
   SheetSelectField,
+  StatusBadge,
   Text,
   TextField,
   type SelectOption,
@@ -43,6 +45,15 @@ import { rotationWindowForMonths } from '../../../utils/masterGridCalendar';
 import { formatWeekSpan } from '../../../utils/dateCalc';
 import { formatPgy } from '../../../utils/insights';
 import { residentFullName } from '../../../utils/residents';
+import {
+  ADMINISTRATIVE_ROLE_HINT,
+  ADMINISTRATIVE_ROLE_OPTIONS,
+  CLINICAL_TITLE_HINT,
+  CLINICAL_TITLE_OPTIONS,
+  FACULTY_APPOINTMENT_HINT,
+  FACULTY_APPOINTMENT_OPTIONS,
+  facultyBadges,
+} from '../../../utils/faculty';
 import { colors, radius, spacing } from '../../../theme';
 import { goBack } from '../../../navigation/back';
 import { LEAVE_TYPES } from '../../../types/api';
@@ -320,7 +331,7 @@ export default function LongitudinalMatrixScreen() {
 
   /** The clinic catalog add / rename / remove controls. */
   const [facultyMgrOpen, setFacultyMgrOpen] = useState(false);
-  const [facultyForm, setFacultyForm] = useState({ firstName: "", lastName: "", email: "", phone: "", specialty: "" });
+  const [facultyForm, setFacultyForm] = useState({ firstName: "", lastName: "", email: "", phone: "", specialty: "", clinicalTitle: "", facultyAppointment: "", administrativeRole: "" });
   const [facultyEditing, setFacultyEditing] = useState<any | null>(null);
   const [savingFaculty, setSavingFaculty] = useState(false);
   const [deletingFaculty, setDeletingFaculty] = useState(false);
@@ -366,7 +377,8 @@ export default function LongitudinalMatrixScreen() {
     for (const faculty of facultyResource.data ?? []) {
       const value = withDoctorTitle(faculty.display_name ?? `${faculty.first_name} ${faculty.last_name}`);
       if (!value) continue;
-      options.push({ value, label: value });
+      const badges = facultyBadges(faculty).map((badge) => badge.label).join(' • ');
+      options.push({ value, label: badges ? `${value} • ${badges}` : value });
     }
     return options;
   }, [facultyResource.data]);
@@ -765,7 +777,7 @@ export default function LongitudinalMatrixScreen() {
   function openFacultyManager() {
     setFacultyMgrOpen(true);
     setFacultyEditing(null);
-    setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '' });
+    setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '', clinicalTitle: '', facultyAppointment: '', administrativeRole: '' });
     setFacultyDeleteTarget(null);
     setActionError(null);
     setFeedback(null);
@@ -785,12 +797,15 @@ export default function LongitudinalMatrixScreen() {
       email: f.email ?? '',
       phone: f.phone ?? '',
       specialty: f.specialty ?? '',
+      clinicalTitle: f.clinical_title ?? '',
+      facultyAppointment: f.faculty_appointment ?? '',
+      administrativeRole: f.administrative_role ?? '',
     });
   }
 
   function cancelEditFaculty() {
     setFacultyEditing(null);
-    setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '' });
+    setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '', clinicalTitle: '', facultyAppointment: '', administrativeRole: '' });
   }
 
   async function saveFaculty() {
@@ -807,6 +822,9 @@ export default function LongitudinalMatrixScreen() {
           email: facultyForm.email || null,
           phone: facultyForm.phone || null,
           specialty: facultyForm.specialty || null,
+          clinical_title: facultyForm.clinicalTitle || null,
+          faculty_appointment: facultyForm.facultyAppointment || null,
+          administrative_role: facultyForm.administrativeRole || null,
         });
         facultyResource.setData((current: any) => (current ?? []).map((x: any) => (x.id === updated.id ? updated : x)) as any);
         setFeedback('Faculty updated.');
@@ -819,11 +837,14 @@ export default function LongitudinalMatrixScreen() {
           email: facultyForm.email || null,
           phone: facultyForm.phone || null,
           specialty: facultyForm.specialty || null,
+          clinical_title: facultyForm.clinicalTitle || null,
+          faculty_appointment: facultyForm.facultyAppointment || null,
+          administrative_role: facultyForm.administrativeRole || null,
           is_active: 1,
         });
         facultyResource.setData((current: any) => [created, ...(current ?? [])] as any);
         setFeedback('Faculty added.');
-        setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '' });
+        setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '', clinicalTitle: '', facultyAppointment: '', administrativeRole: '' });
       }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not save faculty.');
@@ -2039,7 +2060,7 @@ export default function LongitudinalMatrixScreen() {
           upload={(file) => uploadFacultySupervisors(file, programId)}
           onImported={() => void handleFacultyImported()}
           autoDismissSuccessMs={6000}
-          hint="Five columns: First Name, Last Name, Email, Phone, Specialty. First and Last Name are required; Specialty defaults to Family Medicine."
+          hint="Eight columns: First Name, Last Name, Email, Phone, Specialty, Clinical Title, Faculty Appointment, Admin Role. First and Last Name are required; Specialty defaults to Family Medicine."
         />
 
         <View style={styles.facultyDivider}>
@@ -2058,6 +2079,27 @@ export default function LongitudinalMatrixScreen() {
           <TextField label="Email" value={facultyForm.email} onChangeText={(v) => setFacultyForm((p) => ({ ...p, email: v }))} autoCapitalize="none" keyboardType="email-address" />
           <TextField label="Phone" value={facultyForm.phone} onChangeText={(v) => setFacultyForm((p) => ({ ...p, phone: v }))} keyboardType="phone-pad" />
           <TextField label="Specialty" value={facultyForm.specialty} onChangeText={(v) => setFacultyForm((p) => ({ ...p, specialty: v }))} />
+          <SelectField
+            label="Clinical Title"
+            hint={CLINICAL_TITLE_HINT}
+            value={facultyForm.clinicalTitle || null}
+            options={CLINICAL_TITLE_OPTIONS}
+            onChange={(v) => setFacultyForm((p) => ({ ...p, clinicalTitle: v }))}
+          />
+          <SelectField
+            label="Faculty Appointment"
+            hint={FACULTY_APPOINTMENT_HINT}
+            value={facultyForm.facultyAppointment || null}
+            options={FACULTY_APPOINTMENT_OPTIONS}
+            onChange={(v) => setFacultyForm((p) => ({ ...p, facultyAppointment: v }))}
+          />
+          <SelectField
+            label="Administrative / Leadership Role"
+            hint={ADMINISTRATIVE_ROLE_HINT}
+            value={facultyForm.administrativeRole || null}
+            options={ADMINISTRATIVE_ROLE_OPTIONS}
+            onChange={(v) => setFacultyForm((p) => ({ ...p, administrativeRole: v }))}
+          />
           {facultyEditing ? (
             <Button label="Cancel Edit" variant="outline" onPress={cancelEditFaculty} style={{ marginTop: spacing.sm }} />
           ) : null}
@@ -2071,9 +2113,16 @@ export default function LongitudinalMatrixScreen() {
           {(facultyResource.data ?? []).map((f: any) => (
             <View key={f.id} style={styles.clinicRow}>
               <View style={styles.flex1}>
-                <Text variant="bodySmall">{`Dr. ${f.first_name} ${f.last_name}`}</Text>
+                <View style={styles.facultyNameRow}>
+                  <Text variant="bodySmall">{`Dr. ${f.first_name} ${f.last_name}`}</Text>
+                  {facultyBadges(f).map((badge) => (
+                    <StatusBadge key={badge.label} label={badge.label} tone={badge.tone} />
+                  ))}
+                </View>
                 <Text variant="caption" tone="muted">
-                  {f.specialty || f.email || (f.is_active === 0 ? 'Inactive' : '')}
+                  {[f.clinical_title, f.specialty].filter(Boolean).join(' • ') ||
+                    f.email ||
+                    (f.is_active === 0 ? 'Inactive' : '')}
                 </Text>
               </View>
               <IconButton icon={Pencil} accessibilityLabel={`Edit ${f.first_name}`} onPress={() => startEditFaculty(f)} />
@@ -2374,6 +2423,12 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     borderBottomWidth: 1,
     borderColor: colors.border,
+  },
+  facultyNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
   },
   catalogList: {
     gap: spacing.sm,

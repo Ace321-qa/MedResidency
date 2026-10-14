@@ -33,6 +33,14 @@ import {
   formatWeekSpan,
 } from '../src/utils/dateCalc';
 import { rotationWindowForMonths } from '../src/utils/masterGridCalendar';
+import {
+  ADMINISTRATIVE_ROLE_OPTIONS,
+  CLINICAL_TITLE_OPTIONS,
+  FACULTY_APPOINTMENT_OPTIONS,
+  facultyBadges,
+  facultyBadgesFor,
+  hasAdministrativeRole,
+} from '../src/utils/faculty';
 
 const failures: string[] = [];
 
@@ -270,6 +278,69 @@ console.log('\n-- the rotation badge reads total weeks and both boundary days --
   );
   assert('a missing end date yields no badge', formatWeekSpan(12, '2026-10-11', ''), null);
   assert('a non-positive window yields no badge', formatWeekSpan(0, '2026-10-11', '2026-10-17'), null);
+}
+
+/* ------------------------------------------------------------------ *
+ * The faculty classification axes are objective and independent.
+ * ------------------------------------------------------------------ */
+
+console.log('\n-- the clinical titles are the health system rank, no more --');
+assert('there are four clinical titles', CLINICAL_TITLE_OPTIONS.length, 4);
+assert(
+  'they are the agreed ranks',
+  CLINICAL_TITLE_OPTIONS.map((option) => option.value),
+  ['Specialist', 'Consultant', 'Senior Consultant', 'Other'],
+);
+assert(
+  'no clinical title implies a supervision tier',
+  CLINICAL_TITLE_OPTIONS.some((option) => /supervis|tier|level allowed/i.test(option.label)),
+  false,
+);
+
+console.log('\n-- the faculty appointments are the accreditation categories --');
+assert('there are three appointments', FACULTY_APPOINTMENT_OPTIONS.length, 3);
+assert(
+  'they are the agreed categories',
+  FACULTY_APPOINTMENT_OPTIONS.map((option) => option.value),
+  ['Core Faculty', 'Teaching Faculty', 'Adjunct / Visiting Faculty'],
+);
+
+console.log('\n-- the administrative roles are optional programme offices --');
+assert('there are five roles', ADMINISTRATIVE_ROLE_OPTIONS.length, 5);
+assert('the first option is the affirmative "None"', ADMINISTRATIVE_ROLE_OPTIONS[0].value, 'None');
+assert('and "None" is not treated as a real office', hasAdministrativeRole('None'), false);
+assert('an empty role is not a real office', hasAdministrativeRole(''), false);
+assert('a real office is recognised', hasAdministrativeRole('Program Director (PD)'), true);
+assert('role matching is case-insensitive', hasAdministrativeRole('none'), false);
+
+console.log('\n-- only appointment and real roles become badges --');
+{
+  // A clinical title is deliberately never a badge: badging it beside the
+  // programme axes would imply a rank ordering between them.
+  const full = facultyBadges({
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'Continuity Clinic Lead',
+  });
+  assert('a full appointment yields two badges', full.length, 2);
+  assert('the appointment leads', full[0], { label: 'Core Faculty', tone: 'info' });
+  assert('the role follows', full[1], { label: 'Continuity Clinic Lead', tone: 'neutral' });
+
+  assert(
+    'the clinical title is never a badge',
+    facultyBadges({ faculty_appointment: 'Teaching Faculty' }).some((b) => /Consultant|Specialist/.test(b.label)),
+    false,
+  );
+  assert(
+    'a "None" role produces no badge',
+    facultyBadges({ faculty_appointment: 'Teaching Faculty', administrative_role: 'None' }).length,
+    1,
+  );
+  assert('no classification produces no badges', facultyBadges({}).length, 0);
+  assert(
+    'the camelCase helper matches the snake_case one',
+    facultyBadgesFor('Core Faculty', 'None'),
+    facultyBadges({ faculty_appointment: 'Core Faculty', administrative_role: 'None' }),
+  );
 }
 
 if (failures.length > 0) {

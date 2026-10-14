@@ -437,7 +437,7 @@ class LongitudinalController {
   /**
    * `GET /longitudinal/faculty-supervisors/template`
    *
-   * The downloadable `.xlsx` sample preceptor list: five columns and three
+   * The downloadable `.xlsx` sample preceptor list: eight columns and three
    * realistic rows that demonstrate the expected formats.
    */
   static async downloadFacultyTemplate(req, res) {
@@ -550,7 +550,7 @@ const added = [];
         const [result] = await conn.query(
           `INSERT INTO faculty_supervisors
              (program_id, first_name, last_name, title, clinical_title, faculty_appointment, administrative_role, email, phone, specialty, is_active, created_at, updated_at)
-            VALUES (?, ?, ?, 'Dr.', ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            VALUES (?, ?, ?, 'Dr.', ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
           [programId, row.first_name, row.last_name, row.clinical_title, row.faculty_appointment, row.administrative_role, row.email, row.phone, row.specialty],
         );
         added.push(result.insertId);

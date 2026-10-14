@@ -380,6 +380,9 @@ export async function createFacultySupervisor(payload: {
   first_name: string;
   last_name: string;
   title?: string | null;
+  clinical_title?: string | null;
+  faculty_appointment?: string | null;
+  administrative_role?: string | null;
   email?: string | null;
   phone?: string | null;
   specialty?: string | null;
@@ -399,6 +402,9 @@ export async function updateFacultySupervisor(
     first_name?: string;
     last_name?: string;
     title?: string | null;
+    clinical_title?: string | null;
+    faculty_appointment?: string | null;
+    administrative_role?: string | null;
     email?: string | null;
     phone?: string | null;
     specialty?: string | null;

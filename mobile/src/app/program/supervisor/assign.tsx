@@ -101,7 +101,7 @@ export default function SupervisorAssignScreen() {
     () =>
       (faculty.data ?? []).map((person) => ({
         id: person.id,
-        name: `${person.first_name} ${person.last_name}`,
+        name: person.display_name ?? `Dr. ${person.first_name} ${person.last_name}`,
         title: person.title,
         clinicalTitle: person.clinical_title,
         facultyAppointment: person.faculty_appointment,

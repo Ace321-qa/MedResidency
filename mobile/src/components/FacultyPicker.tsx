@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import { Mail, Phone } from 'lucide-react-native';
 
 import { colors, radius, spacing } from '../theme';
+import { facultyBadgesFor } from '../utils/faculty';
 import { SearchInput } from './Form';
 import { StatusBadge } from './StatusBadge';
 import { Text } from './Text';
@@ -155,28 +156,18 @@ export function FacultyPicker({
             ]}
           >
             <View style={styles.optionText}>
-              <Text variant="bodySmall" numberOfLines={1}>
-                {option.name}
-              </Text>
+              <View style={styles.optionTitleRow}>
+                <Text variant="bodySmall" numberOfLines={1} style={styles.optionName}>
+                  {option.name}
+                </Text>
+                {facultyBadgesFor(option.facultyAppointment, option.administrativeRole).map((badge) => (
+                  <StatusBadge key={badge.label} label={badge.label} tone={badge.tone} />
+                ))}
+              </View>
               <View style={styles.optionMeta}>
-                {option.title ? (
-                  <Text variant="caption" tone="secondary" numberOfLines={1}>
-                    {option.title}
-                  </Text>
-                ) : null}
                 {option.clinicalTitle ? (
-                  <Text variant="caption" tone="muted" numberOfLines={1}>
+                  <Text variant="caption" tone="secondary" numberOfLines={1}>
                     {option.clinicalTitle}
-                  </Text>
-                ) : null}
-                {option.facultyAppointment ? (
-                  <Text variant="caption" tone="muted" numberOfLines={1}>
-                    {option.facultyAppointment}
-                  </Text>
-                ) : null}
-                {option.administrativeRole && option.administrativeRole !== 'None' ? (
-                  <Text variant="caption" tone="muted" numberOfLines={1}>
-                    {option.administrativeRole}
                   </Text>
                 ) : null}
                 {option.email ? (
@@ -248,6 +239,15 @@ const styles = StyleSheet.create({
   optionText: {
     flex: 1,
     gap: 1,
+  },
+  optionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  optionName: {
+    flexShrink: 1,
   },
   optionMeta: {
     flexDirection: 'row',

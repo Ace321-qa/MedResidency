@@ -55,7 +55,7 @@ export const CATALOGUE_COLUMNS = [
 ] as const;
 
 /**
- * The faculty preceptor workbook's five columns, in the order the API parses
+ * The faculty preceptor workbook's eight columns, in the order the API parses
  * them. `src/utils/excel/faculty.js` builds the same header strings, so a sheet
  * made on this device and one downloaded from the API are the same file.
  */
@@ -65,13 +65,16 @@ export const FACULTY_COLUMNS = [
   'Email',
   'Phone',
   'Specialty',
+  'Clinical Title',
+  'Faculty Appointment',
+  'Admin Role',
 ] as const;
 
 /** The three realistic rows the server's template ships. */
 const FACULTY_SAMPLE_ROWS: XlsxCellValue[][] = [
-  ['Hassan', 'Al-Hussein', 'hassan.alhussein@hamad.qa', '+974 4439 1111', 'Family Medicine'],
-  ['Areen', 'Al-Mansouri', 'areen.almansouri@hamad.qa', '+974 4439 2222', 'Family Medicine'],
-  ['Omar', 'Siddiqui', 'omar.siddiqui@hamad.qa', '+974 4439 3333', 'Internal Medicine'],
+  ['Hassan', 'Al-Hussein', 'hassan.alhussein@hamad.qa', '+974 4439 1111', 'Family Medicine', 'Specialist', 'Core Faculty', 'None'],
+  ['Areen', 'Al-Mansouri', 'areen.almansouri@hamad.qa', '+974 4439 2222', 'Family Medicine', 'Consultant', 'Teaching Faculty', 'General Educator'],
+  ['Omar', 'Siddiqui', 'omar.siddiqui@hamad.qa', '+974 4439 3333', 'Internal Medicine', 'Senior Consultant', 'Adjunct / Visiting Faculty', 'Rotation Director'],
 ];
 
 /**

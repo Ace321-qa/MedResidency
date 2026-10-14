@@ -22,6 +22,13 @@ import { Text } from './Text';
 
 interface ListRowProps {
   title: string;
+  /**
+   * Rendered on the same line as the title, wrapping under it when the row is
+   * narrow. Reserved for compact, non-interactive chips such as an appointment
+   * or role badge — never a control, because the row body itself may be a
+   * pressable.
+   */
+  titleAccessory?: ReactNode;
   /** Supporting line under the title. */
   subtitle?: string;
   /** Third line, e.g. a date range. Rendered in caption size. */
@@ -47,6 +54,7 @@ interface ListRowProps {
 
 export function ListRow({
   title,
+  titleAccessory,
   subtitle,
   meta,
   leadingIcon: LeadingIcon,
@@ -72,9 +80,12 @@ export function ListRow({
         ) : null)}
 
       <View style={styles.textBlock}>
-        <Text variant="h3" numberOfLines={2} tone={dimmed ? 'muted' : 'primary'}>
-          {title}
-        </Text>
+        <View style={styles.titleRow}>
+          <Text variant="h3" numberOfLines={2} tone={dimmed ? 'muted' : 'primary'} style={styles.titleText}>
+            {title}
+          </Text>
+          {titleAccessory}
+        </View>
         {subtitle ? (
           <Text variant="bodySmall" tone="secondary" numberOfLines={2} style={styles.subtitle}>
             {subtitle}
@@ -209,6 +220,15 @@ const styles = StyleSheet.create({
   textBlock: {
     flex: 1,
     gap: spacing.xxs,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  titleText: {
+    flexShrink: 1,
   },
   subtitle: {
     marginTop: 1,

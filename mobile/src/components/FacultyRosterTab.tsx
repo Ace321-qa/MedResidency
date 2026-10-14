@@ -22,6 +22,15 @@ import { uploadFacultySupervisors } from '../services/excelTemplates';
 import { useInAppNotifications } from '../services/inAppNotifications';
 import { spacing } from '../theme';
 import { ROSTER_FILTER_ALL } from '../utils/residents';
+import {
+  ADMINISTRATIVE_ROLE_HINT,
+  ADMINISTRATIVE_ROLE_OPTIONS,
+  CLINICAL_TITLE_HINT,
+  CLINICAL_TITLE_OPTIONS,
+  FACULTY_APPOINTMENT_HINT,
+  FACULTY_APPOINTMENT_OPTIONS,
+  facultyBadges,
+} from '../utils/faculty';
 import type { FacultySupervisor } from '../types/api';
 
 /**
@@ -282,7 +291,7 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
             upload={(file) => uploadFacultySupervisors(file, programId)}
             onImported={() => resource.refresh()}
             autoDismissSuccessMs={6000}
-            hint="Five columns: First Name, Last Name, Email, Phone, Specialty. First and Last Name are required; Specialty defaults to Family Medicine."
+            hint="Eight columns: First Name, Last Name, Email, Phone, Specialty, Clinical Title, Faculty Appointment, Admin Role. First and Last Name are required; Specialty defaults to Family Medicine."
           />
 
           <SectionHeader title={`${visible.length} preceptor${visible.length === 1 ? '' : 's'}`} />
@@ -306,12 +315,18 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
 {visible.map((faculty, index) => (
                 <ListRow
                   key={faculty.id}
-                  title={[
-                    facultyDisplayName(faculty),
-                    faculty.faculty_appointment ? `• ${faculty.faculty_appointment}` : '',
-                    faculty.administrative_role && faculty.administrative_role !== 'None' ? `• ${faculty.administrative_role}` : '',
-                  ].filter(Boolean).join(' ')}
-                  subtitle={faculty.specialty || 'No specialty recorded'}
+                  title={facultyDisplayName(faculty)}
+                  titleAccessory={
+                    <View style={styles.badges}>
+                      {facultyBadges(faculty).map((badge) => (
+                        <StatusBadge key={badge.label} label={badge.label} tone={badge.tone} />
+                      ))}
+                    </View>
+                  }
+                  subtitle={
+                    [faculty.clinical_title, faculty.specialty].filter(Boolean).join(' • ') ||
+                    'No specialty recorded'
+                  }
                   meta={faculty.email || faculty.phone || 'No contact details recorded'}
                   trailing={
                     <View style={styles.actions}>
@@ -415,6 +430,30 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
             autoCapitalize="words"
             placeholder="Family Medicine"
           />
+
+          <SelectField
+            label="Clinical Title"
+            hint={CLINICAL_TITLE_HINT}
+            value={form.clinicalTitle || null}
+            options={CLINICAL_TITLE_OPTIONS}
+            onChange={(value) => setForm((current) => ({ ...current, clinicalTitle: value }))}
+          />
+
+          <SelectField
+            label="Faculty Appointment"
+            hint={FACULTY_APPOINTMENT_HINT}
+            value={form.facultyAppointment || null}
+            options={FACULTY_APPOINTMENT_OPTIONS}
+            onChange={(value) => setForm((current) => ({ ...current, facultyAppointment: value }))}
+          />
+
+          <SelectField
+            label="Administrative / Leadership Role"
+            hint={ADMINISTRATIVE_ROLE_HINT}
+            value={form.administrativeRole || null}
+            options={ADMINISTRATIVE_ROLE_OPTIONS}
+            onChange={(value) => setForm((current) => ({ ...current, administrativeRole: value }))}
+          />
         </View>
       </Sheet>
 
@@ -465,6 +504,12 @@ const styles = StyleSheet.create({
   },
   actions: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  badges: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: spacing.xs,
   },
