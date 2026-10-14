@@ -28,12 +28,21 @@ const HEADERS = [
 
 const HEADER_ALIASES = {
   firstName: ['first name'],
-  middleName: ['middle name', 'middle initial'],
+  middleName: ['middle name', 'middle initial', 'middle name', 'middle initial'],
   lastName: ['last name', 'surname', 'family name'],
-  corporateId: ['corporate id', 'corporate/employee id', 'employee id', 'corporate no', 'corp id'],
+  corporateId: [
+    'corporate id',
+    'corporate/employee id',
+    'employee id',
+    'corporate no',
+    'corp id',
+    'corp_id',
+    'corporateid',
+    'corporate_id',
+  ],
   pgyLevel: ['pgy level', 'pgy', 'year in program', 'level'],
-  email: ['email', 'e-mail', 'email address'],
-  mobile: ['mobile', 'mobile number', 'phone', 'phone number'],
+  email: ['email', 'e-mail', 'email address', 'email_address', 'hmc email', 'personal email'],
+  mobile: ['mobile', 'mobile number', 'phone', 'phone number', 'mobile no.', 'mobile_no'],
   trainingSite: ['training site', 'site', 'hospital'],
   startDate: ['start date (yyyy-mm-dd)', 'start date'],
   expectedCompletion: [
@@ -160,7 +169,7 @@ function parseRosterFile(buffer) {
     rows.push({
       row: rowNumber,
       first_name: firstName,
-      middle_initial: cell('middleName') ? cell('middleName').slice(0, 10) : null,
+      middle_initial: cell('middleName') ? String(cell('middleName')) : null,
       last_name: lastName,
       corporate_id: corporateId,
       pgy_level: pgyLevel,

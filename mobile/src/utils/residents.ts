@@ -8,21 +8,37 @@ import { formatPgy } from './insights';
  * coordinator roster must agree on how a resident is named and described.
  */
 
-/** `Omar K Al-Nouri` — middle initial folded in when the database has one. */
+/** 
+ * Middle initial formatting rules:
+ * - Empty/null/undefined → "First Last"
+ * - Single character (e.g. "K", "R") → "First M. Last"  
+ * - Full word (length > 1, e.g. "Mahmoud", "Rashid") → "First Middle Last" (no trailing dot)
+ * - Trailing dots on full names are trimmed on read.
+ */
 export function residentFullName(resident: {
   first_name: string;
-  middle_initial: string | null;
+  middle_initial: string | null | undefined;
   last_name: string;
-}): string {
-  const middle = resident.middle_initial ? ` ${resident.middle_initial}.` : '';
-  return `${resident.first_name}${middle} ${resident.last_name}`.trim();
+} | null | undefined): string {
+  if (!resident) return 'Unknown';
+  const middle = (resident.middle_initial ?? '').trim();
+  if (middle.length === 0) {
+    return `${resident.first_name} ${resident.last_name}`.trim();
+  }
+  if (middle.length === 1) {
+    return `${resident.first_name} ${middle}. ${resident.last_name}`.trim();
+  }
+  // Full middle name — strip any trailing dot already in the DB
+  const cleanMiddle = middle.replace(/\.$/, '');
+  return `${resident.first_name} ${cleanMiddle} ${resident.last_name}`.trim();
 }
 
 /** `PGY-2 · Family Medicine` — the line under a resident's name. */
 export function residentSubtitle(resident: {
-  pgy_level?: number | null;
-  specialty_name: string | null;
-}): string {
+  pgy_level?: number | null | undefined;
+  specialty_name?: string | null | undefined;
+} | null | undefined): string {
+  if (!resident) return 'Programme not assigned';
   const parts: string[] = [];
   if (resident.pgy_level !== null && resident.pgy_level !== undefined) {
     parts.push(formatPgy(resident.pgy_level));
