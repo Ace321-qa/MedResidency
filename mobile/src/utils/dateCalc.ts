@@ -383,6 +383,44 @@ export function describeWindow(startDate: string, endDate: string): string {
   return `${weekday(from)} ${day(from)} ${month(from)} ${from.year} - ${weekday(to)} ${day(to)} ${month(to)} ${to.year}`;
 }
 
+/**
+ * `Sun, Oct 11, 2026` — the weekday-and-date form the rotation badge uses.
+ *
+ * Distinct from `describeWindow` above: that trades the year for width in a
+ * grid column, while this spells both out because the badge sits under a field
+ * with room for it and a coordinator reading "Jan 02" across a year boundary
+ * needs the year to be unambiguous.
+ */
+export function formatWeekdayDate(value: string | null | undefined): string {
+  const parts = parseCalendarDate(value);
+  if (!parts) return '';
+  const weekday = DAY_NAMES[new Date(parts.time).getUTCDay()].slice(0, 3);
+  const month = MONTH_NAMES[parts.month - 1];
+  return `${weekday}, ${month} ${pad(parts.day)}, ${parts.year}`;
+}
+
+/**
+ * The rotation-window badge: `12 Weeks (Sun, Oct 11, 2026 – Sat, Jan 02, 2027)`.
+ *
+ * Ties the months-to-weeks rule to the inclusive end date so the two are read
+ * together: `weeks` is the already-converted total (`months × 4`) and the window
+ * owns every one of its days, so `start + weeks × 7 - 1` lands on the Saturday
+ * after a Sunday start.
+ *
+ * @returns {string|null} null when the weekday count or either date is unusable.
+ */
+export function formatWeekSpan(
+  weeks: number,
+  startDate: string | null | undefined,
+  endDate: string | null | undefined,
+): string | null {
+  const count = Math.round(Number(weeks));
+  const from = formatWeekdayDate(startDate);
+  const to = formatWeekdayDate(endDate);
+  if (!Number.isFinite(count) || count <= 0 || !from || !to) return null;
+  return `${count} Week${count === 1 ? '' : 's'} (${from} – ${to})`;
+}
+
 /** `10:30` - 14:00 for a MySQL TIME column that may arrive as `14:00:00`. */
 export function formatClock(value: string | null | undefined): string {
   if (!value) return '--';

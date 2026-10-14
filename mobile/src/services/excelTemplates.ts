@@ -143,9 +143,9 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
     rows: [[...FACULTY_COLUMNS], ...FACULTY_SAMPLE_ROWS],
   },
   master: {
-    fileName: 'master_grid_template.xlsx',
+    fileName: 'master_rotation_grid_template.xlsx',
     endpoint: '/rotations/import/master/template',
-    sheetName: 'Master Grid',
+    sheetName: 'Master Rotation Grid',
     merges: [
       { s: { r: 0, c: 0 }, e: { r: 2, c: 0 } },
       { s: { r: 0, c: 1 }, e: { r: 2, c: 1 } },
@@ -464,9 +464,9 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
     ],
   },
   ccc: {
-    fileName: 'continuity_of_care_clinics_matrix_template.xlsx',
+    fileName: 'continuity_care_clinics_template.xlsx',
     endpoint: '/rotations/import/ccc/template',
-    sheetName: 'Continuity of Care Clinics (CCC) Matrix',
+    sheetName: 'Continuity Care Clinics',
     rows: PRIMARY_CARE_CLINICS_ROWS,
   },
   timesheet: {

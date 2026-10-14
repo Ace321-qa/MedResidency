@@ -38,8 +38,9 @@ import {
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
 import { uploadFacultySupervisors } from '../../../services/excelTemplates';
-import { CCC_SCHEDULE_ROWS, dayOfWeekMatches } from '../../../utils/cccMatrix';
+import { CCC_SCHEDULE_ROWS, dayOfWeekMatches, pgyLevelFromLabel } from '../../../utils/cccMatrix';
 import { rotationWindowForMonths } from '../../../utils/masterGridCalendar';
+import { formatWeekSpan } from '../../../utils/dateCalc';
 import { formatPgy } from '../../../utils/insights';
 import { residentFullName } from '../../../utils/residents';
 import { colors, radius, spacing } from '../../../theme';
@@ -212,6 +213,20 @@ const NONE_RESIDENT = '';
 const NONE_FACULTY = '';
 
 /**
+ * A resident as the slot dropdowns need them: title-free name, the training
+ * level they are enrolled at, and whether they are currently active. Built once
+ * so every day's filtered dropdown reads from the same list.
+ */
+interface ResidentRosterEntry {
+  name: string;
+  pgyLevel: number | null;
+  active: boolean;
+}
+
+/** Statuses that count as enrolled and assignable to a clinic slot. */
+const ACTIVE_RESIDENT_STATUSES = new Set(['ACTIVE_FULL_TIME', 'ACTIVE_PART_TIME']);
+
+/**
  * Faculty are always shown and stored with exactly one `Dr. ` prefix, matching
  * the server's own normalisation. Stripping first means a display name that
  * already carries the title is not turned into `Dr. Dr. Areen`.
@@ -366,17 +381,29 @@ export default function LongitudinalMatrixScreen() {
     return map;
   }, [facultyResource.data]);
 
-  const residentOptions = useMemo<SelectOption<string>[]>(() => {
-    const options: SelectOption<string>[] = [{ value: NONE_RESIDENT, label: '— Unassigned —' }];
+  const residentRoster = useMemo<ResidentRosterEntry[]>(() => {
     const seen = new Set<string>();
+    const roster: ResidentRosterEntry[] = [];
     for (const resident of residentsResource.data ?? []) {
       const name = residentFullName(resident).replace(/^Dr\.?\s+/i, '').trim();
       if (!name || seen.has(name)) continue;
       seen.add(name);
-      options.push({ value: name, label: name });
+      roster.push({
+        name,
+        pgyLevel: resident.pgy_level ?? null,
+        active: ACTIVE_RESIDENT_STATUSES.has(resident.resident_status),
+      });
     }
-    return options;
+    return roster;
   }, [residentsResource.data]);
+
+  const residentOptions = useMemo<SelectOption<string>[]>(
+    () => [
+      { value: NONE_RESIDENT, label: '— Unassigned —' },
+      ...residentRoster.map((entry) => ({ value: entry.name, label: entry.name })),
+    ],
+    [residentRoster],
+  );
 
   /** Title-free display name -> resident id, so absences can be written back. */
   const residentIdByName = useMemo(() => {
@@ -887,13 +914,39 @@ export default function LongitudinalMatrixScreen() {
   }
 
   /**
-   * The resident dropdown for a day, minus anyone recorded as away that day.
-   * A resident cannot be assigned to a clinic on a day they are absent.
+   * The resident dropdown for one clinic slot.
+   *
+   * A CCC day carries a training level (PGY-1/2/3). Its slots may draw only from
+   * residents enrolled at that exact level, so a PGY-3 Sunday cannot be staffed
+   * by a PGY-1. A mixed session — FMC, ALL or an unrecognised value — is not a
+   * single level, so every active resident is offered. Anyone recorded absent
+   * that day is hidden, and so is anyone not currently active.
    */
-  function residentOptionsForDay(day: DayName): SelectOption<string>[] {
+  function residentOptionsForSlot(
+    day: DayName,
+    pgyLevel: string | null | undefined,
+  ): SelectOption<string>[] {
     const absent = absentResidentNamesForDay(day);
-    if (absent.size === 0) return residentOptions;
-    return residentOptions.filter((option) => option.value === NONE_RESIDENT || !absent.has(option.value));
+    const level = pgyLevelFromLabel(pgyLevel);
+    return [
+      { value: NONE_RESIDENT, label: '— Unassigned —' },
+      ...residentRoster
+        .filter((entry) => entry.active)
+        .filter((entry) => level === null || entry.pgyLevel === level)
+        .filter((entry) => !absent.has(entry.name))
+        .map((entry) => ({ value: entry.name, label: entry.name })),
+    ];
+  }
+
+  /**
+   * The empty-state sentence for a slot whose day names a level no active
+   * resident is enrolled at, or null while the list is worth showing.
+   */
+  function slotResidentNotice(pgyLevel: string | null | undefined): string | null {
+    const level = pgyLevelFromLabel(pgyLevel);
+    if (level === null) return null;
+    const hasLevel = residentRoster.some((entry) => entry.active && entry.pgyLevel === level);
+    return hasLevel ? null : `No active ${formatPgy(level)} residents found for this program`;
   }
 
   /** The faculty dropdown for a day, minus anyone recorded as away that day. */
@@ -977,6 +1030,17 @@ export default function LongitudinalMatrixScreen() {
 
   const isLoading = schedule.isLoading && !data;
 
+  /** The rotation-window badge, e.g. `12 Weeks (Sun, Oct 11, 2026 – Sat, Jan 02, 2027)`. */
+  const durationBadge = rotation
+    ? formatWeekSpan(rotation.totalWeeks, rotation.startDate, rotation.endDate)
+    : null;
+
+  /** The level-filtered resident list for the slot sheet currently open. */
+  const slotResidentOptions = slotEdit
+    ? residentOptionsForSlot(slotEdit.day, slotEdit.pgyLevel)
+    : residentOptions;
+  const slotResidentNoticeText = slotEdit ? slotResidentNotice(slotEdit.pgyLevel) : null;
+
   return (
     <Screen
       onRefresh={() => {
@@ -986,7 +1050,7 @@ export default function LongitudinalMatrixScreen() {
       refreshing={schedule.isRefreshing || facultyResource.isRefreshing}
     >
       <AppHeader
-        title="Continuity of Care Clinics (CCC)"
+        title="Continuity Care Clinics"
         subtitle="Weekly clinic matrix, supervisors and backup faculty"
         onBack={goBack}
       />
@@ -1038,7 +1102,7 @@ export default function LongitudinalMatrixScreen() {
       {data ? (
         <>
           <Card>
-            <SectionHeader title="Cycle Header & Rotation" />
+            <SectionHeader title="Supervisor Randomisation & Rotation" />
             <Text variant="caption" tone="muted" style={styles.note}>
               Cycle metadata, the rotation window and each day&apos;s boundary are saved together.
               Week End Date and Total Weeks follow the master rotation rule of four weeks per
@@ -1084,9 +1148,7 @@ export default function LongitudinalMatrixScreen() {
                 </Text>
                 <View style={styles.durationBadge}>
                   <Text variant="label" tone="brand">
-                    {rotation
-                      ? `${Math.round(rotation.totalWeeks)} Weeks (${rotation.totalDays} Days)`
-                      : 'Not set'}
+                    {durationBadge ?? (rotation ? `${Math.round(rotation.totalWeeks)} Weeks` : 'Not set')}
                   </Text>
                 </View>
               </View>
@@ -1737,20 +1799,24 @@ export default function LongitudinalMatrixScreen() {
                 ' · ' +
                 (slotEdit.pgyLevel || DAY_CONFIG[slotEdit.day].pgy)}
             </Text>
+            {slotResidentNoticeText ? (
+              <Banner tone="warning" title="No matching residents" message={slotResidentNoticeText} />
+            ) : null}
             <SheetSelectField
               label="Resident 1"
               value={slotForm.resident1 || NONE_RESIDENT}
-              options={withCurrent(residentOptionsForDay(slotEdit.day), slotForm.resident1)}
+              options={withCurrent(slotResidentOptions, slotForm.resident1)}
               onChange={(value) => setSlotForm((previous) => ({ ...previous, resident1: value }))}
               placeholder="— Unassigned —"
-              hint="Anyone recorded as away on this day is hidden from the list."
+              hint="Only residents at this day's training level are listed. Anyone away that day is hidden."
             />
             <SheetSelectField
               label="Resident 2 (optional)"
               value={slotForm.resident2 || NONE_RESIDENT}
-              options={withCurrent(residentOptionsForDay(slotEdit.day), slotForm.resident2)}
+              options={withCurrent(slotResidentOptions, slotForm.resident2)}
               onChange={(value) => setSlotForm((previous) => ({ ...previous, resident2: value }))}
               placeholder="— Unassigned —"
+              hint="Only residents at this day's training level are listed."
             />
             <SheetSelectField
               label="Supervising Faculty"

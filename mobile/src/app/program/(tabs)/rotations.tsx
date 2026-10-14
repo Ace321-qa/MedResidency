@@ -160,7 +160,7 @@ export default function ProgramRotationsScreen() {
                 style={styles.addButton}
               />
               <Button
-                label="Continuity of Care Clinics (CCC)"
+                label="Continuity Care Clinics"
                 variant="outline"
                 onPress={() => router.push('/program/longitudinal/matrix' as any)}
                 style={styles.addButton}

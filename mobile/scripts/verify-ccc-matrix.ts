@@ -22,6 +22,7 @@ import {
   WEEKDAY_NAMES,
   WEEKDAY_SHORT,
   dayOfWeekMatches,
+  pgyLevelFromLabel,
   pgyLevelsForRow,
   type CccScheduleRow,
 } from '../src/utils/cccMatrix';
@@ -29,6 +30,7 @@ import { ACADEMIC_DAYS, academicDayForPgy } from '../src/utils/academicYear';
 import {
   calculateEndDateFromWeeks,
   convertMonthsToWeeks,
+  formatWeekSpan,
 } from '../src/utils/dateCalc';
 import { rotationWindowForMonths } from '../src/utils/masterGridCalendar';
 
@@ -148,6 +150,22 @@ console.log('\n-- a PGY row names exactly the level that attends it --');
   assert('and neither FMC day invents one', pgyLevelsForRow(row('fmc-thursday')), null);
 }
 
+console.log('\n-- a day context maps to a single training level for filtering --');
+{
+  // The slot dropdowns read the day's stored context and, when it names one
+  // level, list only residents enrolled at that exact level. Anything mixed must
+  // resolve to null so the caller leaves the list open rather than filtering it.
+  assert('PGY-3 names level three', pgyLevelFromLabel('PGY-3'), 3);
+  assert('PGY-2 names level two', pgyLevelFromLabel('PGY-2'), 2);
+  assert('PGY-1 names level one', pgyLevelFromLabel('PGY-1'), 1);
+  assert('spacing and case do not matter', pgyLevelFromLabel('  pgy 4 '), 4);
+  assert('a mixed FMC day names no single level', pgyLevelFromLabel('FMC'), null);
+  assert('an ALL context names no single level', pgyLevelFromLabel('ALL'), null);
+  assert('a blank context names no level', pgyLevelFromLabel(''), null);
+  assert('a null context names no level', pgyLevelFromLabel(null), null);
+  assert('nonsense names no level', pgyLevelFromLabel('WBC'), null);
+}
+
 console.log('\n-- the PGY mapping agrees with the academic-day calendar --');
 {
   // Two sources describe the same week: CCC_SCHEDULE_ROWS and ACADEMIC_DAYS. If
@@ -234,6 +252,24 @@ console.log('\n-- the single rotation-window helper ties both rules together --'
   assert('it names the start weekday', window?.startsOn, 'Sunday');
   assert('and the end weekday', window?.endsOn, 'Saturday');
   assert('a blank start or window resolves to nothing', rotationWindowForMonths('', 3), null);
+}
+
+console.log('\n-- the rotation badge reads total weeks and both boundary days --');
+{
+  // The badge is what a coordinator sees under the rotation window: the whole
+  // weeks, then the weekday and full date at both ends of the inclusive window.
+  assert(
+    'a twelve-week window renders across the year boundary',
+    formatWeekSpan(12, '2026-10-11', '2027-01-02'),
+    '12 Weeks (Sun, Oct 11, 2026 – Sat, Jan 02, 2027)',
+  );
+  assert(
+    'a one-week window is singular',
+    formatWeekSpan(1, '2026-06-28', '2026-07-04'),
+    '1 Week (Sun, Jun 28, 2026 – Sat, Jul 04, 2026)',
+  );
+  assert('a missing end date yields no badge', formatWeekSpan(12, '2026-10-11', ''), null);
+  assert('a non-positive window yields no badge', formatWeekSpan(0, '2026-10-11', '2026-10-17'), null);
 }
 
 if (failures.length > 0) {

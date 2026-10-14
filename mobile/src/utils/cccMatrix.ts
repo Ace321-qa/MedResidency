@@ -150,3 +150,20 @@ export function pgyLevelsForRow(row: CccScheduleRow): number[] | null {
       return null;
   }
 }
+
+/**
+ * The numeric training level a day's context names, e.g. "PGY-3" -> 3.
+ *
+ * A day on the CCC grid carries a PGY level or a mixed-session context. When it
+ * names a single level ([1-9]), the slot dropdowns draw only from residents
+ * enrolled at exactly that level. A mixed context — "FMC", "ALL", a blank or
+ * anything unrecognised — is not a single level, so this returns `null` and the
+ * caller leaves the list open rather than filtering it wrongly.
+ */
+export function pgyLevelFromLabel(label: string | null | undefined): number | null {
+  if (!label) return null;
+  const match = /PGY[\s._-]*(\d{1,2})/i.exec(String(label).trim());
+  if (!match) return null;
+  const level = Number(match[1]);
+  return Number.isInteger(level) && level >= 1 && level <= 9 ? level : null;
+}

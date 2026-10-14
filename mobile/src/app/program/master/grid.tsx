@@ -435,7 +435,7 @@ export default function MasterGridScreen() {
 
       <ImportTools
         template="master"
-        uploadLabel="Upload Master Grid"
+        uploadLabel="Upload Master Rotation Grid"
         upload={(file) => uploadMasterGrid(file, { program_id: programId, academic_year: academicYear })}
         onImported={() => grid.refresh()}
         downloadOptions={{ startDate }}

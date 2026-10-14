@@ -317,7 +317,7 @@ export default function RotationsScreen() {
       {clinicList.length > 0 ? (
         <>
           <SectionHeader
-            title="Clinic overview (Continuity of Care Clinics)"
+            title="Clinic overview (Continuity Care Clinics)"
             trailing={`${clinicList.length} session${clinicList.length === 1 ? '' : 's'}`}
             icon={Stethoscope}
           />
@@ -350,7 +350,7 @@ export default function RotationsScreen() {
           <EmptyState
             icon={Stethoscope}
             title="No clinic session yet"
-            message="Your Continuity of Care Clinic or longitudinal clinic has not been assigned. It appears here as soon as your coordinator schedules one."
+            message="Your Continuity Care Clinic or longitudinal clinic has not been assigned. It appears here as soon as your coordinator schedules one."
           />
         </Card>
       ) : null}
