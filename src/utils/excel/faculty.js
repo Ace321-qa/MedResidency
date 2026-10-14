@@ -5,8 +5,8 @@ const { makeBuffer } = require('./common');
  * The faculty preceptor workbook: the list a coordinator downloads, fills in
  * and uploads to bulk-register supervising faculty.
  *
- * Five columns — the two name parts are the identity, the rest are optional
- * contact/department detail. The headers here are the exact strings the mobile
+ * Eight columns — the two name parts are the identity, the rest are optional
+ * contact/department/rank detail. The headers here are the exact strings the mobile
  * client writes when it builds the same template locally, so a file produced by
  * either path parses here. Parsing accepts common renames, but every rejected
  * row comes back as `Row 4: First Name and Last Name are required` rather than
@@ -14,15 +14,15 @@ const { makeBuffer } = require('./common');
  * in any In-Charge or Supervising Faculty dropdown.
  */
 
-const HEADERS = ['First Name', 'Last Name', 'Email', 'Phone', 'Specialty'];
+const HEADERS = ['First Name', 'Last Name', 'Email', 'Phone', 'Specialty', 'Clinical Title', 'Faculty Appointment', 'Admin Role'];
 
 const DEFAULT_SPECIALTY = 'Family Medicine';
 
 /** Three realistic rows so the file demonstrates the expected formats. */
 const SAMPLE_ROWS = [
-  ['Hassan', 'Al-Hussein', 'hassan.alhussein@hamad.qa', '+974 4439 1111', 'Family Medicine'],
-  ['Areen', 'Al-Mansouri', 'areen.almansouri@hamad.qa', '+974 4439 2222', 'Family Medicine'],
-  ['Omar', 'Siddiqui', 'omar.siddiqui@hamad.qa', '+974 4439 3333', 'Internal Medicine'],
+  ['Hassan', 'Al-Hussein', 'hassan.alhussein@hamad.qa', '+974 4439 1111', 'Family Medicine', 'Specialist', 'Core Faculty', 'None'],
+  ['Areen', 'Al-Mansouri', 'areen.almansouri@hamad.qa', '+974 4439 2222', 'Family Medicine', 'Consultant', 'Teaching Faculty', 'General Educator'],
+  ['Omar', 'Siddiqui', 'omar.siddiqui@hamad.qa', '+974 4439 3333', 'Internal Medicine', 'Senior Consultant', 'Adjunct / Visiting Faculty', 'Rotation Director'],
 ];
 
 /** Tolerant header aliases, matched against a lower-cased, trimmed header. */
@@ -32,6 +32,9 @@ const HEADER_ALIASES = {
   email: ['email', 'e-mail', 'email address'],
   phone: ['phone', 'phone number', 'mobile', 'mobile number', 'contact'],
   specialty: ['specialty', 'speciality', 'department', 'discipline'],
+  clinicalTitle: ['clinical title', 'clinical_title', 'clinical title'],
+  facultyAppointment: ['faculty appointment', 'faculty_appointment', 'faculty appointment'],
+  adminRole: ['admin role', 'administrative_role', 'admin role'],
 };
 
 function headerIndex(headers, keys) {
@@ -77,6 +80,9 @@ function parseFacultyFile(buffer) {
     email: headerIndex(headers, HEADER_ALIASES.email),
     phone: headerIndex(headers, HEADER_ALIASES.phone),
     specialty: headerIndex(headers, HEADER_ALIASES.specialty),
+    clinicalTitle: headerIndex(headers, HEADER_ALIASES.clinicalTitle),
+    facultyAppointment: headerIndex(headers, HEADER_ALIASES.facultyAppointment),
+    adminRole: headerIndex(headers, HEADER_ALIASES.adminRole),
   };
 
   if (idx.firstName < 0 || idx.lastName < 0) {
@@ -123,6 +129,9 @@ function parseFacultyFile(buffer) {
       email: email || null,
       phone: cell('phone') || null,
       specialty: cell('specialty') || DEFAULT_SPECIALTY,
+      clinical_title: cell('clinicalTitle') || null,
+      faculty_appointment: cell('facultyAppointment') || null,
+      administrative_role: cell('adminRole') || null,
     });
   }
 

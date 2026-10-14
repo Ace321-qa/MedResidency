@@ -19,13 +19,55 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const db = require('../src/config/db');
 
 const FACULTY = [
-  { first_name: 'Hassan', last_name: 'Al-Hussein', title: 'Consultant, Family Medicine' },
-  { first_name: 'Ahmed', last_name: 'Bawazir', title: 'Consultant, Family Medicine' },
-  { first_name: 'Nashwan', last_name: 'Al-Sabri', title: 'Consultant, Family Medicine' },
-  { first_name: 'Areen', last_name: 'Khalil', title: 'Senior Registrar, Family Medicine' },
-  { first_name: 'Saleh', last_name: 'Al-Mutairi', title: 'Consultant, Family Medicine' },
-  { first_name: 'Rasha', last_name: 'Nasser', title: 'Senior Registrar, Family Medicine' },
-  { first_name: 'Hani', last_name: 'Barakat', title: 'Consultant, Family Medicine' },
+  {
+    first_name: 'Hassan',
+    last_name: 'Al-Hussein',
+    clinical_title: 'Specialist',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'None',
+  },
+  {
+    first_name: 'Ahmed',
+    last_name: 'Bawazir',
+    clinical_title: 'Consultant',
+    faculty_appointment: 'Teaching Faculty',
+    administrative_role: 'General Educator',
+  },
+  {
+    first_name: 'Nashwan',
+    last_name: 'Al-Sabri',
+    clinical_title: 'Senior Consultant',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'Rotation Director',
+  },
+  {
+    first_name: 'Areen',
+    last_name: 'Khalil',
+    clinical_title: 'Consultant',
+    faculty_appointment: 'Adjunct / Visiting Faculty',
+    administrative_role: 'Continuity Clinic Lead',
+  },
+  {
+    first_name: 'Saleh',
+    last_name: 'Al-Mutairi',
+    clinical_title: 'Consultant',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'Program Director',
+  },
+  {
+    first_name: 'Rasha',
+    last_name: 'Nasser',
+    clinical_title: 'Senior Consultant',
+    faculty_appointment: 'Teaching Faculty',
+    administrative_role: 'Associate Program Director',
+  },
+  {
+    first_name: 'Hani',
+    last_name: 'Barakat',
+    clinical_title: 'Specialist',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'None',
+  },
 ];
 
 (async () => {
@@ -43,9 +85,9 @@ const FACULTY = [
     if (existing.length > 0) continue;
 
     await db.query(
-      `INSERT INTO faculty_supervisors (program_id, first_name, last_name, title, is_active)
-       VALUES (?, ?, ?, ?, 1)`,
-      [programId, person.first_name, person.last_name, person.title]
+      `INSERT INTO faculty_supervisors (program_id, first_name, last_name, clinical_title, faculty_appointment, administrative_role, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [programId, person.first_name, person.last_name, person.clinical_title, person.faculty_appointment, person.administrative_role]
     );
     inserted += 1;
   }

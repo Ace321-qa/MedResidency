@@ -57,12 +57,17 @@ interface FacultyForm {
   email: string;
   phone: string;
   specialty: string;
+  clinicalTitle: string;
+  facultyAppointment: string;
+  administrativeRole: string;
 }
 
 interface FacultyFormErrors {
   firstName?: string;
   lastName?: string;
   email?: string;
+  clinicalTitle?: string;
+  facultyAppointment?: string;
 }
 
 const EMPTY_FACULTY_FORM: FacultyForm = {
@@ -71,6 +76,9 @@ const EMPTY_FACULTY_FORM: FacultyForm = {
   email: '',
   phone: '',
   specialty: '',
+  clinicalTitle: '',
+  facultyAppointment: '',
+  administrativeRole: '',
 };
 
 export const FACULTY_STATUS_FILTERS: SelectOption<string>[] = [
@@ -110,7 +118,7 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
       if (statusFilter === 'INACTIVE' && faculty.is_active === 1) return false;
       if (!needle) return true;
 
-      const haystack = [faculty.first_name, faculty.last_name, faculty.email, faculty.specialty]
+      const haystack = [faculty.first_name, faculty.last_name, faculty.email, faculty.specialty, faculty.clinical_title, faculty.faculty_appointment, faculty.administrative_role]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
@@ -134,6 +142,9 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
       email: faculty.email ?? '',
       phone: faculty.phone ?? '',
       specialty: faculty.specialty ?? '',
+      clinicalTitle: faculty.clinical_title ?? '',
+      facultyAppointment: faculty.faculty_appointment ?? '',
+      administrativeRole: faculty.administrative_role ?? '',
     });
     setFormErrors({});
     setSaveError(null);
@@ -175,6 +186,9 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
         email: form.email.trim() || null,
         phone: form.phone.trim() || null,
         specialty: form.specialty.trim() || null,
+        clinical_title: form.clinicalTitle.trim() || null,
+        faculty_appointment: form.facultyAppointment.trim() || null,
+        administrative_role: form.administrativeRole.trim() || null,
       };
 
       if (editing) {
@@ -289,10 +303,14 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
             </Card>
           ) : (
             <Card padded={false}>
-              {visible.map((faculty, index) => (
+{visible.map((faculty, index) => (
                 <ListRow
                   key={faculty.id}
-                  title={facultyDisplayName(faculty)}
+                  title={[
+                    facultyDisplayName(faculty),
+                    faculty.faculty_appointment ? `• ${faculty.faculty_appointment}` : '',
+                    faculty.administrative_role && faculty.administrative_role !== 'None' ? `• ${faculty.administrative_role}` : '',
+                  ].filter(Boolean).join(' ')}
                   subtitle={faculty.specialty || 'No specialty recorded'}
                   meta={faculty.email || faculty.phone || 'No contact details recorded'}
                   trailing={
@@ -317,7 +335,6 @@ export function FacultyRosterTab({ resource, programId }: FacultyRosterTabProps)
                       ) : null}
                     </View>
                   }
-                  last={index === visible.length - 1}
                 />
               ))}
             </Card>

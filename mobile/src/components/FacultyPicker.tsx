@@ -31,6 +31,9 @@ export interface FacultyOption {
   id: number;
   name: string;
   title: string | null;
+  clinicalTitle: string | null;
+  facultyAppointment: string | null;
+  administrativeRole: string | null;
   email: string | null;
   phone: string | null;
   isActive: boolean;
@@ -141,7 +144,7 @@ export function FacultyPicker({
             disabled={!selectable}
             accessibilityRole="radio"
             accessibilityState={{ selected, disabled: !selectable }}
-            accessibilityLabel={`${option.name}${option.title ? `, ${option.title}` : ''}${
+            accessibilityLabel={`${option.name}${option.title ? `, ${option.title}` : ''}${option.clinicalTitle ? `, Clinical: ${option.clinicalTitle}` : ''}${option.facultyAppointment ? `, ${option.facultyAppointment}` : ''}${option.administrativeRole && option.administrativeRole !== 'None' ? `, ${option.administrativeRole}` : ''}${
               option.isActive ? '' : ', no longer active'
             }`}
             style={({ pressed }) => [
@@ -159,6 +162,21 @@ export function FacultyPicker({
                 {option.title ? (
                   <Text variant="caption" tone="secondary" numberOfLines={1}>
                     {option.title}
+                  </Text>
+                ) : null}
+                {option.clinicalTitle ? (
+                  <Text variant="caption" tone="muted" numberOfLines={1}>
+                    {option.clinicalTitle}
+                  </Text>
+                ) : null}
+                {option.facultyAppointment ? (
+                  <Text variant="caption" tone="muted" numberOfLines={1}>
+                    {option.facultyAppointment}
+                  </Text>
+                ) : null}
+                {option.administrativeRole && option.administrativeRole !== 'None' ? (
+                  <Text variant="caption" tone="muted" numberOfLines={1}>
+                    {option.administrativeRole}
                   </Text>
                 ) : null}
                 {option.email ? (

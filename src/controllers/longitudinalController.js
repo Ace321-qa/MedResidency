@@ -545,13 +545,13 @@ class LongitudinalController {
         return res.status(400).json({ success: false, issues });
       }
 
-      const added = [];
+const added = [];
       for (const row of parsed.rows) {
         const [result] = await conn.query(
           `INSERT INTO faculty_supervisors
-             (program_id, first_name, last_name, title, email, phone, specialty, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, 'Dr.', ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          [programId, row.first_name, row.last_name, row.email, row.phone, row.specialty],
+             (program_id, first_name, last_name, title, clinical_title, faculty_appointment, administrative_role, email, phone, specialty, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, 'Dr.', ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [programId, row.first_name, row.last_name, row.clinical_title, row.faculty_appointment, row.administrative_role, row.email, row.phone, row.specialty],
         );
         added.push(result.insertId);
       }

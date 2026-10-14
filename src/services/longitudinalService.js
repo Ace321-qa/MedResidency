@@ -161,6 +161,42 @@ class LongitudinalService {
       );
     }
 
+    // Ensure faculty_supervisors has the new objective fields.
+    // These are additive; existing rows get NULL until populated.
+    const [ftitle] = await db.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'faculty_supervisors'
+          AND COLUMN_NAME = 'clinical_title'`
+    );
+    if (ftitle.length === 0) {
+      await db.query(
+        'ALTER TABLE faculty_supervisors ADD COLUMN clinical_title VARCHAR(50) NULL AFTER specialty'
+      );
+    }
+    const [fappointment] = await db.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'faculty_supervisors'
+          AND COLUMN_NAME = 'faculty_appointment'`
+    );
+    if (fappointment.length === 0) {
+      await db.query(
+        'ALTER TABLE faculty_supervisors ADD COLUMN faculty_appointment VARCHAR(50) NULL AFTER clinical_title'
+      );
+    }
+    const [fadmin] = await db.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'faculty_supervisors'
+          AND COLUMN_NAME = 'administrative_role'`
+    );
+    if (fadmin.length === 0) {
+      await db.query(
+        'ALTER TABLE faculty_supervisors ADD COLUMN administrative_role VARCHAR(50) NULL AFTER faculty_appointment'
+      );
+    }
+
     // Backfill a position for any clinic that has none yet, per programme, in
     // creation order so the seeded defaults keep their published order.
     const [unordered] = await db.query(
@@ -663,7 +699,7 @@ class LongitudinalService {
    */
   static async getFacultySupervisors(programId, { includeInactive = false, clinicTypeId } = {}) {
     let query = `
-      SELECT id, program_id, first_name, last_name, title, email, phone, specialty, is_active,
+      SELECT id, program_id, first_name, last_name, title, clinical_title, faculty_appointment, administrative_role, email, phone, specialty, is_active,
              CONCAT('Dr. ', first_name, ' ', last_name) AS display_name
       FROM faculty_supervisors
       WHERE program_id = ?
@@ -1826,9 +1862,9 @@ class LongitudinalService {
       throw error;
     }
     const [result] = await db.query(
-      `INSERT INTO faculty_supervisors (program_id, first_name, last_name, title, email, phone, specialty, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [programId, firstName, lastName, data.title ? String(data.title).trim() : null, data.email ? String(data.email).trim() : null, data.phone ? String(data.phone).trim() : null, data.specialty ? String(data.specialty).trim() : null, data.is_active !== undefined ? (Number(data.is_active) ? 1 : 0) : 1]
+      `INSERT INTO faculty_supervisors (program_id, first_name, last_name, title, clinical_title, faculty_appointment, administrative_role, email, phone, specialty, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [programId, firstName, lastName, data.title ? String(data.title).trim() : null, data.clinical_title ? String(data.clinical_title).trim() : null, data.faculty_appointment ? String(data.faculty_appointment).trim() : null, data.administrative_role ? String(data.administrative_role).trim() : null, data.email ? String(data.email).trim() : null, data.phone ? String(data.phone).trim() : null, data.specialty ? String(data.specialty).trim() : null, data.is_active !== undefined ? (Number(data.is_active) ? 1 : 0) : 1]
     );
     const [rows] = await db.query('SELECT * FROM faculty_supervisors WHERE id = ?', [result.insertId]);
     return rows[0];
@@ -1861,6 +1897,9 @@ class LongitudinalService {
       sets.push('last_name = ?'); params.push(v);
     }
     if (data.title !== undefined) { sets.push('title = ?'); params.push(String(data.title).trim() || null); }
+    if (data.clinical_title !== undefined) { sets.push('clinical_title = ?'); params.push(String(data.clinical_title).trim() || null); }
+    if (data.faculty_appointment !== undefined) { sets.push('faculty_appointment = ?'); params.push(String(data.faculty_appointment).trim() || null); }
+    if (data.administrative_role !== undefined) { sets.push('administrative_role = ?'); params.push(String(data.administrative_role).trim() || null); }
     if (data.email !== undefined) { sets.push('email = ?'); params.push(String(data.email).trim() || null); }
     if (data.phone !== undefined) { sets.push('phone = ?'); params.push(String(data.phone).trim() || null); }
     if (data.specialty !== undefined) { sets.push('specialty = ?'); params.push(String(data.specialty).trim() || null); }
