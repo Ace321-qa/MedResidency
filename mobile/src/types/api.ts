@@ -67,6 +67,14 @@ export interface ResidentListItem {
   pgy_level: number | null;
   resident_status: string;
   created_at: IsoDateString;
+  /**
+   * The resident's corporate id, email and mobile, resolved from
+   * `resident_identifiers` by the list query. They are `null` until such an
+   * identifier has been recorded, and back the roster card and its search box.
+   */
+  corporate_id?: string | null;
+  email?: string | null;
+  mobile?: string | null;
 }
 
 /** `GET /rotations/blocks?program_id=`. */

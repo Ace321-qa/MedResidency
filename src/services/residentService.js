@@ -94,6 +94,11 @@ async function onboardResident({ personal_info, identifiers, enrollment }) {
  * Retrieve all residents with their enrolled program details
  */
 async function getAllResidents({ program_id, limit = 50, offset = 0 } = {}) {
+  // Corporate id, email and mobile live on `resident_identifiers`, not on
+  // `residents`. They are pulled in with a correlated subquery per type rather
+  // than a JOIN, because a resident may hold several identifiers of the same
+  // type and a JOIN would multiply the roster rows. These three fields are what
+  // the roster search box matches on and what each roster card displays.
   let query = `
     SELECT 
       r.id AS resident_id,
@@ -109,7 +114,28 @@ async function getAllResidents({ program_id, limit = 50, offset = 0 } = {}) {
       p.specialty_name,
       re.year_in_program AS pgy_level,
       re.resident_status,
-      r.created_at
+      r.created_at,
+      (
+        SELECT ri.identifier_value
+        FROM resident_identifiers ri
+        WHERE ri.resident_id = r.id AND ri.identifier_type = 'CORPORATE_ID'
+        ORDER BY ri.is_primary DESC, ri.id ASC
+        LIMIT 1
+      ) AS corporate_id,
+      (
+        SELECT ri.identifier_value
+        FROM resident_identifiers ri
+        WHERE ri.resident_id = r.id AND ri.identifier_type = 'EMAIL'
+        ORDER BY ri.is_primary DESC, ri.id ASC
+        LIMIT 1
+      ) AS email,
+      (
+        SELECT ri.identifier_value
+        FROM resident_identifiers ri
+        WHERE ri.resident_id = r.id AND ri.identifier_type = 'MOBILE'
+        ORDER BY ri.is_primary DESC, ri.id ASC
+        LIMIT 1
+      ) AS mobile
     FROM residents r
     LEFT JOIN residency_enrollments re ON re.resident_id = r.id
     LEFT JOIN programs p ON p.id = re.program_id

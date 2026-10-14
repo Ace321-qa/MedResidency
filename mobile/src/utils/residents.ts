@@ -112,3 +112,93 @@ export function filterResidents(residents: ResidentListItem[], query: string): R
     return haystack.includes(needle);
   });
 }
+
+/**
+ * The three enrolment buckets the roster's status filter offers. Every stored
+ * `resident_status` maps to exactly one of these, or to `OTHER` for the
+ * terminal states (graduated, withdrawn) that are neither active nor away.
+ */
+export type ResidentStatusGroup = 'ACTIVE' | 'OFF_CYCLE' | 'ON_LEAVE' | 'OTHER';
+
+const STATUS_GROUP_BY_STATUS: Record<string, ResidentStatusGroup> = {
+  ACTIVE_FULL_TIME: 'ACTIVE',
+  ACTIVE_PART_TIME: 'ACTIVE',
+  STARTED_OFF_CYCLE: 'OFF_CYCLE',
+  LEAVE_OF_ABSENCE: 'ON_LEAVE',
+  GRADUATED: 'OTHER',
+  WITHDRAWN: 'OTHER',
+};
+
+/** Fold a stored `resident_status` into one of the roster's filter buckets. */
+export function residentStatusGroup(status: string): ResidentStatusGroup {
+  return STATUS_GROUP_BY_STATUS[status] ?? 'OTHER';
+}
+
+/** `ACTIVE_FULL_TIME` -> `Active`, `STARTED_OFF_CYCLE` -> `Off-Cycle`. */
+export function residentStatusLabel(status: string): string {
+  switch (residentStatusGroup(status)) {
+    case 'ACTIVE':
+      return 'Active';
+    case 'OFF_CYCLE':
+      return 'Off-Cycle';
+    case 'ON_LEAVE':
+      return 'On Leave';
+    default:
+      return humanizeEnum(status);
+  }
+}
+
+/** The sentinel both filter chips use for "no restriction". */
+export const ROSTER_FILTER_ALL = 'ALL';
+
+export interface ResidentRosterFilters {
+  /** `ROSTER_FILTER_ALL`, or a PGY level as a string (`'1'`..`'4'`). */
+  pgyLevel?: string;
+  /** `ROSTER_FILTER_ALL`, or a `ResidentStatusGroup`. */
+  statusGroup?: string;
+}
+
+/**
+ * The roster tab's combined search and filter, kept separate from
+ * `filterResidents` on purpose: the list projection now carries the corporate
+ * id and email, and matching on those would widen the result set of the older
+ * name/programme search the insight checks depend on. This is the richer rule
+ * the roster screen actually uses.
+ */
+export function filterResidentRoster(
+  residents: ResidentListItem[],
+  query: string,
+  filters: ResidentRosterFilters = {},
+): ResidentListItem[] {
+  const needle = query.trim().toLowerCase();
+  const pgy =
+    filters.pgyLevel && filters.pgyLevel !== ROSTER_FILTER_ALL
+      ? Number(filters.pgyLevel)
+      : null;
+  const group =
+    filters.statusGroup && filters.statusGroup !== ROSTER_FILTER_ALL
+      ? filters.statusGroup
+      : null;
+
+  return residents.filter((resident) => {
+    if (pgy !== null && resident.pgy_level !== pgy) return false;
+    if (group !== null && residentStatusGroup(resident.resident_status) !== group) return false;
+    if (!needle) return true;
+
+    const haystack = [
+      resident.first_name,
+      resident.middle_initial,
+      resident.last_name,
+      resident.program_code,
+      resident.specialty_name,
+      resident.corporate_id,
+      resident.email,
+      resident.pgy_level === null ? '' : `pgy-${resident.pgy_level}`,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+
+    return haystack.includes(needle);
+  });
+}

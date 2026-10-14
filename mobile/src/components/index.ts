@@ -18,6 +18,8 @@ export {
 } from './Form';
 export { FacultyPicker, type FacultyOption } from './FacultyPicker';
 export { Avatar, DetailRow, ListRow } from './ListRow';
+export { FacultyRosterTab } from './FacultyRosterTab';
+export { ResidentRosterTab } from './ResidentRosterTab';
 export { MatrixTable, type MatrixColumnDef, type MatrixRowDef } from './MatrixTable';
 export { Screen } from './Screen';
 export { ImportTools } from './ImportTools';
