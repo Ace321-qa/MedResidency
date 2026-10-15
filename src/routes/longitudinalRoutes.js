@@ -23,6 +23,7 @@ router.patch('/supervisor-assignments/:assignment_id/rotate', LongitudinalContro
 router.get('/cycle-schedule', LongitudinalController.getCycleSchedule);
 router.get('/cycles', LongitudinalController.getCycles);
 router.put('/cycle-schedule/header', LongitudinalController.updateCycleHeader);
+router.delete('/cycle-schedule/header/:id', LongitudinalController.deleteCycleHeader);
 router.put('/cycle-schedule/slot', LongitudinalController.updateCycleSlot);
 router.post('/cycle-schedule/backup', LongitudinalController.updateBackupFaculty);
 router.get('/cycle-schedule/absences', LongitudinalController.getCycleAbsences);

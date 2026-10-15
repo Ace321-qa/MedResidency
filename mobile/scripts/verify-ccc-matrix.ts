@@ -24,13 +24,19 @@ import {
   dayOfWeekMatches,
   pgyLevelFromLabel,
   pgyLevelsForRow,
+  weekdayIndex,
+  weekdayName,
   type CccScheduleRow,
 } from '../src/utils/cccMatrix';
 import { ACADEMIC_DAYS, academicDayForPgy } from '../src/utils/academicYear';
 import {
   calculateEndDateFromWeeks,
   convertMonthsToWeeks,
+  dateForWeekDay,
   formatWeekSpan,
+  weekDayDate,
+  weekDayOffset,
+  weekDaySequence,
 } from '../src/utils/dateCalc';
 import { rotationWindowForMonths } from '../src/utils/masterGridCalendar';
 import {
@@ -278,6 +284,96 @@ console.log('\n-- the rotation badge reads total weeks and both boundary days --
   );
   assert('a missing end date yields no badge', formatWeekSpan(12, '2026-10-11', ''), null);
   assert('a non-positive window yields no badge', formatWeekSpan(0, '2026-10-11', '2026-10-17'), null);
+}
+
+/* ------------------------------------------------------------------ *
+ * The CCC week rotates with the cycle's Week Start Date. A Monday-start
+ * cycle runs Monday-Sunday; the Nth day row is `D_start + (N - 1)`.
+ * ------------------------------------------------------------------ */
+
+console.log('\n-- the week-day rotation starts on the Week Start Date --');
+{
+  assert(
+    'a Sunday-start cycle runs Sunday to Saturday',
+    weekDaySequence('2026-10-11'),
+    ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+  );
+  assert(
+    'a Monday-start cycle runs Monday to Sunday',
+    weekDaySequence('2026-10-12'),
+    ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+  );
+  assert(
+    'a Wednesday start rotates Wednesday to Tuesday',
+    weekDaySequence(3),
+    ['Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', 'Monday', 'Tuesday'],
+  );
+  assert(
+    'a day name works as the start too',
+    weekDaySequence('Wednesday'),
+    ['Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', 'Monday', 'Tuesday'],
+  );
+  assert('an unknown start falls back to Sunday', weekDaySequence(null), [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ]);
+}
+
+console.log('\n-- the day offset is the N - 1 in D_start + (N - 1) --');
+{
+  assert('the start day is offset 0', weekDayOffset('2026-10-12', 'Monday'), 0);
+  assert('the next day is offset 1', weekDayOffset('2026-10-12', 'Tuesday'), 1);
+  assert('Wednesday is offset two', weekDayOffset('2026-10-12', 'Wednesday'), 2);
+  assert('the week closes six days later', weekDayOffset('2026-10-12', 'Sunday'), 6);
+  assert('a short name is accepted', weekDayOffset('2026-10-12', 'Sun'), 6);
+  assert('a nonsense day has no offset', weekDayOffset('2026-10-12', 'Someday'), null);
+  assert('a null start falls back to a Sunday week', weekDayOffset(null, 'Monday'), 1);
+}
+
+console.log('\n-- each day row carries the exact calendar date D_start + (N - 1) --');
+{
+  assert('row 1 is the Week Start Date itself', weekDayDate('2026-10-12', 0), '2026-10-12');
+  assert('row 3 is two days later', weekDayDate('2026-10-12', 2), '2026-10-14');
+  assert('row 7 closes the week', weekDayDate('2026-10-12', 6), '2026-10-18');
+  assert('an offset past the week yields nothing', weekDayDate('2026-10-12', 7), null);
+  assert('a negative offset yields nothing', weekDayDate('2026-10-12', -1), null);
+  assert('a bad start date yields nothing', weekDayDate('not-a-date', 1), null);
+}
+
+console.log('\n-- a named day resolves to its exact date in the cycle week --');
+{
+  assert('the start day is itself', dateForWeekDay('2026-10-12', 'Monday'), '2026-10-12');
+  assert('the following Sunday closes a Monday-start week', dateForWeekDay('2026-10-12', 'Sunday'), '2026-10-18');
+  assert('a Sunday-start week opens on Sunday', dateForWeekDay('2026-10-11', 'Sunday'), '2026-10-11');
+  assert('and closes on Saturday', dateForWeekDay('2026-10-11', 'Saturday'), '2026-10-17');
+  assert('a short day name resolves too', dateForWeekDay('2026-10-12', 'Thu'), '2026-10-15');
+  assert('a nonsense day resolves to nothing', dateForWeekDay('2026-10-12', 'nonsense'), null);
+  assert('a bad start date resolves to nothing', dateForWeekDay('not-a-date', 'Monday'), null);
+}
+
+console.log('\n-- the date helpers and the day-name index agree with the rotation --');
+{
+  // `weekDayDate` and `dateForWeekDay` are two roads to the same cell, and the
+  // row's index into the sequence must equal its `D_start + (N - 1)` offset.
+  const start = '2026-10-12';
+  const sequence = weekDaySequence(start);
+  const datesMatch = sequence.every(
+    (day, index) =>
+      weekDayOffset(start, day) === index && weekDayDate(start, index) === dateForWeekDay(start, day),
+  );
+  assert('every day is at its own sequence offset and dated the same way', datesMatch, true);
+
+  assert('weekdayIndex names Sunday zero', weekdayIndex('Sunday'), 0);
+  assert('weekdayIndex reads a three-letter name', weekdayIndex('Thu'), 4);
+  assert('weekdayName canonicalises a short name', weekdayName('wed'), 'Wednesday');
+  assert('weekdayIndex rejects nonsense', weekdayIndex('nonsense'), -1);
+  assert('weekdayIndex rejects a blank', weekdayIndex(''), -1);
+  assert('weekdayName rejects nonsense', weekdayName('nonsense'), null);
 }
 
 /* ------------------------------------------------------------------ *

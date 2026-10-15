@@ -40,6 +40,20 @@ function formatResidentName(name) {
   return base || null;
 }
 
+/**
+ * The full week. A CCC cycle's day rows rotate with its Week Start Date, so the
+ * sequence a Monday-start cycle runs is Monday..Sunday; `WEEK_DAYS` is the fixed
+ * Sunday-first index every helper below works against.
+ */
+const WEEK_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * The five days a brand-new cycle is seeded with, in curriculum order.
+ *
+ * These are only the *defaults*: a coordinator can add any of the remaining
+ * weekdays or remove a default one, and the rotation is driven by the cycle's
+ * Week Start Date rather than this list.
+ */
 const CCC_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 
 /** Shift / PGY defaults for each CCC academic day. */
@@ -53,14 +67,65 @@ function defaultPgyForDay(day) {
       return 'PGY-3';
     case 'Monday':
       return 'PGY-2';
-    case 'Tuesday':
-      return 'FMC';
     case 'Wednesday':
       return 'PGY-1';
     default:
       return 'FMC';
   }
 }
+
+/**
+ * The `Date.getDay()` index (0 = Sunday) a day name maps to, across all seven
+ * days. Returns -1 for a value that names no weekday.
+ */
+function weekDayIndex(dayOfWeek) {
+  const normalized = String(dayOfWeek ?? '').trim().toLowerCase();
+  if (!normalized) return -1;
+  return WEEK_DAYS.findIndex((day) => {
+    const full = day.toLowerCase();
+    return normalized === full || normalized === full.slice(0, 3) || normalized.startsWith(full.slice(0, 3));
+  });
+}
+
+/** Canonical day name for a `day_of_week` string, or the trimmed input. */
+function canonicalDayName(dayOfWeek) {
+  const index = weekDayIndex(dayOfWeek);
+  return index < 0 ? String(dayOfWeek ?? '').trim() : WEEK_DAYS[index];
+}
+
+/**
+ * The `Date.getDay()` index the cycle's Week Start Date falls on.
+ *
+ * The whole day sequence rotates around this: a cycle starting on a Monday runs
+ * Monday-Sunday, one starting on Sunday runs Sunday-Saturday.
+ */
+function cycleStartWeekDay(startDate) {
+  const calendar = toCalendarDate(startDate);
+  if (!calendar) return 0;
+  const parsed = new Date(`${calendar}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getDay();
+}
+
+/**
+ * Where a day sits in the cycle's week: 0 for the Week Start Date's own weekday,
+ * 1 for the next day, and so on. This is the `N - 1` in `D_start + (N - 1)`.
+ */
+function cycleDayOrder(dayOfWeek, startWeekDay) {
+  const index = weekDayIndex(dayOfWeek);
+  if (index < 0) return 99;
+  return (index - startWeekDay + 7) % 7;
+}
+
+/** Sort a cycle's day headers into the order its week runs. */
+function sortDailyHeaders(headers, startDate) {
+  const startWeekDay = cycleStartWeekDay(startDate);
+  return [...headers].sort((a, b) => {
+    const diff = cycleDayOrder(a.day_of_week, startWeekDay) - cycleDayOrder(b.day_of_week, startWeekDay);
+    if (diff !== 0) return diff;
+    return Number(a.id) - Number(b.id);
+  });
+}
+
 
 /**
  * The CCC grid's clinic columns are numbered positions — `Clinic 1`, `Clinic 2`,
@@ -89,14 +154,14 @@ const ABSENCE_LEAVE_TYPES = [
 /** Marker written into `resident_attendance_logs.notes` for rows this feature owns. */
 const CCC_LEAVE_NOTE = '[CCC Leave Registry]';
 
-/** `Date.getDay()` index for a CCC day name, or -1 when it names no CCC day. */
+/**
+ * `Date.getDay()` index for a CCC day name, or -1 when it names no weekday.
+ *
+ * Covers all seven days, so a cycle that has grown past the default five still
+ * resolves the calendar date of its Friday or Saturday rows.
+ */
 function cccWeekdayIndex(dayOfWeek) {
-  const normalized = String(dayOfWeek ?? '').trim().toLowerCase();
-  if (!normalized) return -1;
-  return CCC_DAYS.findIndex((day) => {
-    const full = day.toLowerCase();
-    return normalized === full || normalized === full.slice(0, 3) || normalized.startsWith(full.slice(0, 3));
-  });
+  return weekDayIndex(dayOfWeek);
 }
 
 /**
@@ -1157,12 +1222,16 @@ class LongitudinalService {
 
     cycle = { ...cycle, start_date: toCalendarDate(cycle.start_date) };
 
-    for (const day of CCC_DAYS) {
-      const [existing] = await db.query(
-        'SELECT id FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ? LIMIT 1',
-        [cycle.id, day]
-      );
-      if (existing.length === 0) {
+    // Seed the default five CCC days exactly once per cycle. The guard is the
+    // cycle having *no* day rows at all (rather than "this particular day is
+    // missing"), so a day a coordinator removed is not resurrected by the next
+    // read — the same once-only rule the clinic columns use.
+    const [existingHeaders] = await db.query(
+      'SELECT id FROM primary_care_daily_headers WHERE cycle_id = ? LIMIT 1',
+      [cycle.id]
+    );
+    if (existingHeaders.length === 0) {
+      for (const day of CCC_DAYS) {
         await db.query(
           'INSERT INTO primary_care_daily_headers (cycle_id, day_of_week, shift_time, pgy_level) VALUES (?, ?, ?, ?)',
           [cycle.id, day, defaultShiftForDay(day), defaultPgyForDay(day)]
@@ -1170,10 +1239,11 @@ class LongitudinalService {
       }
     }
 
-    const [headers] = await db.query(
-      'SELECT * FROM primary_care_daily_headers WHERE cycle_id = ? ORDER BY FIELD(day_of_week, ?, ?, ?, ?, ?)',
-      [cycle.id, ...CCC_DAYS]
+    const [unsortedHeaders] = await db.query(
+      'SELECT * FROM primary_care_daily_headers WHERE cycle_id = ?',
+      [cycle.id]
     );
+    const headers = sortDailyHeaders(unsortedHeaders, cycle.start_date);
 
     // The grid needs a slot for every clinic column, so a programme that has
     // added columns beyond the defaults still gets a cell to write into. Leaves
@@ -1454,28 +1524,66 @@ class LongitudinalService {
       await db.query(`UPDATE primary_care_cycles SET ${cycleSets.join(', ')} WHERE id = ? AND program_id = ?`, cycleParams);
     }
 
+    let createdHeader = null;
     if (Array.isArray(data.dailyHeaders)) {
       for (const header of data.dailyHeaders) {
-        const sets = [];
-        const params = [];
-        if (header.day_of_week !== undefined) {
-          const day = String(header.day_of_week ?? '').trim();
-          if (day) {
-            // Two headers sharing a day would make the matrix ambiguous, since a
-            // row is resolved by its day. Reject rather than silently duplicate.
-            const [clash] = await db.query(
-              'SELECT id FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ? AND id <> ? LIMIT 1',
-              [cycleId, day, header.id]
-            );
-            if (clash.length > 0) {
-              const error = new Error(`The ${day} day already exists on this cycle. Choose a different day.`);
-              error.statusCode = 409;
-              throw error;
-            }
-            sets.push('day_of_week = ?');
-            params.push(day);
+        const hasId = header.id !== undefined && header.id !== null && Number(header.id) > 0;
+        const rawDay = header.day_of_week !== undefined ? String(header.day_of_week ?? '').trim() : '';
+        const day = rawDay ? canonicalDayName(rawDay) : '';
+
+        if (day) {
+          // Two headers sharing a day would make the matrix ambiguous, since a
+          // row is resolved by its day. Reject rather than silently duplicate.
+          const [clash] = hasId
+            ? await db.query(
+                'SELECT id FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ? AND id <> ? LIMIT 1',
+                [cycleId, day, header.id]
+              )
+            : await db.query(
+                'SELECT id FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ? LIMIT 1',
+                [cycleId, day]
+              );
+          if (clash.length > 0) {
+            const error = new Error(`The ${day} day already exists on this cycle. Choose a different day.`);
+            error.statusCode = 409;
+            throw error;
           }
         }
+
+        // No id means this is a new day row (the "+ Add Day Row" path). Only
+        // `day_of_week` is required; shift, PGY and In-Charge fall back to the
+        // curriculum defaults so a freshly added row is immediately usable.
+        if (!hasId) {
+          if (!day) {
+            const error = new Error('day_of_week is required when adding a day.');
+            error.statusCode = 400;
+            throw error;
+          }
+          const [result] = await db.query(
+            `INSERT INTO primary_care_daily_headers
+               (cycle_id, day_of_week, shift_time, pgy_level, in_charge_faculty_id, in_charge_faculty_name)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              cycleId,
+              day,
+              header.shift_time !== undefined ? header.shift_time : defaultShiftForDay(day),
+              header.pgy_level !== undefined ? header.pgy_level : defaultPgyForDay(day),
+              header.in_charge_faculty_id || null,
+              header.in_charge_faculty_name !== undefined
+                ? formatFacultyName(header.in_charge_faculty_name)
+                : null,
+            ]
+          );
+          const [createdRows] = await db.query('SELECT * FROM primary_care_daily_headers WHERE id = ?', [
+            result.insertId,
+          ]);
+          createdHeader = createdRows[0] ?? null;
+          continue;
+        }
+
+        const sets = [];
+        const params = [];
+        if (day) { sets.push('day_of_week = ?'); params.push(day); }
         if (header.shift_time !== undefined) { sets.push('shift_time = ?'); params.push(header.shift_time); }
         if (header.pgy_level !== undefined) { sets.push('pgy_level = ?'); params.push(header.pgy_level); }
         if (header.in_charge_faculty_name !== undefined) {
@@ -1486,16 +1594,119 @@ class LongitudinalService {
           sets.push('in_charge_faculty_id = ?');
           params.push(header.in_charge_faculty_id || null);
         }
-        if (sets.length > 0 && header.id) {
+        if (sets.length > 0) {
           params.push(header.id);
           await db.query(`UPDATE primary_care_daily_headers SET ${sets.join(', ')} WHERE id = ?`, params);
         }
       }
     }
 
+    // Give a brand-new day its clinic slots straight away, so its grid cells are
+    // tappable without waiting for the next read to materialise them.
+    let createdSlots = [];
+    if (createdHeader) {
+      const columns = await this.getMatrixColumns(programId);
+      const maxClinicNumber = columns.reduce(
+        (highest, column) => Math.max(highest, column.clinic_number),
+        0
+      );
+      const requiredSlotCount = Math.max(DEFAULT_CLINIC_COLUMN_COUNT, maxClinicNumber);
+      const inserts = [];
+      for (let i = 1; i <= requiredSlotCount; i += 1) {
+        inserts.push([createdHeader.id, i, null, null, null, null]);
+      }
+      if (inserts.length > 0) {
+        await db.query(
+          'INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id) VALUES ?',
+          [inserts]
+        );
+      }
+      const [slotRows] = await db.query(
+        'SELECT * FROM primary_care_clinic_slots WHERE daily_header_id = ? ORDER BY clinic_number',
+        [createdHeader.id]
+      );
+      createdSlots = slotRows;
+    }
+
     const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ?', [cycleId]);
     const updated = cycles[0];
-    return updated ? { ...updated, start_date: toCalendarDate(updated.start_date) } : updated;
+    const cycle = updated ? { ...updated, start_date: toCalendarDate(updated.start_date) } : updated;
+
+    const [headerRows] = await db.query(
+      'SELECT * FROM primary_care_daily_headers WHERE cycle_id = ?',
+      [cycleId]
+    );
+    const headers = sortDailyHeaders(headerRows, cycle?.start_date ?? effectiveStart);
+
+    return { cycle, headers, header: createdHeader, createdSlots };
+  }
+
+  /**
+   * Remove one day row from a cycle's CCC week.
+   *
+   * The Coordinator-facing "- Remove Row" control. A cycle must keep at least one
+   * day, so removing the final one is refused. The day's slots, backup pool and
+   * leave rows are removed with it so nothing dangles; the remaining headers are
+   * returned in sequence order for the caller to patch into local state.
+   *
+   * @param {number} programId
+   * @param {number} headerId
+   */
+  static async deleteCycleHeader(programId, headerId) {
+    await this.ensureSchema();
+    const program = Number(programId);
+    const id = Number(headerId);
+    if (!Number.isInteger(program) || program <= 0) {
+      const error = new Error('program_id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!Number.isInteger(id) || id <= 0) {
+      const error = new Error('A numeric day header id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const [rows] = await db.query(
+      `SELECT dh.*, pc.program_id AS cycle_program_id, pc.start_date AS cycle_start_date
+         FROM primary_care_daily_headers dh
+         JOIN primary_care_cycles pc ON pc.id = dh.cycle_id
+        WHERE dh.id = ?`,
+      [id]
+    );
+    const header = rows[0];
+    if (!header || Number(header.cycle_program_id) !== program) {
+      const error = new Error('That day was not found on this programme.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const [countRows] = await db.query(
+      'SELECT COUNT(*) AS total FROM primary_care_daily_headers WHERE cycle_id = ?',
+      [header.cycle_id]
+    );
+    if ((Number(countRows[0]?.total) || 0) <= 1) {
+      const error = new Error('A CCC week must keep at least one day. Add another day before removing this one.');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    await db.query('DELETE FROM primary_care_backup_faculty WHERE daily_header_id = ?', [id]);
+    await db.query('DELETE FROM primary_care_absences WHERE daily_header_id = ?', [id]);
+    await db.query('DELETE FROM primary_care_clinic_slots WHERE daily_header_id = ?', [id]);
+    await db.query('DELETE FROM primary_care_daily_headers WHERE id = ?', [id]);
+
+    const [remaining] = await db.query(
+      'SELECT * FROM primary_care_daily_headers WHERE cycle_id = ?',
+      [header.cycle_id]
+    );
+
+    return {
+      deleted_id: id,
+      deleted_day: header.day_of_week,
+      cycle_id: header.cycle_id,
+      headers: sortDailyHeaders(remaining, header.cycle_start_date),
+    };
   }
 
   /**

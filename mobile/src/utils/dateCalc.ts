@@ -440,6 +440,88 @@ export function nextWeekday(from: string, day: string | number): string | null {
   return addDays(from, (wanted - current + 7) % 7);
 }
 
+/**
+ * The seven weekday names in the order a week that begins on `weekStart` runs.
+ *
+ * The CCC weekly grid opens on the cycle's Week Start Date, so a Sunday-start
+ * cycle runs Sunday-Saturday while a Monday-start one runs Monday-Sunday. This
+ * is the single source of that rotation: everything else (the day rows, the
+ * "Rotate a Single Day" bar, the calendar dates under each day) indexes into
+ * this array.
+ *
+ * `weekStart` accepts anything `normalizeWeekStartDay` does ('Monday', 'Mon',
+ * 0-6) plus a `YYYY-MM-DD` string or `Date`, from which the weekday is taken.
+ * An unusable value falls back to Sunday.
+ */
+export function weekDaySequence(weekStart: string | number | Date | null | undefined): DayName[] {
+  const resolved = resolveCalendarDate(weekStart as string | Date | null | undefined);
+  const start =
+    (resolved ? dayNameOf(resolved) : null) ??
+    normalizeWeekStartDay(typeof weekStart === 'number' || typeof weekStart === 'string' ? weekStart : null) ??
+    'Sunday';
+
+  const startIndex = DAY_NAMES.indexOf(start);
+  return Array.from({ length: 7 }, (_, offset) => DAY_NAMES[(startIndex + offset) % 7]);
+}
+
+/**
+ * The offset 0..6 of `day` within the week beginning on `weekStart`, or null.
+ *
+ * Offset 0 is the week's first day, so a Monday-start week gives
+ * `weekDayOffset('2026-10-12', 'Monday') === 0` and
+ * `weekDayOffset('2026-10-12', 'Sunday') === 6`.
+ */
+export function weekDayOffset(
+  weekStart: string | number | null | undefined,
+  day: string | number | null | undefined,
+): number | null {
+  const target = normalizeWeekStartDay(day);
+  if (!target) return null;
+  const index = weekDaySequence(weekStart).indexOf(target);
+  return index < 0 ? null : index;
+}
+
+/**
+ * The calendar date of the Nth day of the week beginning at `weekStartDate`:
+ * exactly `D_start + (N - 1)`, where `offset` is `N - 1`.
+ *
+ * The grid's day rows are numbered from 1, so the first row's date *is* the
+ * Week Start Date and a Wednesday-start cycle's third row is `D_start + 2`.
+ *
+ * @returns {string|null} null for a bad date or an offset outside 0..6.
+ */
+export function weekDayDate(
+  weekStartDate: string | Date | null | undefined,
+  offset: number,
+): string | null {
+  const start = resolveCalendarDate(weekStartDate ?? null);
+  const index = Number(offset);
+  if (!start || !Number.isInteger(index) || index < 0 || offset > 6) return null;
+  return addDays(start, offset);
+}
+
+/**
+ * The exact date of a named weekday in the week beginning `weekStartDate`.
+ *
+ * `dateForWeekDay('2026-10-12', 'Monday') === '2026-10-12'` (the start itself)
+ * and `dateForWeekDay('2026-10-12', 'Sunday') === '2026-10-18'`, because a week
+ * that opens on Monday closes on the following Sunday.
+ *
+ * @returns {string|null} null when either date or day name is unusable.
+ */
+export function dateForWeekDay(
+  weekStartDate: string | Date | null | undefined,
+  day: string | number | null | undefined,
+): string | null {
+  const start = resolveCalendarDate(weekStartDate as string | Date | null | undefined);
+  const startDay = dayNameOf(start);
+  const target = normalizeWeekStartDay(day);
+  if (!start || !startDay || !target) return null;
+
+  const offset = (DAY_NAMES.indexOf(target) - DAY_NAMES.indexOf(startDay) + 7) % 7;
+  return addDays(start, offset);
+}
+
 /** A resolved block window: the dates, the length and every complaint. */
 export interface BlockWindow {
   start_date: string | null;

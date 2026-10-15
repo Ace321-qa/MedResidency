@@ -137,6 +137,26 @@ export function dayOfWeekMatches(dayOfWeek: string | null | undefined, weekday: 
   return normalized === full || normalized === short || normalized === first3 || normalized.startsWith(first3);
 }
 
+/**
+ * The `Date.getDay()` index (0 = Sunday) a `day_of_week` string names, or -1.
+ *
+ * The seven-day twin of `dayOfWeekMatches`, used to sort a cycle's day rows and
+ * locate the Week Start Date's weekday when the sequence rotates off Sunday.
+ */
+export function weekdayIndex(dayOfWeek: string | null | undefined): number {
+  if (!dayOfWeek) return -1;
+  for (let index = 0; index < WEEKDAY_NAMES.length; index += 1) {
+    if (dayOfWeekMatches(dayOfWeek, index)) return index;
+  }
+  return -1;
+}
+
+/** The canonical day name (e.g. 'Monday') a `day_of_week` string names, or null. */
+export function weekdayName(dayOfWeek: string | null | undefined): (typeof WEEKDAY_NAMES)[number] | null {
+  const index = weekdayIndex(dayOfWeek);
+  return index < 0 ? null : WEEKDAY_NAMES[index];
+}
+
 /** The PGY levels that attend a row, e.g. PGY-3 attends the Sunday row. */
 export function pgyLevelsForRow(row: CccScheduleRow): number[] | null {
   switch (row.code) {

@@ -32,6 +32,8 @@ import {
   renameClinicColumn,
   updateBackupFaculty,
   updateCycleHeader,
+  addCycleDayHeader,
+  deleteCycleDayHeader,
   updateCycleSlot,
   updateDayAbsences,
   createFacultySupervisor,
@@ -40,9 +42,17 @@ import {
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
 import { uploadFacultySupervisors } from '../../../services/excelTemplates';
-import { CCC_SCHEDULE_ROWS, dayOfWeekMatches, pgyLevelFromLabel } from '../../../utils/cccMatrix';
+import {
+  CCC_SCHEDULE_ROWS,
+  dayOfWeekMatches,
+  pgyLevelFromLabel,
+  weekdayIndex,
+  weekdayName,
+} from '../../../utils/cccMatrix';
 import { rotationWindowForMonths } from '../../../utils/masterGridCalendar';
-import { formatWeekSpan } from '../../../utils/dateCalc';
+import { DAY_NAMES, formatWeekSpan, weekDayDate, weekDaySequence } from '../../../utils/dateCalc';
+import type { DayName } from '../../../utils/dateCalc';
+import { formatShortDate } from '../../../utils/format';
 import { formatPgy } from '../../../utils/insights';
 import { residentFullName } from '../../../utils/residents';
 import {
@@ -75,8 +85,8 @@ import type {
  * pools sit below it.
  */
 
-const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'] as const;
-type DayName = (typeof DAYS)[number];
+/** Every weekday, Sunday-first. A cycle's own rotation is a slice of this. */
+const DAYS = DAY_NAMES;
 
 /** Only these days carry a catchup pool, per the programme rules. */
 const BACKUP_DAYS: DayName[] = ['Sunday', 'Monday', 'Wednesday'];
@@ -87,14 +97,23 @@ const DAY_SHORT: Record<DayName, string> = {
   Tuesday: 'Tue',
   Wednesday: 'Wed',
   Thursday: 'Thu',
+  Friday: 'Fri',
+  Saturday: 'Sat',
 };
 
+/**
+ * The default shift and PGY level each weekday starts with. A day row the
+ * coordinator adds is seeded from here, and a row with nothing saved falls back
+ * to it, so Friday and Saturday are first-class days rather than an afterthought.
+ */
 const DAY_CONFIG: Record<DayName, { shift: string; pgy: string }> = {
   Sunday: { shift: '10:30 – 2:00', pgy: 'PGY-3' },
   Monday: { shift: '10:30 – 2:00', pgy: 'PGY-2' },
   Tuesday: { shift: '07:00 – 2:00', pgy: 'FMC' },
   Wednesday: { shift: '10:30 – 2:00', pgy: 'PGY-1' },
   Thursday: { shift: '07:00 – 2:00', pgy: 'FMC' },
+  Friday: { shift: '10:30 – 2:00', pgy: 'FMC' },
+  Saturday: { shift: '10:30 – 2:00', pgy: 'FMC' },
 };
 
 interface MatrixColumn {
@@ -174,8 +193,10 @@ const BACKUP_POOL_MAX = 4;
 /** Web pins the day column; React Native has no sticky positioning. */
 const stickyPosition: 'relative' = Platform.OS === 'web' ? ('sticky' as any) : 'relative';
 
-/** The days a header may be reassigned to, in the order the week runs. */
-const DAY_OPTIONS: SelectOption<DayName>[] = DAYS.map((day) => ({ value: day, label: day }));
+/** The days a header may be reassigned to, in the cycle's own rotation order. */
+function dayOptionsFor(sequence: readonly DayName[]): SelectOption<DayName>[] {
+  return sequence.map((day) => ({ value: day, label: day }));
+}
 
 /** The PGY levels / contexts a day can carry. A custom value is kept too. */
 const PGY_OPTIONS: SelectOption<string>[] = [
@@ -353,8 +374,68 @@ export default function LongitudinalMatrixScreen() {
   const [leavesFacultyQuery, setLeavesFacultyQuery] = useState('');
   const [savingLeaves, setSavingLeaves] = useState(false);
 
+  /**
+   * The variable-day-row controls. `dayAddOpen` drives the "+ Add Day Row"
+   * sheet, `dayRemoveTarget` the "- Remove Row" confirmation, and `savingDay`
+   * disables both while a write is in flight.
+   */
+  const [dayAddOpen, setDayAddOpen] = useState(false);
+  const [dayAddForm, setDayAddForm] = useState<{
+    dayOfWeek: DayName;
+    shiftTime: string;
+    pgyLevel: string;
+    inChargeFaculty: string;
+  }>({ dayOfWeek: 'Sunday', shiftTime: '', pgyLevel: '', inChargeFaculty: NONE_FACULTY });
+  const [dayRemoveTarget, setDayRemoveTarget] = useState<DayName | null>(null);
+  const [savingDay, setSavingDay] = useState(false);
+
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
+
+  /**
+   * The week's day order, rotated to begin on the cycle's Week Start Date. A
+   * Sunday-start cycle runs Sunday–Saturday; pick Monday 2026-10-12 and the
+   * same week reads Monday–Sunday across every control on this screen.
+   */
+  const daySequence = useMemo<DayName[]>(
+    () => weekDaySequence(cycle?.start_date ?? null),
+    [cycle?.start_date],
+  );
+
+  /** The weekdays that actually have a stored row on this cycle. */
+  const persistedDays = useMemo<DayName[]>(() => {
+    const seen = new Set<DayName>();
+    const list: DayName[] = [];
+    for (const header of data?.dailyHeaders ?? []) {
+      const name = weekdayName(header.day_of_week);
+      if (name && !seen.has(name)) {
+        seen.add(name);
+        list.push(name);
+      }
+    }
+    return list;
+  }, [data?.dailyHeaders]);
+
+  /**
+   * The rows the grid renders — the stored days, in rotation order. A day the
+   * coordinator has not added yet is simply absent, which is what makes the
+   * number of rows variable; before the first load the sequence stands in.
+   */
+  const activeDays = useMemo<DayName[]>(() => {
+    if (persistedDays.length === 0) return daySequence;
+    return daySequence.filter((day) => persistedDays.includes(day));
+  }, [daySequence, persistedDays]);
+
+  /** The weekdays still available to add, in rotation order. */
+  const missingDays = useMemo<DayName[]>(
+    () => daySequence.filter((day) => !activeDays.includes(day)),
+    [daySequence, activeDays],
+  );
+
+  const dayOptions = useMemo<SelectOption<DayName>[]>(
+    () => dayOptionsFor(daySequence),
+    [daySequence],
+  );
 
   // The rotation input is a free-typed draft until the coordinator touches it;
   // once a saved cycle carries its own window, that value wins instead. Deriving
@@ -429,7 +510,7 @@ export default function LongitudinalMatrixScreen() {
   }, [residentsResource.data]);
 
   function headerForDay(day: DayName): PrimaryCareDailyHeader | null {
-    const weekday = DAYS.indexOf(day);
+    const weekday = weekdayIndex(day);
     return data?.dailyHeaders.find((header) => dayOfWeekMatches(header.day_of_week, weekday)) ?? null;
   }
 
@@ -554,6 +635,113 @@ export default function LongitudinalMatrixScreen() {
     }
   }
 
+  /** Open the "+ Add Day Row" sheet, seeded from the first still-missing day. */
+  function openAddDay() {
+    const next = missingDays[0] ?? daySequence[0] ?? 'Sunday';
+    setDayAddForm({
+      dayOfWeek: next,
+      shiftTime: DAY_CONFIG[next].shift,
+      pgyLevel: DAY_CONFIG[next].pgy,
+      inChargeFaculty: NONE_FACULTY,
+    });
+    setActionError(null);
+    setFeedback(null);
+    setDayAddOpen(true);
+  }
+
+  function closeAddDay() {
+    if (savingDay) return;
+    setDayAddOpen(false);
+  }
+
+  /**
+   * Append a new day row to the cycle. The server inserts it with curriculum
+   * defaults and materialises its clinic slots; the returned header and slots
+   * are patched into local state so the new row is editable immediately.
+   */
+  async function saveNewDay() {
+    if (!programId || !cycle) {
+      setActionError('The cycle has not loaded yet. Refresh and try again.');
+      return;
+    }
+    const facultyName = withDoctorTitle(dayAddForm.inChargeFaculty);
+    setSavingDay(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      const result = await addCycleDayHeader({
+        program_id: programId,
+        cycle_id: cycle.id,
+        day_of_week: dayAddForm.dayOfWeek,
+        shift_time: dayAddForm.shiftTime.trim() || null,
+        pgy_level: dayAddForm.pgyLevel.trim() || null,
+        in_charge_faculty_name: facultyName || null,
+        in_charge_faculty_id: facultyName ? facultyIdByName.get(facultyName) ?? null : null,
+      });
+      schedule.setData((current) =>
+        current
+          ? {
+              ...current,
+              dailyHeaders: result.headers.length > 0 ? result.headers : current.dailyHeaders,
+              slots: [...current.slots, ...result.slots],
+            }
+          : current,
+      );
+      setFeedback(`${dayAddForm.dayOfWeek} row added to the CCC week.`);
+      setDayAddOpen(false);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not add this day.');
+    } finally {
+      setSavingDay(false);
+    }
+  }
+
+  /** Remove one day row from the cycle. The grid must keep at least one day. */
+  async function confirmRemoveDay() {
+    if (!programId || !dayRemoveTarget || !cycle) return;
+    const header = headerForDay(dayRemoveTarget);
+    if (!header) {
+      setActionError('This day has not been created on the schedule yet. Refresh and try again.');
+      setDayRemoveTarget(null);
+      return;
+    }
+    const removedDay = dayRemoveTarget;
+    const removedId = header.id;
+    const removedWeekday = weekdayIndex(removedDay);
+    setSavingDay(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      const result = await deleteCycleDayHeader(programId, removedId);
+      schedule.setData((current) =>
+        current
+          ? {
+              ...current,
+              dailyHeaders:
+                result.headers && result.headers.length > 0
+                  ? result.headers
+                  : current.dailyHeaders.filter((entry) => entry.id !== removedId),
+              slots: current.slots.filter((slot) => slot.daily_header_id !== removedId),
+              absences: (current.absences ?? []).filter(
+                (row) =>
+                  row.daily_header_id !== removedId &&
+                  !dayOfWeekMatches(row.day_of_week, removedWeekday),
+              ),
+              backups: Object.fromEntries(
+                Object.entries(current.backups ?? {}).filter(([key]) => key !== removedDay),
+              ) as typeof current.backups,
+            }
+          : current,
+      );
+      setFeedback(`${removedDay} row removed from the CCC week.`);
+      setDayRemoveTarget(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not remove this day.');
+    } finally {
+      setSavingDay(false);
+    }
+  }
+
   function openSlot(edit: SlotEdit) {
     setSlotEdit(edit);
     setSlotForm({
@@ -674,7 +862,7 @@ export default function LongitudinalMatrixScreen() {
           faculty_name: name,
         })),
       });
-      const weekday = DAYS.indexOf(day);
+      const weekday = weekdayIndex(day);
       schedule.setData((current) =>
         current
           ? {
@@ -884,7 +1072,7 @@ export default function LongitudinalMatrixScreen() {
    * carries its own shift time.
    */
   function sessionWindow(day: DayName): string {
-    const weekday = DAYS.indexOf(day);
+    const weekday = weekdayIndex(day);
     const curriculum = CCC_SCHEDULE_ROWS.find((row) => row.weekday === weekday);
     return `${curriculum?.startTime ?? '10:30'} – ${curriculum?.endTime ?? '14:00'}`;
   }
@@ -912,7 +1100,7 @@ export default function LongitudinalMatrixScreen() {
 
   /** The absences recorded for one CCC day, residents and faculty together. */
   function absencesForDay(day: DayName): PrimaryCareAbsence[] {
-    const weekday = DAYS.indexOf(day);
+    const weekday = weekdayIndex(day);
     return (data?.absences ?? []).filter((row) => dayOfWeekMatches(row.day_of_week, weekday));
   }
 
@@ -1240,7 +1428,7 @@ export default function LongitudinalMatrixScreen() {
               Rotate a single day
             </Text>
             <View style={styles.actionRow}>
-              {DAYS.map((day) => (
+              {activeDays.map((day) => (
                 <Button
                   key={day}
                   label={DAY_SHORT[day]}
@@ -1256,13 +1444,15 @@ export default function LongitudinalMatrixScreen() {
           {viewMode === 'matrix' ? (
             <Card padded={false}>
               <View style={styles.cardPad}>
-                <SectionHeader title="Weekly Clinic Matrix" trailing={`${DAYS.length} days`} />
+                <SectionHeader title="Weekly Clinic Matrix" trailing={`${activeDays.length} days`} />
                 <Text variant="caption" tone="muted">
-                  Tap a day&apos;s header to edit its day, shift time, PGY level and In-Charge faculty.
-                  Tap a clinic cell to assign up to two residents and supervising faculty. The columns
-                  are numbered clinic positions — add one, or tap a column header to rename or remove
-                  it. The final Leaves column records who is away, and anyone marked away is hidden
-                  from that day&apos;s dropdowns.
+                  The week runs from the cycle&apos;s Week Start Date, so a Monday start reads
+                  Monday–Sunday. Tap a day&apos;s header to edit its day, shift time, PGY level and
+                  In-Charge faculty; use Add day to extend the week or Remove row to drop one. Tap a
+                  clinic cell to assign up to two residents and supervising faculty. The columns are
+                  numbered clinic positions — add one, or tap a column header to rename or remove it.
+                  The final Leaves column records who is away, and anyone marked away is hidden from
+                  that day&apos;s dropdowns.
                 </Text>
                 <Button
                   label={savingColumn ? 'Adding…' : 'Add clinic column'}
@@ -1285,6 +1475,26 @@ export default function LongitudinalMatrixScreen() {
                     <Text variant="label" tone="secondary" uppercase>
                       Day
                     </Text>
+                    <Pressable
+                      onPress={openAddDay}
+                      disabled={missingDays.length === 0 || savingDay}
+                      accessibilityRole="button"
+                      accessibilityLabel="Add a day row to the CCC week"
+                      accessibilityState={{ disabled: missingDays.length === 0 }}
+                      style={({ pressed }) => [
+                        styles.addDayButton,
+                        missingDays.length === 0 ? styles.dayActionDisabled : null,
+                        pressed && missingDays.length > 0 ? styles.cellPressed : null,
+                      ]}
+                    >
+                      <Plus color={missingDays.length > 0 ? colors.primary : colors.textMuted} size={12} />
+                      <Text
+                        variant="caption"
+                        tone={missingDays.length > 0 ? 'brand' : 'muted'}
+                      >
+                        Add day
+                      </Text>
+                    </Pressable>
                   </View>
                   {matrixColumns.map((column) => {
                     const inner = (
@@ -1328,45 +1538,67 @@ export default function LongitudinalMatrixScreen() {
                   })}
                 </View>
 
-                {DAYS.map((day) => {
+                {activeDays.map((day) => {
                   const header = headerForDay(day);
                   const shiftLabel = header?.shift_time || DAY_CONFIG[day].shift;
                   const pgyLabel = header?.pgy_level || DAY_CONFIG[day].pgy;
                   const inCharge = withDoctorTitle(header?.in_charge_faculty_name);
+                  const rowNumber = activeDays.indexOf(day) + 1;
+                  const dayDate = weekDayDate(cycle?.start_date ?? null, rowNumber - 1);
                   return (
                     <View key={day} style={styles.matrixRow}>
-                      <Pressable
-                        onPress={() => openHeader(day)}
-                        accessibilityRole="button"
-                        accessibilityLabel={`${day} daily header. Shift ${shiftLabel}. ${pgyLabel}. Faculty in charge ${
-                          inCharge || 'unassigned'
-                        }. Opens the daily header editor.`}
-                        accessibilityHint="Opens a sheet to edit the day, shift time, PGY level and In-Charge faculty"
-                        style={({ pressed }) => [
-                          styles.dayCol,
-                          styles.frozen,
-                          styles.bodyCell,
-                          pressed ? styles.cellPressed : null,
-                        ]}
-                      >
-                        <Text variant="bodySmall" style={styles.dayName}>
-                          {DAY_SHORT[day]}
-                        </Text>
-                        <Text variant="caption" tone="secondary" numberOfLines={1}>
-                          {shiftLabel}
-                        </Text>
-                        <Text variant="caption" tone="brand" numberOfLines={1}>
-                          {pgyLabel}
-                        </Text>
-                        <Text
-                          variant="caption"
-                          tone={inCharge ? 'secondary' : 'muted'}
-                          numberOfLines={2}
-                          style={styles.inCharge}
+                      <View style={[styles.dayCol, styles.frozen, styles.bodyCell, styles.dayCellBlock]}>
+                        <Pressable
+                          onPress={() => openHeader(day)}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${day} daily header, day ${rowNumber} of ${activeDays.length}. Shift ${shiftLabel}. ${pgyLabel}. Faculty in charge ${
+                            inCharge || 'unassigned'
+                          }. Opens the daily header editor.`}
+                          accessibilityHint="Opens a sheet to edit the day, shift time, PGY level and In-Charge faculty"
+                          style={({ pressed }) => [
+                            styles.dayCellMain,
+                            pressed ? styles.cellPressed : null,
+                          ]}
                         >
-                          {`Faculty In-charge: ${inCharge || 'Unassigned'}`}
-                        </Text>
-                      </Pressable>
+                          <Text variant="bodySmall" style={styles.dayName}>
+                            {DAY_SHORT[day]}
+                          </Text>
+                          <Text variant="caption" tone="secondary" numberOfLines={1}>
+                            {formatShortDate(dayDate)}
+                          </Text>
+                          <Text variant="caption" tone="secondary" numberOfLines={1}>
+                            {shiftLabel}
+                          </Text>
+                          <Text variant="caption" tone="brand" numberOfLines={1}>
+                            {pgyLabel}
+                          </Text>
+                          <Text
+                            variant="caption"
+                            tone={inCharge ? 'secondary' : 'muted'}
+                            numberOfLines={2}
+                            style={styles.inCharge}
+                          >
+                            {`Faculty In-charge: ${inCharge || 'Unassigned'}`}
+                          </Text>
+                        </Pressable>
+                        {activeDays.length > 1 ? (
+                          <Pressable
+                            onPress={() => setDayRemoveTarget(day)}
+                            disabled={savingDay}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Remove the ${day} row from the CCC week`}
+                            style={({ pressed }) => [
+                              styles.dayRemoveRow,
+                              pressed && !savingDay ? styles.cellPressed : null,
+                            ]}
+                          >
+                            <Minus color={colors.danger} size={12} />
+                            <Text variant="caption" tone="danger">
+                              Remove row
+                            </Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
 
                       {matrixColumns.map((column) => {
                         if (column.isLeaves) {
@@ -1469,7 +1701,7 @@ export default function LongitudinalMatrixScreen() {
         ) : (
           <Card padded={false}>
             <View style={styles.cardPad}>
-              <SectionHeader title="Operational Roster" trailing={`${DAYS.length} sessions`} />
+              <SectionHeader title="Operational Roster" trailing={`${activeDays.length} sessions`} />
               <Text variant="caption" tone="muted">
                 Rows are grouped into session blocks under one day/time heading. Tap any row to assign
                 up to two residents and supervising faculty.
@@ -1497,7 +1729,7 @@ export default function LongitudinalMatrixScreen() {
                 </Text>
               </View>
             </View>
-            {DAYS.map((day) => {
+            {activeDays.map((day) => {
               const header = headerForDay(day);
               const shiftLabel = header?.shift_time || sessionWindow(day);
               const pgyLabel = header?.pgy_level || DAY_CONFIG[day].pgy;
@@ -1754,10 +1986,10 @@ export default function LongitudinalMatrixScreen() {
             <SheetSelectField
               label="Day of Week"
               value={headerForm.dayOfWeek}
-              options={DAY_OPTIONS}
+              options={dayOptions}
               onChange={(value) => setHeaderForm((previous) => ({ ...previous, dayOfWeek: value }))}
               placeholder="Choose a day"
-              hint="The CCC week runs Sunday to Thursday."
+              hint={`The CCC week runs ${daySequence[0]} to ${daySequence[daySequence.length - 1]}.`}
             />
             <TextField
               label="Shift Time"
@@ -2150,6 +2382,97 @@ export default function LongitudinalMatrixScreen() {
         </Text>
       </Sheet>
 
+      <Sheet
+        visible={dayAddOpen}
+        onClose={closeAddDay}
+        title="ADD DAY ROW"
+        subtitle={dayAddForm ? `${dayAddForm.dayOfWeek} · weekly CCC day` : undefined}
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label={savingDay ? 'Adding…' : 'Add day'}
+              onPress={saveNewDay}
+              loading={savingDay}
+              disabled={savingDay}
+              style={styles.flex1}
+            />
+            <Button
+              label="Cancel"
+              variant="outline"
+              onPress={closeAddDay}
+              disabled={savingDay}
+              style={styles.flex1}
+            />
+          </View>
+        }
+      >
+        <Text variant="caption" tone="secondary" style={styles.note}>
+          {`Add another day to the CCC week. The week follows the Week Start Date, so it currently runs ${daySequence[0]} to ${daySequence[daySequence.length - 1]}.`}
+        </Text>
+        <SheetSelectField
+          label="Day of Week"
+          value={dayAddForm.dayOfWeek}
+          options={missingDays.length > 0 ? dayOptionsFor(missingDays) : dayOptions}
+          onChange={(value) => setDayAddForm((previous) => ({ ...previous, dayOfWeek: value }))}
+          placeholder="Choose a day"
+          hint="Days already on the week are not listed."
+        />
+        <TextField
+          label="Shift Time"
+          value={dayAddForm.shiftTime}
+          onChangeText={(value) => setDayAddForm((previous) => ({ ...previous, shiftTime: value }))}
+          placeholder={DAY_CONFIG[dayAddForm.dayOfWeek].shift}
+          autoCapitalize="none"
+          hint="e.g. 10:30 - 2:00 or 07:00 - 2:00"
+        />
+        <SheetSelectField
+          label="PGY Level / Context"
+          value={dayAddForm.pgyLevel || null}
+          options={withCurrent(PGY_OPTIONS, dayAddForm.pgyLevel)}
+          onChange={(value) => setDayAddForm((previous) => ({ ...previous, pgyLevel: value }))}
+          placeholder="Choose a level"
+        />
+        <SheetSelectField
+          label="Faculty In-charge"
+          value={dayAddForm.inChargeFaculty || NONE_FACULTY}
+          options={withCurrent(facultyOptions, dayAddForm.inChargeFaculty)}
+          onChange={(value) => setDayAddForm((previous) => ({ ...previous, inChargeFaculty: value }))}
+          placeholder="— None —"
+          hint="A 'Dr.' title is applied automatically."
+        />
+      </Sheet>
+
+      <Sheet
+        visible={dayRemoveTarget !== null}
+        onClose={() => {
+          if (!savingDay) setDayRemoveTarget(null);
+        }}
+        title="REMOVE DAY ROW"
+        subtitle={dayRemoveTarget ? `${dayRemoveTarget} · remove from this CCC week` : undefined}
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label={savingDay ? 'Removing…' : 'Remove row'}
+              onPress={confirmRemoveDay}
+              loading={savingDay}
+              disabled={savingDay}
+              style={styles.flex1}
+            />
+            <Button
+              label="Cancel"
+              variant="outline"
+              onPress={() => setDayRemoveTarget(null)}
+              disabled={savingDay}
+              style={styles.flex1}
+            />
+          </View>
+        }
+      >
+        <Text variant="bodySmall" tone="secondary">
+          {`Remove ${dayRemoveTarget ?? 'this day'} from the CCC week? Its clinic slots, backup pool and leave records are removed with it. The week must keep at least one day.`}
+        </Text>
+      </Sheet>
+
     </Screen>
   );
 }
@@ -2224,6 +2547,47 @@ const styles = StyleSheet.create({
   bodyCell: {
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.sm,
+  },
+  /**
+   * The day column cell is a container rather than one Pressable: the day label
+   * area and the "- Remove Row" control are separate touch targets so neither
+   * swallows the other.
+   */
+  dayCellBlock: {
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+  },
+  dayCellMain: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+  },
+  dayRemoveRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xxs,
+    paddingVertical: spacing.xxs,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
+  addDayButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xxs,
+    marginTop: spacing.xs,
+    paddingVertical: spacing.xxs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.primaryBorder,
+    backgroundColor: colors.primarySoft,
+    alignSelf: 'flex-start',
+  },
+  dayActionDisabled: {
+    opacity: 0.5,
   },
   dayCol: {
     width: DAY_COLUMN_WIDTH,

@@ -214,7 +214,35 @@ class LongitudinalController {
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
       }
-      const data = await LongitudinalService.updateCycleHeader(program_id, req.body);
+      const result = await LongitudinalService.updateCycleHeader(program_id, req.body);
+      return res.status(200).json({
+        success: true,
+        data: result.cycle,
+        headers: result.headers ?? [],
+        header: result.header ?? null,
+        slots: result.createdSlots ?? [],
+      });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `DELETE /longitudinal/cycle-schedule/header/:id`
+   *
+   * Removes one day row from a cycle's CCC week (the grid's "- Remove Row"
+   * control). The cycle's remaining headers come back in sequence order so the
+   * caller can patch local state without a full refetch.
+   */
+  static async deleteCycleHeader(req, res) {
+    try {
+      const { program_id } = req.query;
+      const { id } = req.params;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
+      }
+      const data = await LongitudinalService.deleteCycleHeader(program_id, id);
       return res.status(200).json({ success: true, data });
     } catch (error) {
       if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });

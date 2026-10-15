@@ -12,6 +12,7 @@ import type {
   PrimaryCareClinicSlot,
   PrimaryCareBackupFaculty,
   PrimaryCareCycleSchedule,
+  PrimaryCareDailyHeader,
   PrimaryCareAbsence,
   PrimaryCareAbsenceInput,
   PrimaryCareMatrixColumn,
@@ -198,7 +199,11 @@ export interface CycleHeaderUpdate {
   /** The cycle's rotation window; the server converts it at 4 weeks per month. */
   rotation_window_months?: number;
   dailyHeaders?: {
-    id: number;
+    /**
+     * Omit to create a new day row (`PUT .../cycle-schedule/header` inserts it);
+     * supply to update the existing row in place.
+     */
+    id?: number;
     day_of_week?: string;
     shift_time?: string | null;
     pgy_level?: string | null;
@@ -212,6 +217,82 @@ export async function updateCycleHeader(payload: CycleHeaderUpdate): Promise<Pri
     method: 'PUT',
     data: payload,
   });
+  return response.data;
+}
+
+/**
+ * Add a day row to the CCC week (`PUT /longitudinal/cycle-schedule/header` with a
+ * header that has no id). The server creates it with curriculum defaults, gives
+ * it its clinic slots and returns both, so the caller can patch local state
+ * without refetching the whole schedule.
+ */
+export interface CycleDayHeaderInput {
+  program_id: number;
+  cycle_id?: number;
+  day_of_week: string;
+  shift_time?: string | null;
+  pgy_level?: string | null;
+  in_charge_faculty_name?: string | null;
+  in_charge_faculty_id?: number | null;
+}
+
+export interface CycleDayHeaderResult {
+  cycle: PrimaryCareCycle;
+  /** Every day header for the cycle, in rotation order. */
+  headers: PrimaryCareDailyHeader[];
+  /** The newly created header (null when nothing was created). */
+  header: PrimaryCareDailyHeader | null;
+  /** The clinic slots materialised for the new header. */
+  slots: PrimaryCareClinicSlot[];
+}
+
+export async function addCycleDayHeader(payload: CycleDayHeaderInput): Promise<CycleDayHeaderResult> {
+  const response = await request<
+    ApiResponse<PrimaryCareCycle> & {
+      headers?: PrimaryCareDailyHeader[];
+      header?: PrimaryCareDailyHeader | null;
+      slots?: PrimaryCareClinicSlot[];
+    }
+  >('/longitudinal/cycle-schedule/header', {
+    method: 'PUT',
+    data: {
+      program_id: payload.program_id,
+      cycle_id: payload.cycle_id,
+      dailyHeaders: [
+        {
+          day_of_week: payload.day_of_week,
+          shift_time: payload.shift_time ?? null,
+          pgy_level: payload.pgy_level ?? null,
+          in_charge_faculty_name: payload.in_charge_faculty_name ?? null,
+          in_charge_faculty_id: payload.in_charge_faculty_id ?? null,
+        },
+      ],
+    },
+  });
+  return {
+    cycle: response.data,
+    headers: response.headers ?? [],
+    header: response.header ?? null,
+    slots: response.slots ?? [],
+  };
+}
+
+export interface CycleDayHeaderDeleteResult {
+  deleted_id: number;
+  deleted_day: string;
+  headers: PrimaryCareDailyHeader[];
+}
+
+/**
+ * `DELETE /longitudinal/cycle-schedule/header/:id` — remove one day row from a
+ * cycle's CCC week. The cycle's remaining headers come back in rotation order.
+ */
+export async function deleteCycleDayHeader(
+  programId: number,
+  headerId: number,
+): Promise<CycleDayHeaderDeleteResult> {
+  const path = `/longitudinal/cycle-schedule/header/${headerId}${queryString({ program_id: programId })}`;
+  const response = await request<ApiResponse<CycleDayHeaderDeleteResult>>(path, { method: 'DELETE' });
   return response.data;
 }
 

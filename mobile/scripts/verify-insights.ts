@@ -99,7 +99,7 @@ function expectWindow(logs: any[], anchor: Date) {
 }
 
 (async () => {
-  const roster = await get('residents?limit=50');
+  const roster = await get('residents?limit=1000');
   const sched = await get('rotations/assignments/resident/1');
   const att = await get('attendance/resident/1');
   const lv = await get('leaves/resident/1');
@@ -132,8 +132,21 @@ function expectWindow(logs: any[], anchor: Date) {
   const r1 = roster.find((r: any) => r.resident_id === 1);
   assert('full name includes middle initial', residentFullName(r1) === 'Omar K. Al-Nouri', residentFullName(r1));
   assert('subtitle is PGY + specialty', residentSubtitle(r1) === 'PGY-1 · Family Medicine', residentSubtitle(r1));
-  assert('search by pgy works', filterResidents(roster, 'pgy-3').length === 1, String(filterResidents(roster, 'pgy-3').length));
-  assert('search by name works', filterResidents(roster, 'nouri').length === 1);
+  // The roster grows through Excel imports, so the search is checked against the
+  // exact set it must return rather than a fixed count: `pgy-3` matches every
+  // resident enrolled at level three, and 'nouri' every name carrying it.
+  const pgyThree = roster.filter((r: any) => r.pgy_level === 3);
+  assert(
+    'search by pgy works',
+    pgyThree.length >= 1 && filterResidents(roster, 'pgy-3').length === pgyThree.length,
+    `${filterResidents(roster, 'pgy-3').length} vs ${pgyThree.length}`,
+  );
+  const nouri = roster.filter((r: any) => `${r.first_name ?? ''} ${r.last_name ?? ''}`.toLowerCase().includes('nouri'));
+  assert(
+    'search by name works',
+    nouri.length >= 1 && filterResidents(roster, 'nouri').length === nouri.length,
+    `${filterResidents(roster, 'nouri').length} vs ${nouri.length}`,
+  );
   assert('search miss returns 0', filterResidents(roster, 'zzzz').length === 0);
 
   // --- schedule -----------------------------------------------------------

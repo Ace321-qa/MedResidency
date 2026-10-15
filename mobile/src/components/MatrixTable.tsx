@@ -104,6 +104,15 @@ export interface MatrixRowDef {
   /** Announced by screen readers for a cell; falls back to the column title. */
   cellAccessibilityLabel?: (columnKey: string) => string | undefined;
   accessibilityLabel?: string;
+  /**
+   * A control rendered under this row's frozen content, e.g. a "- Remove Row"
+   * button for a variable day grid.
+   *
+   * When present the frozen cell is a plain container and `onPress` (if any)
+   * wraps only the leading content, so the action is never nested inside the
+   * record link — the same "buttons must not nest" rule the cells follow.
+   */
+  frozenAction?: ReactNode;
 }
 
 export interface MatrixTableProps {
@@ -117,6 +126,14 @@ export interface MatrixTableProps {
   autoHeight?: boolean;
   /** Header text for the frozen column. */
   frozenHeader?: string;
+  /**
+   * A control rendered under `frozenHeader`, e.g. a "+ Add Day Row" button for a
+   * grid whose rows a coordinator can extend. Purely additive: omitted, the
+   * frozen header is exactly the label it always was.
+   */
+  frozenHeaderAction?: ReactNode;
+  /** Makes each column header pressable, e.g. to rename or remove a column. */
+  onColumnPress?: (column: MatrixColumnDef) => void;
   emptyTitle?: string;
   emptyMessage?: string;
   /** Rendered above the table, inside the scroll area. */
@@ -147,6 +164,8 @@ export function MatrixTable({
   rowHeight = DEFAULT_ROW_HEIGHT,
   autoHeight = false,
   frozenHeader = '',
+  frozenHeaderAction,
+  onColumnPress,
   emptyTitle = 'Nothing to show yet',
   emptyMessage,
   caption,
@@ -199,6 +218,9 @@ export function MatrixTable({
               <Text variant="label" tone="secondary" numberOfLines={2}>
                 {frozenHeader}
               </Text>
+              {frozenHeaderAction ? (
+                <View style={styles.frozenHeaderAction}>{frozenHeaderAction}</View>
+              ) : null}
             </View>
 
             <View style={styles.headerTiers}>
@@ -224,32 +246,48 @@ export function MatrixTable({
               ) : null}
 
               <View style={[styles.headerRow, { width: totalColumnWidth, height: headerHeight }]}>
-                {columns.map((column) => (
-                  <View
-                    key={column.key}
-                    style={[
-                      styles.headerCell,
-                      { width: column.width ?? DEFAULT_COLUMN_WIDTH },
-                      column.align === 'right' ? styles.alignRight : null,
-                      column.verticalSubtitle && column.subtitle ? styles.verticalHeaderCell : null,
-                    ]}
-                  >
-                    <Text variant="label" numberOfLines={1}>
-                      {column.title}
-                    </Text>
-                    {column.subtitle ? (
-                      column.verticalSubtitle ? (
-                        <Text variant="caption" tone="secondary" numberOfLines={1} style={verticalDateStyle}>
+                {columns.map((column) => {
+                  const headerCellStyle = [
+                    styles.headerCell,
+                    { width: column.width ?? DEFAULT_COLUMN_WIDTH },
+                    column.align === 'right' ? styles.alignRight : null,
+                    column.verticalSubtitle && column.subtitle ? styles.verticalHeaderCell : null,
+                  ];
+                  const headerContent = (
+                    <>
+                      <Text variant="label" numberOfLines={1} align={column.align ?? 'left'}>
+                        {column.title}
+                      </Text>
+                      {column.subtitle ? (
+                        <Text
+                          variant="caption"
+                          tone="secondary"
+                          numberOfLines={column.verticalSubtitle ? undefined : 1}
+                          align={column.align ?? 'left'}
+                          style={column.verticalSubtitle ? verticalDateStyle : undefined}
+                        >
                           {column.subtitle}
                         </Text>
-                      ) : (
-                        <Text variant="caption" tone="secondary" numberOfLines={1}>
-                          {column.subtitle}
-                        </Text>
-                      )
-                    ) : null}
-                  </View>
-                ))}
+                      ) : null}
+                    </>
+                  );
+
+                  return onColumnPress ? (
+                    <Pressable
+                      key={column.key}
+                      onPress={() => onColumnPress(column)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${column.title} column options`}
+                      style={({ pressed }) => [...headerCellStyle, pressed ? styles.cellPressed : null]}
+                    >
+                      {headerContent}
+                    </Pressable>
+                  ) : (
+                    <View key={column.key} style={headerCellStyle}>
+                      {headerContent}
+                    </View>
+                  );
+                })}
               </View>
             </View>
           </View>
@@ -263,7 +301,10 @@ export function MatrixTable({
               cells' own action buttons and two <button> elements never nest. */}
           {rows.map((row) => {
             const rowStyle = [styles.tableRow, autoHeight ? styles.tableRowAuto : { height: rowHeight }];
-            const rowHeaderIsButton = Boolean(row.onPress && !row.onCellPress);
+            const hasFrozenAction = Boolean(row.frozenAction);
+            // A frozen action is its own button, so the record tap must not wrap
+            // the whole frozen cell when one is present — the two would nest.
+            const rowHeaderIsButton = Boolean(row.onPress && !row.onCellPress && !hasFrozenAction);
 
             const frozenCellStyle = [
               styles.residentStickyCell,
@@ -277,18 +318,39 @@ export function MatrixTable({
                 {row.frozenContent ?? null}
               </>
             );
-            const frozenCell = rowHeaderIsButton ? (
-              <Pressable
-                onPress={row.onPress}
-                accessibilityRole="button"
-                accessibilityLabel={row.accessibilityLabel}
-                style={({ pressed }) => [...frozenCellStyle, pressed ? styles.frozenCellPressed : null]}
-              >
-                {frozenCellContent}
-              </Pressable>
-            ) : (
-              <View style={frozenCellStyle}>{frozenCellContent}</View>
-            );
+            let frozenCell;
+            if (rowHeaderIsButton) {
+              frozenCell = (
+                <Pressable
+                  onPress={row.onPress}
+                  accessibilityRole="button"
+                  accessibilityLabel={row.accessibilityLabel}
+                  style={({ pressed }) => [...frozenCellStyle, pressed ? styles.frozenCellPressed : null]}
+                >
+                  {frozenCellContent}
+                </Pressable>
+              );
+            } else if (hasFrozenAction) {
+              frozenCell = (
+                <View style={frozenCellStyle}>
+                  {row.onPress && !row.onCellPress ? (
+                    <Pressable
+                      onPress={row.onPress}
+                      accessibilityRole="button"
+                      accessibilityLabel={row.accessibilityLabel}
+                      style={({ pressed }) => [styles.frozenActionTarget, pressed ? styles.frozenCellPressed : null]}
+                    >
+                      {frozenCellContent}
+                    </Pressable>
+                  ) : (
+                    frozenCellContent
+                  )}
+                  {row.frozenAction}
+                </View>
+              );
+            } else {
+              frozenCell = <View style={frozenCellStyle}>{frozenCellContent}</View>;
+            }
 
             return (
               <View key={`tr-${row.key}`} style={rowStyle}>
@@ -422,6 +484,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
+  /** Slot for a "+ Add row" style control under the frozen header label. */
+  frozenHeaderAction: {
+    marginTop: spacing.xs,
+  },
   headerTiers: {
     flex: 1,
   },
@@ -495,6 +561,11 @@ const styles = StyleSheet.create({
     top: 0,
     bottom: 0,
     width: 3,
+  },
+  /** The record-link tap zone of a frozen cell that also carries an action. */
+  frozenActionTarget: {
+    flex: 1,
+    justifyContent: 'center',
   },
   cell: {
     justifyContent: 'center',
