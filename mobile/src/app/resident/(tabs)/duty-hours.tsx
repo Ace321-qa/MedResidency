@@ -23,7 +23,7 @@ import { useApiResource, useSession } from '../../../hooks';
 import { fetchAttendance } from '../../../services/attendance';
 import { uploadTimesheet } from '../../../services/excelTemplates';
 import { colors, radius, spacing } from '../../../theme';
-import { formatDate, formatHours, formatTime, humanizeToken } from '../../../utils/format';
+import { formatDate, formatHours, formatTime, humanizeToken, toComparableDate } from '../../../utils/format';
 import { calendarDaysForMonth, summarizeMonth } from '../../../utils/insights';
 import { EMPTY_ARRAY } from '../../../utils/empty';
 import type { AttendanceLog } from '../../../types/api';
@@ -48,6 +48,23 @@ import type { AttendanceLog } from '../../../types/api';
  */
 
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+/**
+ * The clock-in → clock-out label for a day row.
+ *
+ * Each row owns one calendar day, so a shift that ends at midnight reads as
+ * `24:00` rather than rolling into the next day's `00:00` — which is exactly how
+ * it was entered. Any quieter cross-day end (legacy data written before the
+ * single-day split) keeps its time and is marked `(+1 day)` so the span is not
+ * silently understated.
+ */
+function spanLabel(log: AttendanceLog): string {
+  const outDate = toComparableDate(log.clock_out);
+  const crossesDay = Boolean(outDate && outDate !== log.shift_date);
+  const outTime = formatTime(log.clock_out);
+  const out = crossesDay && outTime === '00:00' ? '24:00' : outTime;
+  return `In: ${formatTime(log.clock_in)} → Out: ${out}${crossesDay && out !== '24:00' ? ' (+1 day)' : ''}`;
+}
 
 export default function DutyHoursScreen() {
   const router = useRouter();
@@ -269,7 +286,7 @@ export default function DutyHoursScreen() {
                   title={`${humanizeToken(log.attendance_status)} · ${formatDate(log.shift_date)}`}
                   subtitle={
                     log.clock_in && log.clock_out
-                      ? `${formatTime(log.clock_in)} – ${formatTime(log.clock_out)}`
+                      ? spanLabel(log)
                       : 'No clock-in and clock-out recorded'
                   }
                   meta={log.violation_rule ? `${log.violation_rule} · ${log.violation_severity ?? 'flagged'}` : undefined}
