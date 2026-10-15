@@ -14,6 +14,7 @@ export {
   SelectField,
   SheetSelectField,
   TextField,
+  TimeField,
   type SelectOption,
 } from './Form';
 export { FacultyPicker, type FacultyOption } from './FacultyPicker';

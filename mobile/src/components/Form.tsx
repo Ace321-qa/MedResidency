@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Pressable,
+  ScrollView,
   StyleSheet,
   TextInput,
   View,
@@ -8,7 +9,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
-import { CalendarDays, Check, ChevronDown } from 'lucide-react-native';
+import { CalendarDays, Check, ChevronDown, Clock } from 'lucide-react-native';
 
 import { colors, dimensions, radius, spacing } from '../theme';
 import { Button } from './Button';
@@ -492,6 +493,157 @@ export function DateField({
   );
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+export interface TimeFieldProps extends Omit<TextFieldProps, 'keyboardType' | 'autoCapitalize'> {
+  /** Minute granularity the picker offers. Defaults to 5. */
+  minuteStep?: number;
+  /**
+   * Offer `24:00` as a selectable hour.
+   *
+   * A duty-hours row is one calendar day, so a shift that ends exactly at
+   * midnight closes on `24:00` rather than starting the next day with `00:00`.
+   * Off by default: it is only meaningful for an end time.
+   */
+  allowEndOfDay?: boolean;
+}
+
+/**
+ * TimeField — an hour/minute picker plus a free-text `HH:MM` input.
+ *
+ * The same two-ways-in argument `DateField` makes, for the same reason: tapping
+ * a grid is how most times get chosen, and the text box is how a resident
+ * corrects a time they just typed. Duty hours are recorded to the minute, so the
+ * picker steps in `minuteStep`-minute increments while the input accepts any
+ * `HH:MM`. Both halves stay an hour-and-minute value — never a full timestamp —
+ * because the date is the neighbouring `DateField`'s job.
+ *
+ * With `allowEndOfDay`, the hour list runs to `24` and picking it pins the
+ * minutes to `00` — `24:15` is not a time, it is midnight plus a quarter hour,
+ * which belongs on the next calendar day.
+ */
+export function TimeField({ minuteStep = 5, allowEndOfDay = false, ...textFieldProps }: TimeFieldProps) {
+  const [open, setOpen] = useState(false);
+  const { label, value, onChangeText, placeholder } = textFieldProps;
+
+  const parsed = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  const selectedHour = parsed ? Number(parsed[1]) : null;
+  const selectedMinute = parsed ? Number(parsed[2]) : null;
+
+  const hourCount = allowEndOfDay ? 25 : 24;
+  const hours = useMemo(() => Array.from({ length: hourCount }, (_, index) => index), [hourCount]);
+  const minutes = useMemo(
+    () => Array.from({ length: Math.ceil(60 / minuteStep) }, (_, index) => index * minuteStep),
+    [minuteStep],
+  );
+
+  function commit(hour: number | null, minute: number | null) {
+    const nextHour = hour ?? selectedHour ?? 0;
+    // `24` is only ever the end of the day.
+    if (nextHour === 24) {
+      onChangeText('24:00');
+      return;
+    }
+    const nextMinute = minute ?? selectedMinute ?? 0;
+    onChangeText(`${pad2(nextHour)}:${pad2(nextMinute)}`);
+  }
+
+  return (
+    <>
+      <TextField
+        {...textFieldProps}
+        autoCapitalize="none"
+        keyboardType="numbers-and-punctuation"
+        placeholder={placeholder ?? 'HH:MM'}
+        trailing={
+          <Pressable
+            onPress={() => setOpen(true)}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel={`Open the time picker for ${label.toLowerCase()}`}
+            style={styles.calendarButton}
+          >
+            <Clock color={colors.primary} size={20} />
+          </Pressable>
+        }
+      />
+
+      <Sheet
+        visible={open}
+        onClose={() => setOpen(false)}
+        title={`Choose ${label.toLowerCase()}`}
+        subtitle={
+          selectedHour !== null
+            ? `${pad2(selectedHour)}:${pad2(selectedMinute ?? 0)} — 24-hour time`
+            : `24-hour time, hours and minutes${allowEndOfDay ? ' (up to 24:00)' : ''}`
+        }
+        footer={
+          <Button
+            label="Done"
+            onPress={() => setOpen(false)}
+            accessibilityHint="Closes the picker and keeps the chosen time"
+          />
+        }
+      >
+        <View style={styles.timeColumns}>
+          <ScrollView style={styles.timeColumn} showsVerticalScrollIndicator={false}>
+            {hours.map((hour) => {
+              const active = hour === selectedHour;
+              return (
+                <Pressable
+                  key={`h-${hour}`}
+                  onPress={() => commit(hour, null)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={hour === 24 ? '24 hours, midnight' : `${pad2(hour)} hours`}
+                  style={[styles.timeOption, active ? styles.timeOptionSelected : null]}
+                >
+                  <Text variant="bodySmall" style={active ? styles.timeOptionTextSelected : undefined}>
+                    {pad2(hour)}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+
+          <View style={styles.timeSeparator}>
+            <Text variant="h3" tone="secondary">
+              :
+            </Text>
+          </View>
+
+          <ScrollView style={styles.timeColumn} showsVerticalScrollIndicator={false}>
+            {minutes.map((minute) => {
+              const active = minute === selectedMinute && selectedHour !== 24;
+              return (
+                <Pressable
+                  key={`m-${minute}`}
+                  onPress={() => commit(null, minute)}
+                  disabled={selectedHour === 24}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active, disabled: selectedHour === 24 }}
+                  accessibilityLabel={`${pad2(minute)} minutes`}
+                  style={[
+                    styles.timeOption,
+                    active ? styles.timeOptionSelected : null,
+                    selectedHour === 24 ? styles.timeOptionDisabled : null,
+                  ]}
+                >
+                  <Text variant="bodySmall" style={active ? styles.timeOptionTextSelected : undefined}>
+                    {pad2(minute)}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </Sheet>
+    </>
+  );
+}
+
 const styles = StyleSheet.create({
   field: {
     gap: spacing.xs,
@@ -624,5 +776,38 @@ const styles = StyleSheet.create({
   },
   sheetEmpty: {
     paddingVertical: spacing.lg,
+  },
+  timeColumns: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  timeColumn: {
+    flex: 1,
+    maxHeight: 260,
+  },
+  timeSeparator: {
+    paddingTop: spacing.sm,
+  },
+  timeOption: {
+    minHeight: dimensions.touchTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    marginBottom: spacing.xs,
+  },
+  timeOptionSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+  },
+  timeOptionDisabled: {
+    opacity: 0.4,
+  },
+  timeOptionTextSelected: {
+    fontWeight: '600',
+    color: colors.primary,
   },
 });

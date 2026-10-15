@@ -476,18 +476,24 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
     fileName: 'monthly_timesheet_template.xlsx',
     endpoint: '/attendance/template',
     sheetName: 'Timesheet',
+    // One row is one calendar day. The clock times are bare `HH:MM` on the
+    // row's own `Shift Date`, and `24:00` closes the day — so a continuous
+    // 24-hour call is written as two rows split at midnight, not one 24-hour
+    // row. The rows must match the server's `SAMPLE_ROWS` in
+    // attendanceImportController.js byte for byte: the same file is parsed by
+    // the same import endpoint either way.
     rows: [
       [
         'Shift Date (YYYY-MM-DD)',
         'Attendance Status',
-        'Clock In (YYYY-MM-DD HH:MM)',
-        'Clock Out (YYYY-MM-DD HH:MM)',
+        'Clock In Time (HH:MM)',
+        'Clock Out Time (HH:MM)',
         'Total Hours',
         'Notes',
       ],
-      ['2026-10-01', 'PRESENT', '2026-10-01 08:00', '2026-10-01 17:00', 8, 'Regular day shift'],
-      ['2026-10-02', 'ON_CALL', '2026-10-02 08:00', '2026-10-03 08:00', 24, 'Continuous duty'],
-      ['2026-10-03', 'ANNUAL_LEAVE', '', '', 0, 'Approved annual leave'],
+      ['2026-10-01', 'PRESENT', '08:00', '17:00', 8, 'Regular day shift'],
+      ['2026-10-02', 'ON_CALL', '08:00', '24:00', 16, 'Continuous duty (Part 1 - Day 1)'],
+      ['2026-10-03', 'ON_CALL', '00:00', '08:00', 8, 'Continuous duty (Part 2 - Day 2)'],
     ],
   },
 };

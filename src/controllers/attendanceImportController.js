@@ -5,14 +5,15 @@ const { generateTimesheetTemplate, parseTimesheetFile } = require('../utils/exce
 /**
  * Monthly timesheet import — bulk-filling a month of attendance.
  *
- * One file, one transaction-free loop over `AttendanceService.logAttendance`,
- * because each shift must keep its own duty-hour evaluation: a month where one
- * bad row rolls back every good row already written would be worse than a
- * partial import with a precise list of what failed.
+ * The workbook is parsed and validated **before** the first insert, so the file
+ * is either acceptable row by row or it is rejected with one message per bad
+ * row — a coordinator never has to fix the upload one error at a time.
  *
- * Validation happens *before* the first insert. The workbook is either
- * acceptable row by row or it is rejected with one message per bad row, so a
- * coordinator never has to fix the file one error at a time.
+ * The accepted rows then go in through `logTimesheetBatch`, a single
+ * transaction. One transaction is what makes the continuous-duty check correct:
+ * because a row is one calendar day, an overnight call is two rows that only
+ * mean anything together, and judgement has to happen over the whole set rather
+ * than row by row as it is written.
  */
 class AttendanceImportController {
   /** GET /api/v1/attendance/template */
@@ -55,42 +56,47 @@ class AttendanceImportController {
         return res.status(400).json({ success: false, errors: parsed.errors });
       }
 
-      const added = [];
-      const failures = [];
+      const result = await AttendanceService.logTimesheetBatch({
+        resident_id: residentId,
+        rows: parsed.rows,
+      });
 
-      for (const row of parsed.rows) {
-        try {
-          const result = await AttendanceService.logAttendance({
-            resident_id: residentId,
-            shift_date: row.shift_date,
-            clock_in: row.clock_in,
-            clock_out: row.clock_out,
-            total_hours: row.total_hours,
-            attendance_status: row.attendance_status,
-            notes: row.notes,
-          });
-          added.push(result.log_id);
-        } catch (error) {
-          failures.push({ row: row.row, message: error.message });
-        }
-      }
-
-      if (failures.length > 0) {
-        return res.status(400).json({ success: false, errors: failures, added });
-      }
-
-      return res.json({ success: true, added, count: added.length });
+      return res.json({
+        success: true,
+        added: result.added,
+        count: result.count,
+        flagged: result.flagged,
+        breaches: result.breaches.violations,
+        rule_evaluated: result.rule_evaluated,
+      });
     } catch (error) {
+      // A row the database rejects (unreadable clock, missing resident) is a
+      // bad request, matching the pre-insert validation above.
+      if (error.statusCode === 400) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+      if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
+        return res
+          .status(404)
+          .json({ success: false, error: 'resident_id does not reference an existing resident' });
+      }
       return res.status(500).json({ success: false, error: error.message });
     }
   }
 }
 
-/** The three example rows the mobile client mirrors when it builds offline. */
+/**
+ * The example rows the mobile client mirrors when it builds the file offline.
+ *
+ * One row is one calendar day, so the sample shows how a 24-hour call is
+ * written: not as a single 24-hour row but split at midnight — `08:00 → 24:00`
+ * on the first day and `00:00 → 08:00` on the second — which is what the
+ * continuous-duty engine stitches back together when the file is imported.
+ */
 const SAMPLE_ROWS = [
-  ['2026-10-01', 'PRESENT', '2026-10-01 08:00', '2026-10-01 17:00', 8, 'Regular day shift'],
-  ['2026-10-02', 'ON_CALL', '2026-10-02 08:00', '2026-10-03 08:00', 24, 'Continuous duty'],
-  ['2026-10-03', 'ANNUAL_LEAVE', '', '', 0, 'Approved annual leave'],
+  ['2026-10-01', 'PRESENT', '08:00', '17:00', 8, 'Regular day shift'],
+  ['2026-10-02', 'ON_CALL', '08:00', '24:00', 16, 'Continuous duty (Part 1 - Day 1)'],
+  ['2026-10-03', 'ON_CALL', '00:00', '08:00', 8, 'Continuous duty (Part 2 - Day 2)'],
 ];
 
 module.exports = AttendanceImportController;

@@ -319,6 +319,48 @@ export interface LogAttendanceResult {
   rule_evaluated: string;
 }
 
+/**
+ * One calendar day of a timesheet.
+ *
+ * `clock_in` / `clock_out` are bare `HH:MM` times on `shift_date` (a legacy
+ * `YYYY-MM-DD HH:MM` is accepted too, and a bare `HH:MM` is paired with the
+ * date). `24:00` is the end of the day, so an overnight shift is sent as two
+ * rows — `08:00 → 24:00` then the next day's `00:00 → 08:00`.
+ */
+export interface TimesheetRowInput {
+  shift_date: string;
+  clock_in?: string | null;
+  clock_out?: string | null;
+  total_hours?: number | null;
+  attendance_status: AttendanceStatus;
+  /** Required by the API when the status is `OTHER_LEAVE`. */
+  other_leave_specify?: string | null;
+  notes?: string | null;
+}
+
+/** A continuous-duty period the batch write found to run past the rule cap. */
+export interface DutyHourBreach {
+  /** First calendar day of the chain, where the violation is recorded. */
+  anchor_log_id: number;
+  total_hours: number;
+  /** How many calendar rows the chain spans. */
+  rows: number;
+  details: string;
+}
+
+/** `POST /attendance/batch`. */
+export interface LogTimesheetBatchResult {
+  added: number[];
+  count: number;
+  /** Every row id that belongs to a breaching chain. */
+  flagged: number[];
+  breaches: {
+    flagged: number[];
+    violations: DutyHourBreach[];
+  };
+  rule_evaluated: string;
+}
+
 /** Mirrors the `leave_type` enum on resident_leave_requests. */
 export const LEAVE_TYPES = [
   'ANNUAL_LEAVE',

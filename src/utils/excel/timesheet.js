@@ -1,9 +1,17 @@
 const XLSX = require('xlsx');
 const { makeBuffer } = require('./common');
+const { parseTimeOfDay, MINUTES_PER_DAY, addDays } = require('../dutyTime');
 
 /**
  * The monthly timesheet workbook: what a resident downloads to fill in, and
  * what the import parses back.
+ *
+ * **One row is one calendar day.** The row's `Shift Date` bounds its clock
+ * times: `Clock In Time` and `Clock Out Time` are bare `HH:MM` values on that
+ * day, and `24:00` is the explicit day boundary. A continuous 24-hour call is
+ * therefore written as two rows — `08:00 → 24:00` on day one and `00:00 →
+ * 08:00` on day two — so the hours attributed to each calendar day are the
+ * hours actually worked on it.
  *
  * Two rules the file format has to honour:
  *
@@ -12,18 +20,17 @@ const { makeBuffer } = require('./common');
  *     either path must parse here. The column names are therefore fixed
  *     strings, not "whatever XLSX writes".
  *  2. **Parsing is tolerant, validation is not.** A coordinator who renames a
- *     header to "Date" or adds a space must still be understood — header
- *     aliases cover that — but a *row* with a missing or malformed value comes
- *     back as `Row 4: Shift Date is required` rather than being silently
- *     dropped. Silent dropping is how a month of attendance quietly goes
- *     missing.
+ *     header or leaves the seconds on a cell must still be understood — aliases
+ *     and the time parser cover that — but a *row* whose clock-out lands before
+ *     its clock-in (an unsplit overnight shift) is rejected with a message that
+ *     says how to fix it, rather than silently producing negative hours.
  */
 
 const HEADERS = [
   'Shift Date (YYYY-MM-DD)',
   'Attendance Status',
-  'Clock In (YYYY-MM-DD HH:MM)',
-  'Clock Out (YYYY-MM-DD HH:MM)',
+  'Clock In Time (HH:MM)',
+  'Clock Out Time (HH:MM)',
   'Total Hours',
   'Notes',
 ];
@@ -48,10 +55,25 @@ const ATTENDANCE_STATUSES = [
 const HEADER_ALIASES = {
   shiftDate: ['shift date (yyyy-mm-dd)', 'shift date', 'date'],
   attendanceStatus: ['attendance status', 'status'],
-  // The minute-precision header is the current one; the `:SS` spelling stays a
-  // valid alias so a workbook made before the format change still imports.
-  clockIn: ['clock in (yyyy-mm-dd hh:mm)', 'clock in (yyyy-mm-dd hh:mm:ss)', 'clock in', 'in'],
-  clockOut: ['clock out (yyyy-mm-dd hh:mm)', 'clock out (yyyy-mm-dd hh:mm:ss)', 'clock out', 'out'],
+  // The `Clock In Time` header is the current one; the older combined-stamp
+  // spellings stay valid aliases so a workbook made before the format change
+  // still imports — the parser keeps only the clock part of a full stamp.
+  clockInTime: [
+    'clock in time (hh:mm)',
+    'clock in time',
+    'clock in (hh:mm)',
+    'clock in',
+    'in time',
+    'in',
+  ],
+  clockOutTime: [
+    'clock out time (hh:mm)',
+    'clock out time',
+    'clock out (hh:mm)',
+    'clock out',
+    'out time',
+    'out',
+  ],
   totalHours: ['total hours', 'hours', 'duration'],
   notes: ['notes', 'note', 'comments', 'comment'],
 };
@@ -69,6 +91,41 @@ function generateTimesheetTemplate(sampleRows = []) {
   return makeBuffer(HEADERS, sampleRows, 'Timesheet');
 }
 
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+/**
+ * Parse a clock cell as minutes past midnight.
+ *
+ * Accepts a bare `HH:MM` / `HH:MM:SS`, and also a legacy cell that still holds a
+ * whole `YYYY-MM-DD HH:MM` stamp — the clock part is what a single-day row
+ * wants. Returns `{ minutes }`, or `{ error }` describing why it was rejected.
+ */
+function readClockCell(value, label) {
+  const text = String(value ?? '').trim();
+  if (text === '') return { minutes: null };
+
+  // Prefer a whole-cell time-of-day; fall back to the trailing `HH:MM` of a
+  // full stamp so an un-split old workbook still yields its clock part.
+  let parsed = parseTimeOfDay(text);
+  if (parsed === null) {
+    const tail = text.match(/(\d{1,2}):(\d{2})(?::\d{2})?\s*$/);
+    if (tail) parsed = parseTimeOfDay(`${tail[1]}:${tail[2]}`);
+  }
+
+  if (parsed === null) {
+    return { error: `${label} must be HH:MM (00:00–24:00)` };
+  }
+  return { minutes: parsed };
+}
+
+/** `YYYY-MM-DD` + minutes past midnight → `YYYY-MM-DD HH:MM:00`, `24:00` rolling over. */
+function composeClock(shiftDate, minutes) {
+  if (minutes === MINUTES_PER_DAY) return `${addDays(shiftDate, 1)} 00:00:00`;
+  return `${shiftDate} ${pad2(Math.floor(minutes / 60))}:${pad2(minutes % 60)}:00`;
+}
+
 /** `2026-10-01`, or `null` when the cell is not that shape. */
 function asIsoDate(value) {
   if (value === null || value === undefined) return null;
@@ -77,41 +134,6 @@ function asIsoDate(value) {
   if (!match) return null;
   const date = new Date(`${match[0].slice(0, 10)}T00:00:00Z`);
   return Number.isNaN(date.getTime()) ? null : match[0].slice(0, 10);
-}
-
-/**
- * Normalise a clock cell to `YYYY-MM-DD HH:MM:00`.
- *
- * Accepts `YYYY-MM-DD HH:MM`, the older `YYYY-MM-DD HH:MM:SS`, the ISO `T`
- * separator, or a bare `HH:MM` / `HH:MM:SS` which is paired with the row's
- * Shift Date. Seconds are always discarded — duty hours are logged to the
- * minute. Returns `null` when the cell is not a readable time.
- */
-function asDateTime(value, fallbackDate) {
-  if (value === null || value === undefined) return null;
-  const text = String(value).trim().replace('T', ' ');
-
-  let date;
-  let timeText;
-
-  const full = text.match(/^(\d{4}-\d{2}-\d{2})[ ](\d{1,2}:\d{2}(?::\d{2})?)$/);
-  if (full) {
-    date = full[1];
-    timeText = full[2];
-  } else if (fallbackDate && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) {
-    date = String(fallbackDate).trim().slice(0, 10);
-    timeText = text;
-  } else {
-    return null;
-  }
-
-  const [hours, minutes, seconds] = timeText.split(':');
-  const hh = Number(hours);
-  const mm = Number(minutes);
-  const ss = seconds === undefined ? 0 : Number(seconds);
-  if (hh > 23 || mm > 59 || ss > 59) return null;
-
-  return `${date} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`;
 }
 
 /**
@@ -134,8 +156,8 @@ function parseTimesheetFile(buffer) {
   const idx = {
     shiftDate: headerIndex(headers, HEADER_ALIASES.shiftDate),
     attendanceStatus: headerIndex(headers, HEADER_ALIASES.attendanceStatus),
-    clockIn: headerIndex(headers, HEADER_ALIASES.clockIn),
-    clockOut: headerIndex(headers, HEADER_ALIASES.clockOut),
+    clockInTime: headerIndex(headers, HEADER_ALIASES.clockInTime),
+    clockOutTime: headerIndex(headers, HEADER_ALIASES.clockOutTime),
     totalHours: headerIndex(headers, HEADER_ALIASES.totalHours),
     notes: headerIndex(headers, HEADER_ALIASES.notes),
   };
@@ -180,31 +202,39 @@ function parseTimesheetFile(buffer) {
       continue;
     }
 
-    const clockIn = asDateTime(cell('clockIn'), shiftDate);
-    const clockInRaw = String(cell('clockIn') ?? '').trim();
-    if (clockInRaw !== '' && !clockIn) {
-      errors.push({
-        row: rowNumber,
-        field: 'Clock In',
-        message: 'must be YYYY-MM-DD HH:MM or HH:MM',
-      });
+    const clockIn = readClockCell(cell('clockInTime'), 'Clock In Time');
+    if (clockIn.error) {
+      errors.push({ row: rowNumber, field: 'Clock In Time', message: clockIn.error });
+      continue;
+    }
+    if (clockIn.minutes === MINUTES_PER_DAY) {
+      // `24:00` closes a shift day; it can never be the moment one starts.
+      errors.push({ row: rowNumber, field: 'Clock In Time', message: 'must be before 24:00' });
       continue;
     }
 
-    const clockOut = asDateTime(cell('clockOut'), shiftDate);
-    const clockOutRaw = String(cell('clockOut') ?? '').trim();
-    if (clockOutRaw !== '' && !clockOut) {
-      errors.push({
-        row: rowNumber,
-        field: 'Clock Out',
-        message: 'must be YYYY-MM-DD HH:MM or HH:MM',
-      });
+    const clockOut = readClockCell(cell('clockOutTime'), 'Clock Out Time');
+    if (clockOut.error) {
+      errors.push({ row: rowNumber, field: 'Clock Out Time', message: clockOut.error });
       continue;
     }
-    if (clockIn && clockOut && clockOut < clockIn) {
-      errors.push({ row: rowNumber, field: 'Clock Out', message: 'cannot be before Clock In' });
-      continue;
+
+    // Both halves present: the row must stay inside its own calendar day. An
+    // out time at or before the in time is an overnight shift that has not been
+    // split, so it is rejected with the fix rather than stored as negative.
+    if (clockIn.minutes !== null && clockOut.minutes !== null) {
+      if (clockOut.minutes <= clockIn.minutes) {
+        errors.push({
+          row: rowNumber,
+          field: 'Clock Out Time',
+          message: 'must be after Clock In Time on the same day; split an overnight shift across two rows',
+        });
+        continue;
+      }
     }
+
+    const clockInStamp = clockIn.minutes === null ? null : composeClock(shiftDate, clockIn.minutes);
+    const clockOutStamp = clockOut.minutes === null ? null : composeClock(shiftDate, clockOut.minutes);
 
     const hoursRaw = String(cell('totalHours') ?? '').trim();
     let totalHours = null;
@@ -215,18 +245,18 @@ function parseTimesheetFile(buffer) {
         continue;
       }
       totalHours = value;
-    } else if (clockIn && clockOut) {
-      // Derived rather than left blank: the file has both stamps, so the
+    } else if (clockInStamp && clockOutStamp) {
+      // Derived rather than left blank: the row has both stamps, so the
       // duration is a fact, not a guess.
-      totalHours = Math.round(((Date.parse(clockOut) - Date.parse(clockIn)) / 36e5) * 100) / 100;
+      totalHours = Math.round(((Date.parse(clockOutStamp) - Date.parse(clockInStamp)) / 36e5) * 100) / 100;
     }
 
     parsed.push({
       row: rowNumber,
       shift_date: shiftDate,
       attendance_status: attendanceStatus,
-      clock_in: clockIn,
-      clock_out: clockOut,
+      clock_in: clockInStamp,
+      clock_out: clockOutStamp,
       total_hours: totalHours,
       notes: idx.notes >= 0 ? String(source[idx.notes] ?? '').trim() || null : null,
     });

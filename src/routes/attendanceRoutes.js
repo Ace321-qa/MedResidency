@@ -12,6 +12,11 @@ const AttendanceImportController = require('../controllers/attendanceImportContr
 router.get('/template', AttendanceImportController.template);
 router.post('/import', upload.single('file'), AttendanceImportController.import);
 
+// Whole timesheet (one row per calendar day) at once, with cross-row continuous
+// duty evaluation. Registered before `POST /` only for readability; the two do
+// not overlap.
+router.post('/batch', AttendanceController.logTimesheetBatch);
+
 // Log daily attendance (auto-evaluates duty hour breach)
 router.post('/', AttendanceController.logAttendance);
 
