@@ -45,12 +45,22 @@ import { uploadFacultySupervisors } from '../../../services/excelTemplates';
 import {
   CCC_SCHEDULE_ROWS,
   dayOfWeekMatches,
+  formatCycleMetadataBanner,
+  numericLabelValue,
   pgyLevelFromLabel,
+  splitShiftRange,
   weekdayIndex,
   weekdayName,
 } from '../../../utils/cccMatrix';
 import { rotationWindowForMonths } from '../../../utils/masterGridCalendar';
-import { DAY_NAMES, formatWeekSpan, weekDayDate, weekDaySequence } from '../../../utils/dateCalc';
+import {
+  DAY_NAMES,
+  dateForWeekDay,
+  dayNameOf,
+  formatWeekSpan,
+  weekDayDate,
+  weekDaySequence,
+} from '../../../utils/dateCalc';
 import type { DayName } from '../../../utils/dateCalc';
 import { formatShortDate } from '../../../utils/format';
 import { formatPgy } from '../../../utils/insights';
@@ -205,6 +215,35 @@ const PGY_OPTIONS: SelectOption<string>[] = [
   { value: 'PGY-1', label: 'PGY-1' },
   { value: 'FMC', label: 'FMC' },
 ];
+
+/** The cycle-number picker: the twelve cycles a programme year can hold. */
+const CYCLE_NUMBER_OPTIONS: SelectOption<string>[] = Array.from({ length: 12 }, (_, index) => ({
+  value: String(index + 1),
+  label: String(index + 1),
+}));
+
+/** The week-number picker: four weeks to a rotation month. */
+const WEEK_NUMBER_OPTIONS: SelectOption<string>[] = Array.from({ length: 4 }, (_, index) => ({
+  value: String(index + 1),
+  label: String(index + 1),
+}));
+
+/**
+ * The cycle & schedule metadata the top header bar edits.
+ *
+ * Kept separate from the per-day `HeaderForm`: this one sets the week up — its
+ * cycle and week numbers, the day it opens on and the session the header bar
+ * reads — while the day editor tunes one row at a time.
+ */
+interface MetadataForm {
+  cycleNumber: string;
+  weekNumber: string;
+  firstDay: DayName;
+  startDate: string;
+  shiftStart: string;
+  shiftEnd: string;
+  pgyLevel: string;
+}
 
 interface SlotEdit {
   /** The stored slot, or null for a cell the schedule has not materialised yet. */
@@ -388,6 +427,22 @@ export default function LongitudinalMatrixScreen() {
   }>({ dayOfWeek: 'Sunday', shiftTime: '', pgyLevel: '', inChargeFaculty: NONE_FACULTY });
   const [dayRemoveTarget, setDayRemoveTarget] = useState<DayName | null>(null);
   const [savingDay, setSavingDay] = useState(false);
+
+  /**
+   * The top header bar's cycle & schedule metadata editor. `metadataOpen`
+   * drives the sheet, `savingMetadata` disables it while a write is in flight.
+   */
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const [savingMetadata, setSavingMetadata] = useState(false);
+  const [metadataForm, setMetadataForm] = useState<MetadataForm>({
+    cycleNumber: '1',
+    weekNumber: '1',
+    firstDay: DAYS[0],
+    startDate: '',
+    shiftStart: '',
+    shiftEnd: '',
+    pgyLevel: '',
+  });
 
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
@@ -739,6 +794,105 @@ export default function LongitudinalMatrixScreen() {
       setActionError(error instanceof Error ? error.message : 'Could not remove this day.');
     } finally {
       setSavingDay(false);
+    }
+  }
+
+  /**
+   * Seed the metadata sheet from the cycle and its opening session.
+   *
+   * The bar reads the week's first persisted day, so the editor starts from
+   * that same day's shift and PGY level — the values the banner is already
+   * showing — rather than from an unrelated default.
+   */
+  function openMetadata() {
+    const first = activeDays[0] ?? daySequence[0] ?? DAYS[0];
+    const header = headerForDay(first);
+    const range = splitShiftRange(header?.shift_time ?? DAY_CONFIG[first].shift);
+    setMetadataForm({
+      cycleNumber: numericLabelValue(cycle?.cycle_number) || '1',
+      weekNumber: numericLabelValue(cycle?.week_number) || '1',
+      firstDay: first,
+      startDate: cycle?.start_date ?? '',
+      shiftStart: range?.[0] ?? '',
+      shiftEnd: range?.[1] ?? '',
+      pgyLevel: header?.pgy_level ?? DAY_CONFIG[first].pgy,
+    });
+    setActionError(null);
+    setFeedback(null);
+    setMetadataOpen(true);
+  }
+
+  function closeMetadata() {
+    if (savingMetadata) return;
+    setMetadataOpen(false);
+  }
+
+  /**
+   * Move the week's first day. The start date follows to that weekday within
+   * the same week, and the session fields reseed from the new day so the sheet
+   * never shows one day's times under another day's name.
+   */
+  function changeMetadataFirstDay(day: DayName) {
+    setMetadataForm((previous) => {
+      const header = headerForDay(day);
+      const range = splitShiftRange(header?.shift_time ?? DAY_CONFIG[day].shift);
+      const movedStart = previous.startDate
+        ? dateForWeekDay(previous.startDate, day)
+        : previous.startDate;
+      return {
+        ...previous,
+        firstDay: day,
+        startDate: movedStart ?? previous.startDate,
+        shiftStart: range?.[0] ?? '',
+        shiftEnd: range?.[1] ?? '',
+        pgyLevel: header?.pgy_level ?? DAY_CONFIG[day].pgy,
+      };
+    });
+  }
+
+  /**
+   * Save the cycle & schedule metadata and patch it into local state.
+   *
+   * The cycle fields and the opening day's session go up in one request; the
+   * response's cycle and the values we sent are merged locally so the header
+   * bar updates in place without a full refetch. The shift is stored in the
+   * same `HH:MM - HH:MM` shape the day editor uses.
+   */
+  async function saveMetadata() {
+    if (!programId || !cycle) {
+      setActionError('The cycle has not loaded yet. Refresh and try again.');
+      return;
+    }
+    const header = headerForDay(metadataForm.firstDay);
+    const start = metadataForm.shiftStart.trim();
+    const end = metadataForm.shiftEnd.trim();
+    const shiftTime = start && end ? `${start} - ${end}` : null;
+    const pgy = metadataForm.pgyLevel.trim() || null;
+
+    setSavingMetadata(true);
+    setActionError(null);
+    setFeedback(null);
+    try {
+      const updated = await updateCycleHeader({
+        program_id: programId,
+        cycle_id: cycle.id,
+        cycle_number: metadataForm.cycleNumber,
+        week_number: metadataForm.weekNumber,
+        start_date: metadataForm.startDate || cycle.start_date,
+        dailyHeaders: header
+          ? [{ id: header.id, shift_time: shiftTime, pgy_level: pgy }]
+          : undefined,
+      });
+      updateCycleField(updated);
+      if (header) patchDailyHeader(header.id, { shift_time: shiftTime, pgy_level: pgy });
+      setFeedback('Cycle & schedule metadata saved.');
+      setMetadataOpen(false);
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : 'Could not save the cycle metadata.',
+      );
+    } finally {
+      setSavingMetadata(false);
     }
   }
 
@@ -1244,6 +1398,21 @@ export default function LongitudinalMatrixScreen() {
     ? formatWeekSpan(rotation.totalWeeks, rotation.startDate, rotation.endDate)
     : null;
 
+  /**
+   * The matrix header bar's one-line summary of the cycle. The session shown is
+   * the week's opening day — the same day the "Starts:" fragment names.
+   */
+  const headerBarDay = activeDays[0] ?? daySequence[0] ?? DAYS[0];
+  const headerBarHeader = headerForDay(headerBarDay);
+  const headerBarText = formatCycleMetadataBanner({
+    cycleNumber: cycle?.cycle_number,
+    weekNumber: cycle?.week_number,
+    startsOn: dayNameOf(cycle?.start_date ?? null),
+    startDate: cycle?.start_date,
+    shiftTime: headerBarHeader?.shift_time ?? DAY_CONFIG[headerBarDay].shift,
+    pgyLevel: headerBarHeader?.pgy_level ?? DAY_CONFIG[headerBarDay].pgy,
+  });
+
   /** The level-filtered resident list for the slot sheet currently open. */
   const slotResidentOptions = slotEdit
     ? residentOptionsForSlot(slotEdit.day, slotEdit.pgyLevel)
@@ -1444,6 +1613,34 @@ export default function LongitudinalMatrixScreen() {
           {viewMode === 'matrix' ? (
             <Card padded={false}>
               <View style={styles.cardPad}>
+                <Pressable
+                  onPress={openMetadata}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Cycle and schedule metadata: ${headerBarText}`}
+                  accessibilityHint="Opens a sheet to edit the cycle, week, first day, start date and session times"
+                  style={({ pressed }) => [
+                    styles.metadataBanner,
+                    pressed ? styles.cellPressed : null,
+                  ]}
+                >
+                  <View style={styles.metadataBannerText}>
+                    <Text variant="label" tone="secondary" uppercase>
+                      Cycle & Schedule Metadata
+                    </Text>
+                    <Text variant="bodySmall" style={styles.metadataBannerSummary}>
+                      {headerBarText}
+                    </Text>
+                  </View>
+                  <Pencil color={colors.primary} size={16} />
+                </Pressable>
+                <Button
+                  label="EDIT CYCLE & SCHEDULE METADATA"
+                  icon={Pencil}
+                  variant="outline"
+                  onPress={openMetadata}
+                  disabled={savingMetadata}
+                  style={styles.metadataEditButton}
+                />
                 <SectionHeader title="Weekly Clinic Matrix" trailing={`${activeDays.length} days`} />
                 <Text variant="caption" tone="muted">
                   The week runs from the cycle&apos;s Week Start Date, so a Monday start reads
@@ -2473,6 +2670,110 @@ export default function LongitudinalMatrixScreen() {
         </Text>
       </Sheet>
 
+      <Sheet
+        visible={metadataOpen}
+        onClose={closeMetadata}
+        title="EDIT CYCLE & SCHEDULE METADATA"
+        subtitle={headerBarText}
+        footer={
+          <View style={styles.actionRow}>
+            <Button
+              label={savingMetadata ? 'Saving…' : 'Save metadata'}
+              onPress={saveMetadata}
+              loading={savingMetadata}
+              disabled={savingMetadata}
+              style={styles.flex1}
+            />
+            <Button
+              label="Cancel"
+              variant="outline"
+              onPress={closeMetadata}
+              disabled={savingMetadata}
+              style={styles.flex1}
+            />
+          </View>
+        }
+      >
+        <Text variant="caption" tone="secondary" style={styles.note}>
+          Set the cycle and week this CCC grid belongs to, the day it opens on, and the session the
+          header bar reads. The session time and PGY context apply to the opening day&apos;s row.
+        </Text>
+        <View style={styles.row}>
+          <View style={styles.half}>
+            <SheetSelectField
+              label="Cycle Number"
+              value={metadataForm.cycleNumber}
+              options={CYCLE_NUMBER_OPTIONS}
+              onChange={(value) => setMetadataForm((previous) => ({ ...previous, cycleNumber: value }))}
+              placeholder="1"
+              hint="Cycle 1–12."
+            />
+          </View>
+          <View style={styles.half}>
+            <SheetSelectField
+              label="Week Number"
+              value={metadataForm.weekNumber}
+              options={WEEK_NUMBER_OPTIONS}
+              onChange={(value) => setMetadataForm((previous) => ({ ...previous, weekNumber: value }))}
+              placeholder="1"
+              hint="Week 1–4."
+            />
+          </View>
+        </View>
+        <SheetSelectField
+          label="First Day of Week"
+          value={metadataForm.firstDay}
+          options={dayOptions}
+          onChange={changeMetadataFirstDay}
+          placeholder="Choose a day"
+          hint="The CCC week runs from this day."
+        />
+        <DateField
+          label="Start Date"
+          value={metadataForm.startDate}
+          onChangeText={(value) =>
+            setMetadataForm((previous) => ({
+              ...previous,
+              startDate: value,
+              firstDay: dayNameOf(value) ?? previous.firstDay,
+            }))
+          }
+          weekStartDay={metadataForm.firstDay.toUpperCase()}
+          placeholder="YYYY-MM-DD"
+          hint="The date the cycle opens on."
+        />
+        <View style={styles.row}>
+          <View style={styles.half}>
+            <TextField
+              label="Shift Start"
+              value={metadataForm.shiftStart}
+              onChangeText={(value) => setMetadataForm((previous) => ({ ...previous, shiftStart: value }))}
+              autoCapitalize="none"
+              placeholder="10:30"
+              hint="24-hour, e.g. 10:30."
+            />
+          </View>
+          <View style={styles.half}>
+            <TextField
+              label="Shift End"
+              value={metadataForm.shiftEnd}
+              onChangeText={(value) => setMetadataForm((previous) => ({ ...previous, shiftEnd: value }))}
+              autoCapitalize="none"
+              placeholder="14:00"
+              hint="24-hour, e.g. 14:00."
+            />
+          </View>
+        </View>
+        <SheetSelectField
+          label="PGY Level / Context"
+          value={metadataForm.pgyLevel || null}
+          options={withCurrent(PGY_OPTIONS, metadataForm.pgyLevel)}
+          onChange={(value) => setMetadataForm((previous) => ({ ...previous, pgyLevel: value }))}
+          placeholder="Choose a level"
+          hint="Applied to the opening day's session."
+        />
+      </Sheet>
+
     </Screen>
   );
 }
@@ -2779,6 +3080,28 @@ const styles = StyleSheet.create({
   matrixAddColumnButton: {
     marginBottom: spacing.md,
     marginTop: spacing.xs,
+  },
+  metadataBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.primaryBorder,
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    marginBottom: spacing.sm,
+  },
+  metadataBannerText: {
+    flex: 1,
+    gap: spacing.xxs,
+  },
+  metadataBannerSummary: {
+    fontWeight: '600',
+  },
+  metadataEditButton: {
+    marginBottom: spacing.md,
   },
   clinicRow: {
     flexDirection: 'row',

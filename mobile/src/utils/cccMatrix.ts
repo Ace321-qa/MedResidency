@@ -187,3 +187,140 @@ export function pgyLevelFromLabel(label: string | null | undefined): number | nu
   const level = Number(match[1]);
   return Number.isInteger(level) && level >= 1 && level <= 9 ? level : null;
 }
+
+/* ------------------------------------------------------------------ *
+ * Cycle & schedule metadata banner.
+ *
+ * The matrix header bar reads as one sentence so a coordinator can see
+ * which cycle/week they are looking at, when it starts and which session
+ * it runs before touching a single cell. The values are stored in the
+ * shapes the database already holds — "Cycle 1", "10:30 – 2:00" — so the
+ * helpers below normalise both the labels and the human-readable banner.
+ * ------------------------------------------------------------------ */
+
+/** A clock time parsed into its 24-hour parts. */
+interface ClockParts {
+  hours: number;
+  minutes: number;
+}
+
+/**
+ * The first run of digits in a stored label, e.g. `"Cycle 3"` -> `"3"`.
+ *
+ * The cycle and week numbers are stored as free text ("Cycle 1", "Week 2"),
+ * so the picker has to read the number back out of whatever spelling is on
+ * record rather than assume a bare digit.
+ */
+export function numericLabelValue(value: string | null | undefined): string {
+  const match = /\d+/.exec(String(value ?? ''));
+  return match ? match[0] : '';
+}
+
+/** Parse `HH:MM` (24-hour) out of a clock string, or null when it is unusable. */
+function parseClock(value: string | null | undefined): ClockParts | null {
+  const match = /(\d{1,2})\s*:\s*(\d{2})/.exec(String(value ?? ''));
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return { hours, minutes };
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+/** `14:00` -> `"02:00 PM"`, `10:30` -> `"10:30 AM"`. Returns `''` when unusable. */
+export function formatClock12Hour(value: string | null | undefined): string {
+  const clock = parseClock(value);
+  if (!clock) return '';
+  const period = clock.hours >= 12 ? 'PM' : 'AM';
+  const hours = clock.hours % 12 === 0 ? 12 : clock.hours % 12;
+  return `${pad2(hours)}:${pad2(clock.minutes)} ${period}`;
+}
+
+/**
+ * Split a stored shift string into its start and end clock times.
+ *
+ * Accepts the en dash the curriculum writes (`"10:30 – 2:00"`) and a plain
+ * hyphen, and tolerates surrounding spaces.
+ */
+export function splitShiftRange(value: string | null | undefined): [string, string] | null {
+  if (!value) return null;
+  const parts = String(value)
+    .split(/\s*[–—-]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+  return [parts[0], parts[1]];
+}
+
+/**
+ * `"10:30 – 2:00"` -> `"10:30 AM - 02:00 PM"`, the form the banner prints.
+ *
+ * A session ends after it starts, so an end written the short way (`"2:00"`
+ * after a `"10:30"` start) is read as the afternoon — otherwise a 10:30-14:00
+ * clinic would render as ending before it began.
+ */
+export function formatShiftRange(value: string | null | undefined): string {
+  const range = splitShiftRange(value);
+  if (!range) return '';
+  const [rawStart, rawEnd] = range;
+  const start = parseClock(rawStart);
+  const end = parseClock(rawEnd);
+  if (!start || !end) return '';
+
+  let endHours = end.hours;
+  if (endHours < 12 && endHours <= start.hours && !/am|pm/i.test(rawEnd)) {
+    endHours += 12;
+  }
+  return `${formatClock12Hour(rawStart)} - ${formatClock12Hour(`${endHours}:${pad2(end.minutes)}`)}`;
+}
+
+/** `Sunday, 28/06/2026` — the day name and DD/MM/YYYY date the banner shows. */
+export function formatDayDate(
+  day: string | null | undefined,
+  isoDate: string | null | undefined,
+): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(isoDate ?? ''));
+  if (!match) return day ? String(day) : '';
+  const label = day ? `${day}, ` : '';
+  return `${label}${match[3]}/${match[2]}/${match[1]}`;
+}
+
+export interface CycleMetadataBannerInput {
+  cycleNumber: string | null | undefined;
+  weekNumber: string | null | undefined;
+  /** The week's first day, e.g. `"Sunday"`. */
+  startsOn: string | null | undefined;
+  /** `YYYY-MM-DD`. */
+  startDate: string | null | undefined;
+  /** The first session's stored shift, e.g. `"10:30 – 2:00"`. */
+  shiftTime: string | null | undefined;
+  pgyLevel: string | null | undefined;
+}
+
+/**
+ * The human-readable matrix header bar:
+ *
+ *     Cycle 1 · Week 1 | Starts: Sunday, 28/06/2026 | Shift: 10:30 AM - 02:00 PM (PGY-3)
+ *
+ * Sections whose data is missing are dropped rather than printed empty, so a
+ * fresh cycle still reads as a sentence while it is being set up.
+ */
+export function formatCycleMetadataBanner(input: CycleMetadataBannerInput): string {
+  const cycle = numericLabelValue(input.cycleNumber) || '1';
+  const week = numericLabelValue(input.weekNumber) || '1';
+  const sections = [`Cycle ${cycle} · Week ${week}`];
+
+  const starts = formatDayDate(input.startsOn, input.startDate);
+  if (starts) sections.push(`Starts: ${starts}`);
+
+  const shift = formatShiftRange(input.shiftTime);
+  if (shift) {
+    const context = input.pgyLevel ? ` (${input.pgyLevel})` : '';
+    sections.push(`Shift: ${shift}${context}`);
+  }
+
+  return sections.join(' | ');
+}

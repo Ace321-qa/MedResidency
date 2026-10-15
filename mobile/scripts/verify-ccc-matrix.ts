@@ -22,8 +22,14 @@ import {
   WEEKDAY_NAMES,
   WEEKDAY_SHORT,
   dayOfWeekMatches,
+  formatClock12Hour,
+  formatCycleMetadataBanner,
+  formatDayDate,
+  formatShiftRange,
+  numericLabelValue,
   pgyLevelFromLabel,
   pgyLevelsForRow,
+  splitShiftRange,
   weekdayIndex,
   weekdayName,
   type CccScheduleRow,
@@ -438,6 +444,64 @@ console.log('\n-- only appointment and real roles become badges --');
     facultyBadges({ faculty_appointment: 'Core Faculty', administrative_role: 'None' }),
   );
 }
+
+console.log('\n-- the cycle number reads back out of its stored label --');
+assert('a bare digit is kept', numericLabelValue('3'), '3');
+assert('"Cycle 1" yields its number', numericLabelValue('Cycle 1'), '1');
+assert('a trailing number is found', numericLabelValue('Week 12'), '12');
+assert('a missing label yields nothing', numericLabelValue(null), '');
+
+console.log('\n-- a stored shift splits into start and end --');
+assert('the en dash the curriculum writes splits', splitShiftRange('10:30 – 2:00'), ['10:30', '2:00']);
+assert('a plain hyphen splits too', splitShiftRange('07:00 - 14:00'), ['07:00', '14:00']);
+assert('a single time is not a range', splitShiftRange('10:30'), null);
+assert('an empty shift is not a range', splitShiftRange(''), null);
+
+console.log('\n-- a clock time reads as 12-hour --');
+assert('morning keeps AM', formatClock12Hour('10:30'), '10:30 AM');
+assert('14:00 becomes 02:00 PM', formatClock12Hour('14:00'), '02:00 PM');
+assert('noon is 12:00 PM', formatClock12Hour('12:00'), '12:00 PM');
+assert('midnight is 12:00 AM', formatClock12Hour('00:00'), '12:00 AM');
+assert('a unparseable clock yields nothing', formatClock12Hour('later'), '');
+
+console.log('\n-- a shift range reads as a session --');
+assert('the short afternoon end is read as PM', formatShiftRange('10:30 – 2:00'), '10:30 AM - 02:00 PM');
+assert('a 24-hour range is converted', formatShiftRange('07:00 - 14:00'), '07:00 AM - 02:00 PM');
+
+console.log('\n-- the day and date read as DD/MM/YYYY --');
+assert('an ISO date is reordered', formatDayDate('Sunday', '2026-06-28'), 'Sunday, 28/06/2026');
+assert('a missing date yields nothing', formatDayDate('Sunday', null), 'Sunday');
+
+console.log('\n-- the banner reads as one sentence --');
+assert(
+  'the full banner matches the agreed format',
+  formatCycleMetadataBanner({
+    cycleNumber: 'Cycle 1',
+    weekNumber: 'Week 1',
+    startsOn: 'Sunday',
+    startDate: '2026-06-28',
+    shiftTime: '10:30 – 2:00',
+    pgyLevel: 'PGY-3',
+  }),
+  'Cycle 1 · Week 1 | Starts: Sunday, 28/06/2026 | Shift: 10:30 AM - 02:00 PM (PGY-3)',
+);
+assert(
+  'a blank cycle falls back to one',
+  formatCycleMetadataBanner({ cycleNumber: '', weekNumber: '', startsOn: null, startDate: null, shiftTime: null, pgyLevel: null }),
+  'Cycle 1 · Week 1',
+);
+assert(
+  'a shift with no PGY still prints the range',
+  formatCycleMetadataBanner({
+    cycleNumber: 'Cycle 2',
+    weekNumber: 'Week 3',
+    startsOn: 'Monday',
+    startDate: '2026-07-06',
+    shiftTime: '07:00 - 14:00',
+    pgyLevel: null,
+  }),
+  'Cycle 2 · Week 3 | Starts: Monday, 06/07/2026 | Shift: 07:00 AM - 02:00 PM',
+);
 
 if (failures.length > 0) {
   console.error(`\n${failures.length} check(s) failed:\n  - ${failures.join('\n  - ')}`);
