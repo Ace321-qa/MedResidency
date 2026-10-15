@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { Library } from 'lucide-react-native';
+import { ChevronDown, ChevronUp, Library } from 'lucide-react-native';
 import { router } from 'expo-router';
 
 import {
@@ -16,11 +16,19 @@ import {
   SectionHeader,
   SkeletonList,
   StatusBadge,
+  Text,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchRotationBlocks, fetchRotations } from '../../../services/rotations';
-import { spacing } from '../../../theme';
+import { colors, spacing, type Tone } from '../../../theme';
 import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '../../../utils/format';
+import {
+  blockPhase,
+  blockStartDay,
+  partitionBlocksByDate,
+  type BlockPhase,
+} from '../../../utils/rotationBlocks';
+import type { RotationBlock } from '../../../types/api';
 
 /**
  * Rotations — the programme's rotation catalogue and its academic blocks.
@@ -28,6 +36,14 @@ import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '
  * Two related things, split by a choice group rather than two screens, because
  * they are always read together when assigning somebody: "what rotations exist?"
  * and "which blocks do they fit into?".
+ *
+ * The Blocks list is organised around *today*. An academic year can hold
+ * thirteen blocks, most of which are irrelevant to a coordinator mid-year, so
+ * the running block leads and everything else is one tap away: past blocks are
+ * hidden behind a toggle (finished work is rarely what you came for), and the
+ * remaining future blocks are collapsible so the year does not dominate the
+ * screen. A gap between blocks — an off-cycle transition — promotes the next
+ * block to "Upcoming" instead of leaving the screen without an anchor.
  *
  * The screen links out to the tools built for writing: the Master Rotation Grid,
  * the Continuity of Care Clinics (CCC) matrix, and the Rotations Catalogue. Rotation
@@ -38,27 +54,53 @@ import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '
 
 type View2 = 'BLOCKS' | 'ROTATIONS';
 
+/** The badge shown on a block row for each phase. Colour is never the only cue. */
+const PHASE_BADGE: Record<BlockPhase, { label: string; tone: Tone }> = {
+  PAST: { label: 'Past', tone: 'neutral' },
+  CURRENT: { label: 'Current', tone: 'success' },
+  FUTURE: { label: 'Future', tone: 'info' },
+  UNKNOWN: { label: 'No dates', tone: 'warning' },
+};
+
 export default function ProgramRotationsScreen() {
   const { session } = useSession();
   const programId = session?.programId ?? 0;
   const [view, setView] = useState<View2>('BLOCKS');
   const [query, setQuery] = useState('');
+  // Past blocks are hidden by default; the rest of the year starts collapsed so
+  // the running block is the only thing competing for attention.
+  const [showPast, setShowPast] = useState(false);
+  const [showFuture, setShowFuture] = useState(false);
 
   const blocks = useApiResource(() => fetchRotationBlocks(programId), [programId]);
   const rotations = useApiResource(() => fetchRotations(programId), [programId]);
 
   const needle = query.trim().toLowerCase();
   const today = todayCalendarDate();
+  const searching = needle.length > 0;
 
-  const visibleBlocks = useMemo(
+  const matchedBlocks = useMemo(
     () =>
       (blocks.data ?? [])
         .filter((block) =>
           needle ? `${block.block_name} ${block.academic_year}`.toLowerCase().includes(needle) : true,
         )
-        .sort((a, b) => a.start_date.localeCompare(b.start_date)),
+        .sort((a, b) => (blockStartDay(a) ?? '').localeCompare(blockStartDay(b) ?? '')),
     [blocks.data, needle],
   );
+
+  const { past, current, future } = useMemo(
+    () => partitionBlocksByDate(matchedBlocks, today),
+    [matchedBlocks, today],
+  );
+
+  // The one block the screen always shows: the running block if there is one,
+  // otherwise the next block to start so an off-cycle gap still has an anchor.
+  const highlighted = current ?? future[0] ?? null;
+  const highlightedIsCurrent = current !== null;
+  // With no running block the anchor already is the first future block, so the
+  // collapsible remainder starts after it.
+  const remainingFuture = current ? future : future.slice(1);
 
   const visibleRotations = useMemo(
     () =>
@@ -67,6 +109,31 @@ export default function ProgramRotationsScreen() {
       ),
     [rotations.data, needle],
   );
+
+  function openBlock(block: RotationBlock) {
+    router.push(`/program/block/${block.block_id}` as any);
+  }
+
+  function renderBlockRow(block: RotationBlock, index: number, list: RotationBlock[]) {
+    const phase = blockPhase(block, today);
+    const badge = PHASE_BADGE[phase];
+    return (
+      <ListRow
+        key={block.block_id}
+        title={`${block.block_name} · ${block.academic_year}`}
+        subtitle={
+          block.week_start_day
+            ? `Week starts ${humanizeToken(block.week_start_day)}`
+            : 'No first day of week recorded'
+        }
+        meta={formatDateRange(block.start_date, block.end_date)}
+        trailing={<StatusBadge label={badge.label} tone={badge.tone} />}
+        last={index === list.length - 1}
+        muted={phase === 'PAST'}
+        onPress={() => openBlock(block)}
+      />
+    );
+  }
 
   return (
     <Screen
@@ -106,46 +173,132 @@ export default function ProgramRotationsScreen() {
             <ErrorState title="Could not load blocks" message={blocks.error.message} onRetry={blocks.refresh} />
           ) : null}
 
-          {blocks.status === 'ready' && visibleBlocks.length === 0 ? (
+          {blocks.status === 'ready' && matchedBlocks.length === 0 ? (
             <Card>
               <EmptyState
                 icon={Library}
-                title="No blocks"
-                message="No academic blocks are recorded for this programme."
+                title={searching ? 'No matching blocks' : 'No blocks'}
+                message={
+                  searching
+                    ? `Nothing matches “${query.trim()}”. Try a different block name or year.`
+                    : 'No academic blocks are recorded for this programme.'
+                }
               />
             </Card>
           ) : null}
 
-          {visibleBlocks.length > 0 ? (
+          {/* While searching, every phase is shown in one flat list so a past or
+              future block is never hidden behind a collapsed section. */}
+          {searching && matchedBlocks.length > 0 ? (
             <>
-              <SectionHeader title={`${visibleBlocks.length} block${visibleBlocks.length === 1 ? '' : 's'}`} />
+              <SectionHeader
+                title="Search results"
+                trailing={`${matchedBlocks.length} block${matchedBlocks.length === 1 ? '' : 's'}`}
+              />
               <Card padded={false}>
-                {visibleBlocks.map((block, index) => {
-                  const isCurrent = block.start_date <= today && block.end_date >= today;
-                  const isPast = block.end_date < today;
-                  return (
+                {matchedBlocks.map((block, index) => renderBlockRow(block, index, matchedBlocks))}
+              </Card>
+            </>
+          ) : null}
+
+          {!searching && matchedBlocks.length > 0 ? (
+            <>
+              {past.length > 0 ? (
+                <>
+                  <Button
+                    label={
+                      showPast ? 'Hide Past Rotations' : `Show Past Rotations (${past.length})`
+                    }
+                    variant="ghost"
+                    icon={showPast ? ChevronUp : ChevronDown}
+                    iconPosition="trailing"
+                    onPress={() => setShowPast((value) => !value)}
+                    accessibilityLabel={
+                      showPast
+                        ? `Hide ${past.length} past rotation blocks`
+                        : `Show ${past.length} past rotation blocks`
+                    }
+                    accessibilityHint="Toggles blocks that have already finished"
+                    style={styles.toggle}
+                  />
+                  {showPast ? (
+                    <>
+                      <SectionHeader
+                        title="Past rotations"
+                        trailing={`${past.length} block${past.length === 1 ? '' : 's'}`}
+                      />
+                      <Card padded={false}>
+                        {past.map((block, index) => renderBlockRow(block, index, past))}
+                      </Card>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
+
+              {highlighted ? (
+                <>
+                  <SectionHeader title={highlightedIsCurrent ? 'Running now' : 'Next up'} />
+                  <Card
+                    padded={false}
+                    style={highlightedIsCurrent ? styles.currentCard : styles.upcomingCard}
+                  >
                     <ListRow
-                      key={block.block_id}
-                      title={`${block.block_name} · ${block.academic_year}`}
-                      subtitle={
-                        block.week_start_day
-                          ? `Week starts ${humanizeToken(block.week_start_day)}`
-                          : 'No first day of week recorded'
-                      }
-                      meta={formatDateRange(block.start_date, block.end_date)}
-                      trailing={
+                      title={`${highlighted.block_name} · ${highlighted.academic_year}`}
+                      titleAccessory={
                         <StatusBadge
-                          label={isCurrent ? 'Current' : isPast ? 'Past' : 'Future'}
-                          tone={isCurrent ? 'success' : isPast ? 'neutral' : 'info'}
+                          label={highlightedIsCurrent ? 'Current' : 'Upcoming'}
+                          tone={highlightedIsCurrent ? 'success' : 'warning'}
                         />
                       }
-                      last={index === visibleBlocks.length - 1}
-                      muted={isPast}
-                      onPress={() => router.push(`/program/block/${block.block_id}` as any)}
+                      subtitle={
+                        highlighted.week_start_day
+                          ? `Week starts ${humanizeToken(highlighted.week_start_day)}`
+                          : 'No first day of week recorded'
+                      }
+                      meta={formatDateRange(highlighted.start_date, highlighted.end_date)}
+                      onPress={() => openBlock(highlighted)}
                     />
-                  );
-                })}
-              </Card>
+                  </Card>
+                </>
+              ) : null}
+
+              {remainingFuture.length > 0 ? (
+                <>
+                  <Button
+                    label={
+                      showFuture
+                        ? 'Hide Future Blocks'
+                        : `Show Future Blocks (${remainingFuture.length})`
+                    }
+                    variant="ghost"
+                    icon={showFuture ? ChevronUp : ChevronDown}
+                    iconPosition="trailing"
+                    onPress={() => setShowFuture((value) => !value)}
+                    accessibilityLabel={
+                      showFuture
+                        ? `Hide ${remainingFuture.length} future rotation blocks`
+                        : `Show ${remainingFuture.length} future rotation blocks`
+                    }
+                    accessibilityHint="Toggles the remaining blocks through the end of the academic year"
+                    style={styles.toggle}
+                  />
+                  {showFuture ? (
+                    <>
+                      <SectionHeader
+                        title="Future blocks"
+                        trailing={`${remainingFuture.length} block${
+                          remainingFuture.length === 1 ? '' : 's'
+                        }`}
+                      />
+                      <Card padded={false}>
+                        {remainingFuture.map((block, index) =>
+                          renderBlockRow(block, index, remainingFuture),
+                        )}
+                      </Card>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
             </>
           ) : null}
 
@@ -153,6 +306,9 @@ export default function ProgramRotationsScreen() {
               tools stay reachable whichever blocks happen to be on record. */}
           {blocks.status === 'ready' && needle === '' ? (
             <>
+              <Text variant="label" tone="secondary" uppercase style={styles.toolsLabel}>
+                Tools
+              </Text>
               <Button
                 label="Master Rotation Grid"
                 variant="outline"
@@ -242,5 +398,21 @@ const styles = StyleSheet.create({
   },
   addButton: {
     marginTop: spacing.md,
+  },
+  toolsLabel: {
+    marginTop: spacing.lg,
+  },
+  toggle: {
+    marginTop: spacing.sm,
+  },
+  /** The running block: green so it reads as "live" at a glance. */
+  currentCard: {
+    borderColor: colors.success,
+    backgroundColor: colors.successSurface,
+  },
+  /** The next block when today sits between blocks. */
+  upcomingCard: {
+    borderColor: colors.primaryBorder,
+    backgroundColor: colors.primarySoft,
   },
 });
