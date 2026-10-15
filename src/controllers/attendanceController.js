@@ -28,6 +28,15 @@ class AttendanceController {
     } catch (error) {
       console.error('Error in logAttendance controller:', error.message);
 
+      // A clock value the minute-precision parser could not read is a client
+      // error, not a server failure.
+      if (error.statusCode === 400) {
+        return res.status(400).json({
+          success: false,
+          error: error.message
+        });
+      }
+
       // Handle missing foreign key references (invalid resident_id / assignment_id)
       if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
         return res.status(404).json({

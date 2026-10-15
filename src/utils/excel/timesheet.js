@@ -22,8 +22,8 @@ const { makeBuffer } = require('./common');
 const HEADERS = [
   'Shift Date (YYYY-MM-DD)',
   'Attendance Status',
-  'Clock In (YYYY-MM-DD HH:MM:SS)',
-  'Clock Out (YYYY-MM-DD HH:MM:SS)',
+  'Clock In (YYYY-MM-DD HH:MM)',
+  'Clock Out (YYYY-MM-DD HH:MM)',
   'Total Hours',
   'Notes',
 ];
@@ -48,8 +48,10 @@ const ATTENDANCE_STATUSES = [
 const HEADER_ALIASES = {
   shiftDate: ['shift date (yyyy-mm-dd)', 'shift date', 'date'],
   attendanceStatus: ['attendance status', 'status'],
-  clockIn: ['clock in (yyyy-mm-dd hh:mm:ss)', 'clock in', 'in'],
-  clockOut: ['clock out (yyyy-mm-dd hh:mm:ss)', 'clock out', 'out'],
+  // The minute-precision header is the current one; the `:SS` spelling stays a
+  // valid alias so a workbook made before the format change still imports.
+  clockIn: ['clock in (yyyy-mm-dd hh:mm)', 'clock in (yyyy-mm-dd hh:mm:ss)', 'clock in', 'in'],
+  clockOut: ['clock out (yyyy-mm-dd hh:mm)', 'clock out (yyyy-mm-dd hh:mm:ss)', 'clock out', 'out'],
   totalHours: ['total hours', 'hours', 'duration'],
   notes: ['notes', 'note', 'comments', 'comment'],
 };
@@ -77,17 +79,39 @@ function asIsoDate(value) {
   return Number.isNaN(date.getTime()) ? null : match[0].slice(0, 10);
 }
 
-/** `2026-10-01 08:00:00`, or `null`. Accepts a `T` separator too. */
-function asDateTime(value) {
+/**
+ * Normalise a clock cell to `YYYY-MM-DD HH:MM:00`.
+ *
+ * Accepts `YYYY-MM-DD HH:MM`, the older `YYYY-MM-DD HH:MM:SS`, the ISO `T`
+ * separator, or a bare `HH:MM` / `HH:MM:SS` which is paired with the row's
+ * Shift Date. Seconds are always discarded — duty hours are logged to the
+ * minute. Returns `null` when the cell is not a readable time.
+ */
+function asDateTime(value, fallbackDate) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim().replace('T', ' ');
-  const match = text.match(/^(\d{4}-\d{2}-\d{2})[ ](\d{1,2}:\d{2}(:\d{2})?)$/);
-  if (!match) return null;
-  const time = match[2].split(':');
-  const hh = String(Number(time[0])).padStart(2, '0');
-  const mm = String(time[1]).padStart(2, '0');
-  const ss = time[2] ? String(time[2]).padStart(2, '0') : '00';
-  return `${match[1]} ${hh}:${mm}:${ss}`;
+
+  let date;
+  let timeText;
+
+  const full = text.match(/^(\d{4}-\d{2}-\d{2})[ ](\d{1,2}:\d{2}(?::\d{2})?)$/);
+  if (full) {
+    date = full[1];
+    timeText = full[2];
+  } else if (fallbackDate && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) {
+    date = String(fallbackDate).trim().slice(0, 10);
+    timeText = text;
+  } else {
+    return null;
+  }
+
+  const [hours, minutes, seconds] = timeText.split(':');
+  const hh = Number(hours);
+  const mm = Number(minutes);
+  const ss = seconds === undefined ? 0 : Number(seconds);
+  if (hh > 23 || mm > 59 || ss > 59) return null;
+
+  return `${date} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`;
 }
 
 /**
@@ -156,24 +180,24 @@ function parseTimesheetFile(buffer) {
       continue;
     }
 
-    const clockIn = asDateTime(cell('clockIn'));
+    const clockIn = asDateTime(cell('clockIn'), shiftDate);
     const clockInRaw = String(cell('clockIn') ?? '').trim();
     if (clockInRaw !== '' && !clockIn) {
       errors.push({
         row: rowNumber,
         field: 'Clock In',
-        message: 'must be YYYY-MM-DD HH:MM:SS',
+        message: 'must be YYYY-MM-DD HH:MM or HH:MM',
       });
       continue;
     }
 
-    const clockOut = asDateTime(cell('clockOut'));
+    const clockOut = asDateTime(cell('clockOut'), shiftDate);
     const clockOutRaw = String(cell('clockOut') ?? '').trim();
     if (clockOutRaw !== '' && !clockOut) {
       errors.push({
         row: rowNumber,
         field: 'Clock Out',
-        message: 'must be YYYY-MM-DD HH:MM:SS',
+        message: 'must be YYYY-MM-DD HH:MM or HH:MM',
       });
       continue;
     }

@@ -18,20 +18,26 @@ const MONTHS = [
 /**
  * Parse an API date value into a local `Date`.
  *
- * Two formats reach the client:
+ * Three formats reach the client:
  *  - `YYYY-MM-DD`, from the queries that DATE_FORMAT their DATE columns. Parsed
  *    as local midnight so it can never shift a calendar day.
- *  - A UTC instant, because mysql2 materialises DATE columns at the server's
- *    local midnight. The true stored date is the *local* calendar day of that
- *    instant, so the local parts are what we format (see the same reasoning in
- *    src/services/releaseLetterService.js).
+ *  - `YYYY-MM-DD HH:MM`, from the attendance query that DATE_FORMATs the clock
+ *    columns. Parsed as a wall-clock local time; there is deliberately no
+ *    timezone, so `07:00` is `07:00` wherever the device is.
+ *  - A UTC instant, because mysql2 materialises DATE/DATETIME columns at the
+ *    server's local timezone. The true stored value is the *local* wall clock of
+ *    that instant, so the local parts are what we format (see the same reasoning
+ *    in src/services/releaseLetterService.js).
  */
 function parseDate(value: string | null | undefined): Date | null {
   if (!value) return null;
 
-  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(value)
-    ? new Date(`${value}T00:00:00`)
-    : new Date(value);
+  const trimmed = value.trim();
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? new Date(`${trimmed}T00:00:00`)
+    : /^\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}(:\d{2})?$/.test(trimmed)
+      ? new Date(trimmed.replace(' ', 'T'))
+      : new Date(trimmed);
 
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
@@ -54,7 +60,7 @@ export function formatShortDate(value: string | null | undefined): string {
   return `${pad(date.getDate())} ${MONTHS[date.getMonth()]}`;
 }
 
-/** `07:00` — clock_in/clock_out are DATETIME, so only the time part is shown. */
+/** `07:00` — clock_in/clock_out are wall-clock times shown to the minute. */
 export function formatTime(value: string | null | undefined): string {
   const date = parseDate(value);
   if (!date) return '--';
@@ -91,23 +97,27 @@ export function todayCalendarDate(): string {
   return toCalendarDate(new Date());
 }
 
-/** `YYYY-MM-DD HH:MM:SS`, the literal format a MySQL DATETIME column accepts. */
+/** `YYYY-MM-DD HH:MM`, the minute-precision format the API stores and returns. */
 export function toMysqlDateTime(date: Date): string {
-  return `${toCalendarDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return `${toCalendarDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 /**
  * Combine a `YYYY-MM-DD` date and an `HH:MM` time into a local `Date`.
  * Returns null when either half is malformed or out of range.
+ *
+ * An optional `:SS` tail is tolerated but discarded: duty hours are logged to
+ * the minute, so a stray second never leaks into what gets saved.
  */
 export function combineDateAndTime(date: string, time: string): Date | null {
   const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.trim());
-  const timeMatch = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+  const timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(time.trim());
   if (!dateMatch || !timeMatch) return null;
 
   const hours = Number(timeMatch[1]);
   const minutes = Number(timeMatch[2]);
-  if (hours > 23 || minutes > 59) return null;
+  const seconds = timeMatch[3] === undefined ? 0 : Number(timeMatch[3]);
+  if (hours > 23 || minutes > 59 || seconds > 59) return null;
 
   const combined = new Date(
     Number(dateMatch[1]),

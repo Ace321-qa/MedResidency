@@ -88,8 +88,8 @@ class AttendanceImportController {
 
 /** The three example rows the mobile client mirrors when it builds offline. */
 const SAMPLE_ROWS = [
-  ['2026-10-01', 'PRESENT', '2026-10-01 08:00:00', '2026-10-01 17:00:00', 8, 'Regular day shift'],
-  ['2026-10-02', 'ON_CALL', '2026-10-02 08:00:00', '2026-10-03 08:00:00', 24, 'Continuous duty'],
+  ['2026-10-01', 'PRESENT', '2026-10-01 08:00', '2026-10-01 17:00', 8, 'Regular day shift'],
+  ['2026-10-02', 'ON_CALL', '2026-10-02 08:00', '2026-10-03 08:00', 24, 'Continuous duty'],
   ['2026-10-03', 'ANNUAL_LEAVE', '', '', 0, 'Approved annual leave'],
 ];
 

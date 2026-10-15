@@ -60,7 +60,7 @@ const INITIAL: FormState = {
   notes: '',
 };
 
-/** The API stores DATETIME columns, so times must be sent as full timestamps. */
+/** The API stores DATETIME columns, so a `HH:MM` entry becomes a full stamp. */
 function toDateTime(date: string, time: string): string | null {
   const combined = combineDateAndTime(date, time);
   return combined ? toMysqlDateTime(combined) : null;
@@ -94,8 +94,22 @@ export default function LogShiftScreen() {
 
   const dateError = /^\d{4}-\d{2}-\d{2}$/.test(form.shiftDate) ? null : 'Use the format YYYY-MM-DD.';
 
+  // Clock entries are hour-and-minute only. A time that cannot be read as
+  // `HH:MM` is rejected here rather than being silently dropped before saving.
+  const clockInError =
+    form.clockIn.trim() && !combineDateAndTime(form.shiftDate, form.clockIn)
+      ? 'Use HH:MM, in 24-hour time.'
+      : undefined;
+  const clockOutError =
+    form.clockOut.trim() && !combineDateAndTime(form.shiftDate, form.clockOut)
+      ? 'Use HH:MM, in 24-hour time.'
+      : undefined;
+
   const canSubmit =
-    !submitting && dateError === null && form.status !== null && (isLeave || computedHours !== null);
+    !submitting &&
+    dateError === null &&
+    form.status !== null &&
+    (isLeave || computedHours !== null);
 
   async function handleSubmit() {
     if (form.status === null) return;
@@ -193,18 +207,21 @@ export default function LogShiftScreen() {
               label="Clock in"
               value={form.clockIn}
               onChangeText={(value) => setForm((prev) => ({ ...prev, clockIn: value }))}
+              error={clockInError}
               placeholder="HH:MM"
               keyboardType="numbers-and-punctuation"
               autoCapitalize="none"
-              hint="24-hour time. Leave blank if you did not record it."
+              hint="24-hour time, hours and minutes only."
             />
             <TextField
               label="Clock out"
               value={form.clockOut}
               onChangeText={(value) => setForm((prev) => ({ ...prev, clockOut: value }))}
+              error={clockOutError}
               placeholder="HH:MM"
               keyboardType="numbers-and-punctuation"
               autoCapitalize="none"
+              hint="Leave blank to use the difference between clock in and clock out."
             />
             <TextField
               label="Total hours"

@@ -7,6 +7,9 @@
  *    while the leave and release-letter queries DATE_FORMAT them to `YYYY-MM-DD`.
  *    Both forms are in use, so date fields are typed loosely as strings and
  *    normalised by `src/utils/format.ts`.
+ *
+ * Duty-hour clock values are the exception: they are DATE_FORMATted to
+ * `YYYY-MM-DD HH:MM` so no seconds and no timezone ever reach the client.
  */
 
 /** A `DATETIME`/`DATE` column serialised as an ISO-8601 string. */
@@ -14,6 +17,9 @@ export type IsoDateString = string;
 
 /** A `DATE` column serialised by `DATE_FORMAT(..., '%Y-%m-%d')`. */
 export type CalendarDateString = string;
+
+/** A `DATETIME` column serialised by `DATE_FORMAT(..., '%Y-%m-%d %H:%i')`. */
+export type MinuteDateTimeString = string;
 
 /** `DECIMAL` columns arrive as strings over JSON. */
 export type DecimalString = string;
@@ -273,8 +279,8 @@ export interface AttendanceLog {
   log_id: number;
   resident_name: string;
   shift_date: IsoDateString;
-  clock_in: IsoDateString | null;
-  clock_out: IsoDateString | null;
+  clock_in: MinuteDateTimeString | null;
+  clock_out: MinuteDateTimeString | null;
   total_hours: Numeric | null;
   attendance_status: AttendanceStatus;
   other_leave_specify: string | null;
@@ -289,7 +295,10 @@ export interface LogAttendancePayload {
   assignment_id?: number;
   /** `YYYY-MM-DD`. */
   shift_date: string;
-  /** `YYYY-MM-DD HH:MM:SS` — the column is DATETIME, not TIME. */
+  /**
+   * `YYYY-MM-DD HH:MM` (seconds are discarded server-side). A bare `HH:MM`
+   * is accepted too and paired with `shift_date`.
+   */
   clock_in?: string;
   clock_out?: string;
   total_hours?: number;
