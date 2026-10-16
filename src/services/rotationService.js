@@ -49,6 +49,24 @@ const CONTACT_IDENTIFIER_SQL = `
     LIMIT 1
   )`;
 
+/**
+ * Scalar subquery yielding one email address per resident, or NULL.
+ *
+ * Email and mobile both live on `resident_identifiers` rather than
+ * `residents`, so the Master Rotation Grid export resolves it the same
+ * correlated-subquery way the roster does — never with a join, which would
+ * multiply a resident by how many identifiers they hold.
+ */
+const EMAIL_IDENTIFIER_SQL = `
+  (
+    SELECT ri.identifier_value
+    FROM resident_identifiers ri
+    WHERE ri.resident_id = r.id
+      AND UPPER(ri.identifier_type) IN ('EMAIL', 'E_MAIL', 'EMAIL_ADDRESS')
+    ORDER BY ri.is_primary DESC, ri.id ASC
+    LIMIT 1
+  )`;
+
 class RotationService {
   /**
    * Fetch all academic blocks for a specific residency program
@@ -511,10 +529,12 @@ class RotationService {
         r.last_name,
         ${PRIMARY_IDENTIFIER_SQL} AS employee_id,
         ${CONTACT_IDENTIFIER_SQL} AS contact_number,
+        ${EMAIL_IDENTIFIER_SQL} AS email,
         re.year_in_program AS pgy_level,
         re.resident_status,
         rb.program_id,
         p.program_code,
+        p.specialty_name,
         p.week_start_day,
         rb.id AS block_id,
         rb.block_number,

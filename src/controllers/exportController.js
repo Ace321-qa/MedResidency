@@ -31,6 +31,10 @@ class ExportController {
       res.setHeader('Content-Length', buffer.length);
       return res.status(200).send(Buffer.from(buffer));
     } catch (error) {
+      // Log the stack before answering: the body only carries a message, so
+      // without this line an unexpected renderer failure leaves no trace of
+      // which row or cell produced it.
+      console.error('Schedule Workbook Export Error:', error);
       if (error.statusCode) {
         return res.status(error.statusCode).json({ success: false, error: error.message });
       }

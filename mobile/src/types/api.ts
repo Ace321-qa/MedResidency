@@ -741,6 +741,14 @@ export interface CohortGridCell {
    * data exists. The grid renders "Not recorded" rather than hiding the column.
    */
   contact_number: string | null;
+  /**
+   * The resident's email address from `resident_identifiers`, or null.
+   *
+   * The Master Rotation Grid export prints it under the Email column, so the
+   * cohort query resolves it the same correlated-subquery way as the roster.
+   * Optional so older fixtures that predate the column still type-check.
+   */
+  email?: string | null;
   pgy_level: number | null;
   resident_status: string;
   program_id: number;

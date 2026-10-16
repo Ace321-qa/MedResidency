@@ -6,7 +6,10 @@ const {
   WEEK_COUNT,
   MASTER_GRID_START,
   blockWeeks,
+  calculateWeeklySubRanges,
   formatDmy,
+  gridStartFrom,
+  overlapsWeek,
   weekNumberForDate,
   weekWindow,
 } = require('../masterGridCalendar');
@@ -411,9 +414,13 @@ function parseMasterGrid(buffer) {
   const { textRows, rawRows } = headerRow(buffer, 'Master Grid');
   if (textRows.length < 1) throw new Error('The file needs a header row.');
 
-  // The corp-id heading may sit on row 1 or under a title a coordinator typed.
+  // The corp-id heading may sit on row 1, or under a title a coordinator typed,
+  // or under the masthead this exporter writes (title, subtitle, six meta rows),
+  // so the search looks through the whole header and masthead rather than just
+  // the first few rows. A data row never carries the corp-id heading text, so a
+  // wider window cannot mistake one for the header.
   let headerIndex = -1;
-  for (let index = 0; index < Math.min(6, textRows.length); index += 1) {
+  for (let index = 0; index < Math.min(16, textRows.length); index += 1) {
     if (findHeader(textRows[index] ?? [], MASTER_CORP_ALIASES) >= 0) {
       headerIndex = index;
       break;
@@ -513,6 +520,234 @@ function parseMasterGrid(buffer) {
   }
 
   return { headers, corporateIndex, layout, weekColumns, gridStart, cells };
+}
+
+/* ------------------------------------------------------------------ *
+ * Filled export — the template above with every resident's rota.
+ * ------------------------------------------------------------------ */
+
+/**
+ * What a week with no rotation prints.
+ *
+ * It is the same em dash the parser lists in `UNASSIGNED_MARKERS`, so a filled
+ * grid can be handed straight back to the importer without inventing a rotation
+ * called "—" in the catalogue.
+ */
+const UNASSIGNED_LABEL = '—';
+
+// The header band colours, kept in step with `src/services/exportService.js`,
+// which owns the actual ExcelJS styling. A report cell only *names* a colour;
+// the renderer is the one place that turns it into a fill.
+const EXPORT_HEADER_FILL = '#0F2C45';
+const EXPORT_HEADER_TEXT = '#FFFFFF';
+const EXPORT_SUBHEADER_FILL = '#E2E8F0';
+const EXPORT_SUBHEADER_TEXT = '#0F172A';
+
+function exportHeaderCell(text, colSpan) {
+  return {
+    text,
+    fill: EXPORT_HEADER_FILL,
+    textColor: EXPORT_HEADER_TEXT,
+    bold: true,
+    align: 'center',
+    colSpan,
+  };
+}
+
+function exportSubHeaderCell(text) {
+  return { text, fill: EXPORT_SUBHEADER_FILL, textColor: EXPORT_SUBHEADER_TEXT, align: 'center' };
+}
+
+/**
+ * The label for one grid cell's rotation.
+ *
+ * A cell in the pivot is frequently *empty* — an unassigned week arrives as a
+ * row with `rotation_name` null, or as no row at all — so every read is guarded
+ * with optional chaining: `slot.rotation_name` on an undefined slot is the
+ * `TypeError` that turns the whole export into a 500. `rotation_code` is the
+ * server's abbreviation; unassigned returns the explicit dash rather than
+ * throwing or printing "undefined".
+ */
+function exportRotationLabel(slot) {
+  const name = String(slot?.rotation_name ?? '').trim();
+  if (name) return name;
+  const abbreviation = String(slot?.abbreviation ?? slot?.rotation_code ?? '').trim();
+  if (abbreviation) return abbreviation;
+  return String(slot?.department_name ?? '').trim();
+}
+
+/** Every 1..52 week an assignment touches, `[]` when it cannot be placed. */
+function exportWeeksForAssignment(slot, gridStart) {
+  const weeks = new Set();
+  const start = slot?.assignment_start_date_iso ?? slot?.start_date ?? null;
+  const end = slot?.assignment_end_date_iso ?? slot?.end_date ?? null;
+
+  if (start && end) {
+    for (let week = 1; week <= WEEK_COUNT; week += 1) {
+      if (overlapsWeek(week, start, end, gridStart)) weeks.add(week);
+    }
+  } else {
+    for (const value of [start, end]) {
+      const week = value ? weekNumberForDate(value, gridStart) : null;
+      if (week) weeks.add(week);
+    }
+  }
+
+  // An assignment stored without usable dates still hangs off a block, so it
+  // occupies that block's window rather than vanishing from the grid.
+  if (weeks.size === 0 && slot?.block_number) {
+    for (const week of blockWeeks(slot.block_number, gridStart)) weeks.add(week.weekNumber);
+  }
+
+  return [...weeks];
+}
+
+/**
+ * The filled Master Rotation Grid as a report model.
+ *
+ * The sheet is the institutional 52-week layout — five frozen left-hand columns
+ * (`LEFT_HEADERS`), then 13 blocks of four weekly subcolumns whose rows 2 and 3
+ * carry the week's start and end dates — with one row per resident and a
+ * rotation label in every week they are assigned to. That is deliberately the
+ * same layout `generateMasterGridTemplate` hands out and `parseMasterGrid`
+ * reads back, so an exported grid can be re-imported without a conversion step.
+ *
+ * @param {object[]} cohortRows Rows from `RotationService.getCohortGrid`.
+ * @param {object} [options]
+ * @param {string} [options.academicYear]
+ * @param {string|Date} [options.gridStart] The day week 1 begins.
+ * @param {string} [options.programLabel]
+ * @param {string} [options.programCode]
+ * @param {string} [options.cohortLabel]
+ * @returns {object} A report model for `ExportService.buildWorkbook`.
+ */
+function buildMasterGridExportReport(cohortRows, options = {}) {
+  const rows = Array.isArray(cohortRows) ? cohortRows : [];
+  const academicYear = String(options.academicYear ?? '').trim() || '2026-2027';
+
+  // Week 1 is the academic year's own start (28 June), and the coordinator may
+  // override it; an unset block start date therefore falls back to the year
+  // start rather than producing an empty header.
+  const fallbackStart = `${academicYear.slice(0, 4)}-06-28`;
+  const gridStart = gridStartFrom(options.gridStart || fallbackStart);
+
+  // Header date generation safeguard: `calculateWeeklySubRanges` returns [] for
+  // a missing or unparseable start, so a bad grid start falls back to the fixed
+  // institutional calendar instead of leaving 52 blank date columns.
+  let weeklyRanges = calculateWeeklySubRanges(gridStart, WEEK_COUNT);
+  if (weeklyRanges.length !== WEEK_COUNT) {
+    weeklyRanges = calculateWeeklySubRanges(MASTER_GRID_START, WEEK_COUNT);
+  }
+
+  const residents = new Map();
+  const weeksByResident = new Map();
+
+  for (const row of rows) {
+    const residentId = row?.resident_id;
+    if (residentId === undefined || residentId === null) continue;
+
+    if (!residents.has(residentId)) {
+      residents.set(residentId, {
+        residentId,
+        level: row.pgy_level,
+        name: String(row.resident_name ?? '').trim(),
+        corporateId: String(row.employee_id ?? '').trim(),
+        mobile: String(row.contact_number ?? '').trim(),
+        email: String(row.email ?? '').trim(),
+      });
+      weeksByResident.set(residentId, new Map());
+    }
+
+    const label = exportRotationLabel(row);
+    if (!label || Number(row.is_assigned) !== 1) continue;
+
+    const weekMap = weeksByResident.get(residentId);
+    for (const week of exportWeeksForAssignment(row, gridStart)) {
+      // A week can legitimately carry more than one rotation — a split block
+      // (two weeks PHCC followed by two weeks Medicine Inpatient) puts a
+      // different name in each of the block's subcolumns, and a true overlap
+      // (e.g. a cross-cover posting) puts two names in the *same* subcolumn.
+      // Collect them all, in the order the database returned them, so a later
+      // assignment never silently erases an earlier one.
+      const weekLabels = weekMap.get(week) ?? [];
+      if (!weekLabels.includes(label)) weekLabels.push(label);
+      weekMap.set(week, weekLabels);
+    }
+  }
+
+  const blockRow = LEFT_HEADERS.map((header) => exportHeaderCell(header));
+  const startRow = LEFT_HEADERS.map(() => exportSubHeaderCell(''));
+  const endRow = LEFT_HEADERS.map(() => exportSubHeaderCell(''));
+
+  for (let week = 1; week <= WEEK_COUNT; week += 1) {
+    const range = weeklyRanges[week - 1];
+    if ((week - 1) % WEEKS_PER_BLOCK === 0) {
+      blockRow.push(exportHeaderCell(`Block ${Math.ceil(week / WEEKS_PER_BLOCK)}`, WEEKS_PER_BLOCK));
+    }
+    startRow.push(exportSubHeaderCell(formatDmy(range?.start)));
+    endRow.push(exportSubHeaderCell(formatDmy(range?.end)));
+  }
+
+  const body = [...residents.values()].map((resident) => {
+    const weekMap = weeksByResident.get(resident.residentId) ?? new Map();
+    const cells = [
+      { text: resident.level ? `PGY-${resident.level}` : '', align: 'center' },
+      { text: resident.name },
+      { text: resident.corporateId },
+      { text: resident.mobile },
+      { text: resident.email },
+    ];
+    for (let week = 1; week <= WEEK_COUNT; week += 1) {
+      // One label per subcolumn is the weekly layout the importer reads back, so
+      // a split block shows its rotations in their own weeks (PHCC in W1–2,
+      // MED-INP in W3–4). Only a *same-week* overlap becomes a multi-line cell,
+      // newline-joined and wrapped, which is exactly what `wrapText` is for.
+      const weekLabels = weekMap.get(week);
+      cells.push({
+        text: weekLabels && weekLabels.length > 0 ? weekLabels.join('\n') : UNASSIGNED_LABEL,
+        align: 'center',
+      });
+    }
+    return cells;
+  });
+
+  const first = weeklyRanges[0];
+  const last = weeklyRanges[weeklyRanges.length - 1];
+  const period = first && last ? `${formatDmy(first.start)} – ${formatDmy(last.end)}` : gridStart;
+
+  const programmeLabel = String(options.programLabel ?? '').trim();
+  const programmeCode = String(options.programCode ?? '').trim();
+  // Some programmes carry a numeric surrogate as their code; showing
+  // "Family Medicine (1207800001)" helps nobody, so the code is only appended
+  // when it is a real mnemonic rather than a bare id.
+  const programme =
+    programmeLabel && programmeCode && programmeLabel !== programmeCode && !/^\d+$/.test(programmeCode)
+      ? `${programmeLabel} (${programmeCode})`
+      : programmeLabel || programmeCode;
+
+  return {
+    fileName: `Master Rotation Grid ${academicYear} Weekly`,
+    sheetName: `Master Grid ${academicYear}`.slice(0, 31),
+    title: 'Master Rotation Grid',
+    subtitle: `${academicYear} · Weekly view · ${residents.size} resident${residents.size === 1 ? '' : 's'}`,
+    meta: [
+      { label: 'Academic year', value: academicYear },
+      { label: 'Programme', value: programme },
+      { label: 'Cohort', value: options.cohortLabel ?? '' },
+      { label: 'Period', value: period },
+      { label: 'View', value: `Weekly (${BLOCK_COUNT} blocks × ${WEEKS_PER_BLOCK} sub-weeks)` },
+      { label: 'Generated', value: formatDmy(new Date().toISOString().slice(0, 10)) },
+    ],
+    columns: [
+      ...LEFT_HEADERS.map(() => ({ width: 14 })),
+      ...Array.from({ length: WEEK_COUNT }, () => ({ width: 8 })),
+    ],
+    rows: [blockRow, startRow, endRow, ...body],
+    headerRows: 3,
+    // No legend: the importer reads every non-blank row as a resident, so a
+    // legend would re-import as phantom residents with no corporate id.
+    legend: [],
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -646,6 +881,7 @@ module.exports = {
   masterBlockColumns,
   parseHeaderDate,
   forwardFillWeeks,
+  buildMasterGridExportReport,
   generateMasterGridTemplate,
   parseMasterGrid,
   generateCccTemplate,

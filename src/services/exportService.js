@@ -53,7 +53,7 @@ function toArgb(value) {
 
 /** A cell payload may be a bare value or the rich `{ text, fill, ... }` shape. */
 function normalizeCell(raw) {
-  if (raw === null || raw === undefined) return { text: '' };
+  if (raw === null || raw === undefined) return { text: '', colSpan: 1 };
   if (typeof raw === 'object') {
     const span = Number(raw.colSpan);
     return {
@@ -65,7 +65,7 @@ function normalizeCell(raw) {
       colSpan: Number.isFinite(span) && span > 1 ? Math.floor(span) : 1,
     };
   }
-  return { text: String(raw) };
+  return { text: String(raw), colSpan: 1 };
 }
 
 /** The stacked text a merged master-grid cell shows, one rotation per line. */
@@ -115,13 +115,15 @@ async function buildWorkbook(report) {
   const headerRows = Math.max(0, Math.min(rows.length, Number(payload.headerRows) || 0));
 
   // The column count is the widest row, counting spans, so a merged heading row
-  // never truncates the data underneath it.
+  // never truncates the data underneath it. A bare value, `null` or `undefined`
+  // cell counts as one column, never as `NaN`: `new Array(NaN)` throws
+  // "Invalid array length" and turns a normal export into a 500.
   const columnCount = rows.reduce((widest, row) => {
     const count = (Array.isArray(row) ? row : []).reduce(
       (sum, cell) => sum + normalizeCell(cell).colSpan,
       0,
     );
-    return Math.max(widest, count);
+    return Math.max(widest, Number.isFinite(count) ? count : 0);
   }, declaredColumns.length);
 
   const workbook = new ExcelJS.Workbook();
@@ -133,7 +135,7 @@ async function buildWorkbook(report) {
 
   /** Where the first data row lands, so freeze panes can split there. */
   let currentRow = 1;
-  const span = Math.max(1, columnCount);
+  const span = Number.isFinite(columnCount) && columnCount > 0 ? Math.floor(columnCount) : 1;
 
   if (payload.title) {
     const titleRow = sheet.getRow(currentRow);

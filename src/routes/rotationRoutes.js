@@ -1,8 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const RotationController = require('../controllers/rotationController');
+const RotationExportController = require('../controllers/rotationExportController');
 
 // Map URL routes to controller functions
+
+// Master Rotation Grid download. Declared before every `/assignments/...`
+// route so the literal `export` can never be read as a dynamic id.
+router.get('/export/master', RotationExportController.exportMaster);
 
 // Block Routes
 router.get('/blocks', RotationController.getBlocks);
