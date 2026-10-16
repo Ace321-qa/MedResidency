@@ -1,18 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
-import { CalendarX, Plus } from 'lucide-react-native';
+import { CalendarX, Download, Plus } from 'lucide-react-native';
 import { router } from 'expo-router';
 
 import {
   AppHeader,
+  Button,
   Card,
   ChoiceGroup,
   DateField,
   EmptyState,
   ErrorState,
+  ExportMenu,
   ImportTools,
   MatrixTable,
+  ScheduleReportView,
   Screen,
+  SegmentedControl,
   SelectField,
   Sheet,
   SkeletonList,
@@ -25,6 +29,8 @@ import {
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
 import { createAssignment, fetchCohortGrid, fetchRotations } from '../../../services/rotations';
+import { downloadScheduleReport } from '../../../services/scheduleExport';
+import { buildMasterGridReport } from '../../../utils/scheduleExport';
 import { uploadMasterGrid } from '../../../services/excelTemplates';
 import {
   ACADEMIC_DAYS,
@@ -134,6 +140,8 @@ export default function MasterGridScreen() {
   } | null>(null);
   const [assignRotationId, setAssignRotationId] = useState<number | null>(null);
   const [assignNotes, setAssignNotes] = useState('');
+  const [exportOpen, setExportOpen] = useState(false);
+  const reportRef = useRef<View>(null);
 
   // Changing the academic year resets the start date to that year's default
   // (28 June), so the grid never mixes one year's dates with another's.
@@ -387,6 +395,28 @@ export default function MasterGridScreen() {
   const showEmptyState = grid.status === 'ready' && residents.length === 0;
   const missingBlocks = BLOCK_NUMBERS.filter((blockNumber) => !blocksByNumber.has(blockNumber));
   const hasContent = residents.length > 0 && blocksByNumber.size > 0;
+  const cohortLabel = pgyFilter === 'ALL' ? 'All cohorts' : `PGY-${pgyFilter}`;
+
+  // The export model is rebuilt from the same rows the grid renders, so the
+  // downloaded file can never drift from what is on screen.
+  const reportModel = useMemo(
+    () =>
+      buildMasterGridReport({
+        rows: grid.data ?? [],
+        startDate,
+        viewMode,
+        academicYear,
+        cohortLabel,
+        programLabel: session?.programLabel ?? 'Programme',
+        programCode: session?.programCode ?? null,
+      }),
+    [grid.data, startDate, viewMode, academicYear, cohortLabel, session?.programLabel, session?.programCode],
+  );
+
+  async function handleExport(format: Parameters<typeof downloadScheduleReport>[1]) {
+    const { confirmation } = await downloadScheduleReport(reportModel, format, reportRef);
+    return confirmation;
+  }
 
   return (
     <Screen onRefresh={grid.refresh} refreshing={grid.isRefreshing}>
@@ -396,11 +426,12 @@ export default function MasterGridScreen() {
         onBack={goBack}
       />
 
-      <SelectField
+      <SegmentedControl
         label="Academic year"
         value={academicYear}
         onChange={handleAcademicYearChange}
         options={academicYearOptions.map((year) => ({ value: year, label: year }))}
+        hint="Switch year to see that year's blocks and assignments; editing always applies to the year shown here."
       />
 
       <DateField
@@ -432,6 +463,15 @@ export default function MasterGridScreen() {
       <View style={styles.viewToggle}>
         <ChoiceGroup label="View" value={viewMode} onChange={(v) => setViewMode(v as ViewMode)} options={VIEW_OPTIONS} />
       </View>
+
+      <Button
+        label="Export & download"
+        variant="secondary"
+        icon={Download}
+        onPress={() => setExportOpen(true)}
+        disabled={!hasContent}
+        accessibilityHint="Download this master rotation grid as Excel, PDF, Word or an image."
+      />
 
       <ImportTools
         template="master"
@@ -500,6 +540,22 @@ export default function MasterGridScreen() {
       ) : null}
         </>
       ) : null}
+
+      <ExportMenu
+        visible={exportOpen}
+        onClose={() => setExportOpen(false)}
+        subtitle={`${formatAcademicYearForHeader(academicYear)} · ${viewMode === 'weekly' ? 'Weekly' : 'Block'} view`}
+        onExport={handleExport}
+      />
+
+      {/*
+        The full-width report, mounted out of sight. The JPEG/PNG export
+        captures this node, not the scrollable on-screen matrix, so no columns
+        are clipped.
+      */}
+      <View style={styles.hiddenReport} pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+        <ScheduleReportView ref={reportRef} report={reportModel} />
+      </View>
 
       <Sheet visible={assignSheetOpen} onClose={() => setAssignSheetOpen(false)} title={`Assign Rotation${selected ? ` — ${selected.residentName}` : ''}`}>
           <SelectField
@@ -853,5 +909,12 @@ const styles = StyleSheet.create({
   footnote: {
     marginTop: spacing.sm,
     color: colors.textMuted,
+  },
+  hiddenReport: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    opacity: 0.01,
+    zIndex: -1,
   },
 });

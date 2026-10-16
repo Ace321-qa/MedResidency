@@ -11,6 +11,7 @@ const {
   PRIMARY_CARE_DEFAULT_CLINICS,
   deriveClinicCode,
 } = require('../utils/primaryCareClinics');
+const { academicYearForDate } = require('../utils/academicYear');
 
 /**
  * Residents are listed on the CCC matrix by name only — a resident is never
@@ -1071,7 +1072,12 @@ class LongitudinalService {
       'SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY start_date ASC, id ASC',
       [programId]
     );
-    return rows.map((row) => ({ ...row, start_date: toCalendarDate(row.start_date) }));
+    return rows.map((row) => {
+      const startDate = toCalendarDate(row.start_date);
+      // The cycle's academic-year grouping is derived, never stored, so a cycle
+      // is always filed under the year its own start date falls in.
+      return { ...row, start_date: startDate, academic_year: academicYearForDate(startDate) };
+    });
   }
 
   /**
@@ -1220,7 +1226,11 @@ class LongitudinalService {
       cycle = rows[0];
     }
 
-    cycle = { ...cycle, start_date: toCalendarDate(cycle.start_date) };
+    cycle = {
+      ...cycle,
+      start_date: toCalendarDate(cycle.start_date),
+      academic_year: academicYearForDate(toCalendarDate(cycle.start_date)),
+    };
 
     // Seed the default five CCC days exactly once per cycle. The guard is the
     // cycle having *no* day rows at all (rather than "this particular day is
@@ -1630,7 +1640,13 @@ class LongitudinalService {
 
     const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ?', [cycleId]);
     const updated = cycles[0];
-    const cycle = updated ? { ...updated, start_date: toCalendarDate(updated.start_date) } : updated;
+    const cycle = updated
+      ? {
+          ...updated,
+          start_date: toCalendarDate(updated.start_date),
+          academic_year: academicYearForDate(toCalendarDate(updated.start_date)),
+        }
+      : updated;
 
     const [headerRows] = await db.query(
       'SELECT * FROM primary_care_daily_headers WHERE cycle_id = ?',

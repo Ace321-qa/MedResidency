@@ -11,7 +11,7 @@ import * as Sharing from 'expo-sharing';
  *
  *  - **Web** has no file system the page may write to, so the bytes become a
  *    `Blob`, the blob becomes an object URL, and a hidden anchor is clicked.
- *    The URL is revoked afterwards, because a page that downloads six templates
+ *    The URL is revoked afterwards, because a page that downloads six files
  *    should not hold six copies of them in memory.
  *  - **Native** has a real file system, so the bytes are written into the cache
  *    directory and handed to the OS share sheet via `expo-sharing`. That is what
@@ -24,7 +24,30 @@ import * as Sharing from 'expo-sharing';
  * failure that did not happen.
  */
 
-const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+/** The four publication formats the schedule export engine can produce. */
+export type ExportFormat = 'xlsx' | 'pdf' | 'docx' | 'jpg' | 'png';
+
+interface FormatSpec {
+  mime: string;
+  /** Apple Uniform Type Identifier, for the iOS share sheet's app matching. */
+  uti: string;
+}
+
+const FORMATS: Record<ExportFormat, FormatSpec> = {
+  xlsx: {
+    mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    uti: 'org.openxmlformats.spreadsheetml.sheet',
+  },
+  pdf: { mime: 'application/pdf', uti: 'com.adobe.pdf' },
+  docx: {
+    mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    uti: 'org.openxmlformats.wordprocessingml.document',
+  },
+  jpg: { mime: 'image/jpeg', uti: 'public.jpeg' },
+  png: { mime: 'image/png', uti: 'public.png' },
+};
+
+export const XLSX_MIME = FORMATS.xlsx.mime;
 
 export interface SavedFile {
   fileName: string;
@@ -35,27 +58,40 @@ export interface SavedFile {
 }
 
 /**
- * Save `.xlsx` bytes under `fileName`.
+ * Save `bytes` as `fileName` in the given format.
  *
- * Throws only when nothing could be done — the browser refused the anchor click
- * or the cache directory was unwritable. Every other outcome is a success, even
- * the one where the file simply sits in the app's own cache.
+ * Bytes may arrive as a `Uint8Array` or an `ArrayBuffer` (both are what the
+ * renderers naturally produce), and are normalised to a `Uint8Array` before they
+ * touch either platform's write path.
  */
-export async function saveSpreadsheet(fileName: string, bytes: Uint8Array): Promise<SavedFile> {
+export async function saveFile(
+  fileName: string,
+  bytes: Uint8Array | ArrayBuffer,
+  format: ExportFormat,
+): Promise<SavedFile> {
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const spec = FORMATS[format];
+
   if (Platform.OS === 'web') {
-    return saveOnWeb(fileName, bytes);
+    return saveOnWeb(fileName, data, spec);
   }
-  return saveOnDevice(fileName, bytes);
+  return saveOnDevice(fileName, data, spec);
 }
 
-function saveOnWeb(fileName: string, bytes: Uint8Array): SavedFile {
-  const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: XLSX_MIME });
+/** Save `.xlsx` bytes. Thin wrapper over `saveFile` kept for existing callers. */
+export async function saveSpreadsheet(fileName: string, bytes: Uint8Array | ArrayBuffer): Promise<SavedFile> {
+  return saveFile(fileName, bytes, 'xlsx');
+}
+
+function saveOnWeb(fileName: string, bytes: Uint8Array, spec: FormatSpec): SavedFile {
+  // A `Uint8Array` view over a larger buffer would otherwise serialise the whole
+  // backing buffer; slice to exactly the bytes we mean to write.
+  const blob = new Blob([bytes.slice()], { type: spec.mime });
   const url = URL.createObjectURL(blob);
 
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = fileName;
-  anchor.rel = 'noopener';
   anchor.style.display = 'none';
   document.body.appendChild(anchor);
   anchor.click();
@@ -68,7 +104,7 @@ function saveOnWeb(fileName: string, bytes: Uint8Array): SavedFile {
   return { fileName, uri: url, via: 'browser-download' };
 }
 
-async function saveOnDevice(fileName: string, bytes: Uint8Array): Promise<SavedFile> {
+async function saveOnDevice(fileName: string, bytes: Uint8Array, spec: FormatSpec): Promise<SavedFile> {
   const file = new FileSystem.File(FileSystem.Paths.cache, fileName);
 
   if (file.exists) file.delete();
@@ -78,9 +114,9 @@ async function saveOnDevice(fileName: string, bytes: Uint8Array): Promise<SavedF
 
   if (await Sharing.isAvailableAsync()) {
     await Sharing.shareAsync(file.uri, {
-      mimeType: XLSX_MIME,
+      mimeType: spec.mime,
       dialogTitle: fileName,
-      UTI: 'org.openxmlformats.spreadsheetml.sheet',
+      UTI: spec.uti,
     });
     return { fileName, uri: file.uri, via: 'share-sheet' };
   }

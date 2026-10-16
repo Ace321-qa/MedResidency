@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Check, Minus, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react-native';
+import { Check, Download, Minus, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react-native';
 
 import {
   AppHeader,
@@ -9,17 +9,21 @@ import {
   Card,
   DateField,
   Divider,
+  ExportMenu,
   IconButton,
   ImportTools,
+  ScheduleReportView,
   Screen,
   SearchInput,
   SectionHeader,
+  SegmentedControl,
   SelectField,
   Sheet,
   SheetSelectField,
   StatusBadge,
   Text,
   TextField,
+  type SegmentedOption,
   type SelectOption,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
@@ -27,6 +31,7 @@ import {
   addClinicColumn,
   deleteClinicColumn,
   fetchCycleSchedule,
+  fetchCycles,
   fetchFacultySupervisors,
   randomizeSupervisors,
   renameClinicColumn,
@@ -41,6 +46,8 @@ import {
   deleteFacultySupervisor,
 } from '../../../services/longitudinal';
 import { fetchResidentList } from '../../../services/residents';
+import { downloadScheduleReport } from '../../../services/scheduleExport';
+import { buildCccMatrixReport } from '../../../utils/scheduleExport';
 import { uploadFacultySupervisors } from '../../../services/excelTemplates';
 import {
   CCC_SCHEDULE_ROWS,
@@ -353,7 +360,19 @@ export default function LongitudinalMatrixScreen() {
   const { session } = useSession();
   const programId = session?.programId ?? 0;
 
-  const schedule = useApiResource(() => fetchCycleSchedule(programId), [programId]);
+  /**
+   * The cycle-history selector. `selectedCycleId` is the stored cycle the
+   * coordinator chose, or null for the programme's current (latest) cycle. A
+   * past cycle is shown read-only: the schedule is a record of what happened, so
+   * the edit affordances are disabled rather than silently writing to the
+   * current cycle.
+   */
+  const [selectedCycleId, setSelectedCycleId] = useState<number | null>(null);
+  const cycles = useApiResource(() => fetchCycles(programId), [programId]);
+  const schedule = useApiResource(
+    () => fetchCycleSchedule(programId, selectedCycleId ?? undefined),
+    [programId, selectedCycleId],
+  );
   const facultyResource = useApiResource(() => fetchFacultySupervisors(programId), [programId]);
   const residentsResource = useApiResource(
     () => fetchResidentList({ programId, limit: 200 }),
@@ -388,6 +407,10 @@ export default function LongitudinalMatrixScreen() {
 
   /** Which of the two clinic-grid renderings is active. */
   const [viewMode, setViewMode] = useState<ViewMode>('matrix');
+
+  /** Export chooser and the offscreen report the image formats capture. */
+  const [exportOpen, setExportOpen] = useState(false);
+  const reportRef = useRef<View>(null);
 
   /** The clinic catalog add / rename / remove controls. */
   const [facultyMgrOpen, setFacultyMgrOpen] = useState(false);
@@ -446,6 +469,23 @@ export default function LongitudinalMatrixScreen() {
 
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
+
+  const cycleList = useMemo(() => cycles.data ?? [], [cycles.data]);
+  const latestCycleId = cycleList.length > 0 ? cycleList[cycleList.length - 1].id : null;
+  /** True when a past cycle is on screen, so every edit control is inert. */
+  const historyMode = selectedCycleId !== null && selectedCycleId !== latestCycleId;
+
+  const cycleOptions = useMemo<SegmentedOption[]>(() => {
+    const currentLabel =
+      cycle?.academic_year ?? (cycle ? formatShortDate(cycle.start_date) : 'current');
+    const options: SegmentedOption[] = [{ value: '', label: `Current · ${currentLabel}` }];
+    for (const item of [...cycleList].reverse()) {
+      if (item.id === latestCycleId) continue;
+      const year = item.academic_year ?? formatShortDate(item.start_date);
+      options.push({ value: String(item.id), label: `${year} · C${item.cycle_number}` });
+    }
+    return options;
+  }, [cycleList, latestCycleId, cycle]);
 
   /**
    * The week's day order, rotated to begin on the cycle's Week Start Date. A
@@ -632,6 +672,7 @@ export default function LongitudinalMatrixScreen() {
 
   /** Seed the daily-header form from the tapped row, falling back to defaults. */
   function openHeader(day: DayName) {
+    if (historyMode) return;
     const header = headerForDay(day);
     setHeaderEdit({ day, header });
     setHeaderForm({
@@ -692,6 +733,7 @@ export default function LongitudinalMatrixScreen() {
 
   /** Open the "+ Add Day Row" sheet, seeded from the first still-missing day. */
   function openAddDay() {
+    if (historyMode) return;
     const next = missingDays[0] ?? daySequence[0] ?? 'Sunday';
     setDayAddForm({
       dayOfWeek: next,
@@ -805,6 +847,7 @@ export default function LongitudinalMatrixScreen() {
    * showing — rather than from an unrelated default.
    */
   function openMetadata() {
+    if (historyMode) return;
     const first = activeDays[0] ?? daySequence[0] ?? DAYS[0];
     const header = headerForDay(first);
     const range = splitShiftRange(header?.shift_time ?? DAY_CONFIG[first].shift);
@@ -897,6 +940,7 @@ export default function LongitudinalMatrixScreen() {
   }
 
   function openSlot(edit: SlotEdit) {
+    if (historyMode) return;
     setSlotEdit(edit);
     setSlotForm({
       resident1: edit.slot?.resident_1_name ?? NONE_RESIDENT,
@@ -956,6 +1000,7 @@ export default function LongitudinalMatrixScreen() {
    * coordinator sees and can amend exactly what is already there.
    */
   function openLeaves(day: DayName) {
+    if (historyMode) return;
     const rows = absencesForDay(day);
     setLeavesResidentNames(
       rows.filter((row) => row.person_type === 'RESIDENT').map((row) => row.person_name.replace(/^Dr\.?\s+/i, '').trim()),
@@ -1039,6 +1084,7 @@ export default function LongitudinalMatrixScreen() {
   }
 
   function openBackups(day: DayName) {
+    if (historyMode) return;
     const existing = (data?.backups[day] ?? []).map((entry) => entry.faculty_name ?? '');
     const draft = [...existing];
     while (draft.length < BACKUP_POOL_MIN) draft.push('');
@@ -1117,6 +1163,7 @@ export default function LongitudinalMatrixScreen() {
   }
 
   function openFacultyManager() {
+    if (historyMode) return;
     setFacultyMgrOpen(true);
     setFacultyEditing(null);
     setFacultyForm({ firstName: '', lastName: '', email: '', phone: '', specialty: '', clinicalTitle: '', facultyAppointment: '', administrativeRole: '' });
@@ -1338,6 +1385,7 @@ export default function LongitudinalMatrixScreen() {
 
   /** Open the rename/remove sheet for one clinic column. */
   function openColumnManage(column: MatrixColumn) {
+    if (historyMode) return;
     setColumnManage(column);
     setColumnLabelValue(
       column.title === defaultColumnLabel(column.clinicNumber) ? '' : column.title,
@@ -1419,19 +1467,59 @@ export default function LongitudinalMatrixScreen() {
     : residentOptions;
   const slotResidentNoticeText = slotEdit ? slotResidentNotice(slotEdit.pgyLevel) : null;
 
+  // Built from the same cycle-schedule payload the matrix renders, so the
+  // exported file lists the same days, clinics and leaves as the screen.
+  const reportModel = useMemo(
+    () =>
+      data
+        ? buildCccMatrixReport({
+            schedule: data,
+            programLabel: session?.programLabel ?? 'Programme',
+            programCode: session?.programCode ?? null,
+          })
+        : null,
+    [data, session?.programLabel, session?.programCode],
+  );
+
+  async function handleExport(format: Parameters<typeof downloadScheduleReport>[1]) {
+    if (!reportModel) throw new Error('There is no cycle schedule to export yet.');
+    const { confirmation } = await downloadScheduleReport(reportModel, format, reportRef);
+    return confirmation;
+  }
+
   return (
     <Screen
       onRefresh={() => {
         schedule.refresh();
+        cycles.refresh();
         facultyResource.refresh();
       }}
-      refreshing={schedule.isRefreshing || facultyResource.isRefreshing}
+      refreshing={schedule.isRefreshing || cycles.isRefreshing || facultyResource.isRefreshing}
     >
       <AppHeader
         title="Continuity Care Clinics"
         subtitle="Weekly clinic matrix, supervisors and backup faculty"
         onBack={goBack}
       />
+
+      {cycleOptions.length > 1 ? (
+        <SegmentedControl
+          label="Cycle history"
+          value={selectedCycleId === null ? '' : String(selectedCycleId)}
+          onChange={(value) => setSelectedCycleId(value === '' ? null : Number(value))}
+          options={cycleOptions}
+          scroll
+          hint="Pick a past cycle to review it as it was run. Past cycles open read-only, so an edit can never land on the wrong week."
+        />
+      ) : null}
+
+      {historyMode ? (
+        <Banner
+          tone="info"
+          title="Viewing a past cycle"
+          message="This cycle is shown read-only. Switch to Current to edit the live clinic schedule."
+        />
+      ) : null}
 
       <View
         accessibilityRole="radiogroup"
@@ -1460,6 +1548,15 @@ export default function LongitudinalMatrixScreen() {
           );
         })}
       </View>
+
+      <Button
+        label="Export & download"
+        variant="secondary"
+        icon={Download}
+        onPress={() => setExportOpen(true)}
+        disabled={!reportModel}
+        accessibilityHint="Download this CCC clinic matrix as Excel, PDF, Word or an image."
+      />
 
       {actionError ? (
         <Banner tone="danger" title="Something went wrong" message={actionError} />
@@ -1493,6 +1590,7 @@ export default function LongitudinalMatrixScreen() {
                   label="Cycle Number"
                   value={cycle?.cycle_number ?? ''}
                   onChangeText={(value) => updateCycleField({ cycle_number: value })}
+                  editable={!historyMode}
                   placeholder="1"
                 />
               </View>
@@ -1501,6 +1599,7 @@ export default function LongitudinalMatrixScreen() {
                   label="Week Number"
                   value={cycle?.week_number ?? ''}
                   onChangeText={(value) => updateCycleField({ week_number: value })}
+                  editable={!historyMode}
                   placeholder="1"
                 />
               </View>
@@ -1515,6 +1614,7 @@ export default function LongitudinalMatrixScreen() {
                     setRotationTouched(true);
                     setRotationMonths(value);
                   }}
+                  editable={!historyMode}
                   keyboardType="number-pad"
                   placeholder="3"
                   hint="Converted at 4 weeks per month."
@@ -1538,6 +1638,7 @@ export default function LongitudinalMatrixScreen() {
                   label="Week Start Date"
                   value={cycle?.start_date ?? ''}
                   onChangeText={(value) => updateCycleField({ start_date: value })}
+                  editable={!historyMode}
                   weekStartDay="SUNDAY"
                   durationWeeks={rotation ? Math.round(rotation.totalWeeks) : null}
                   placeholder="YYYY-MM-DD"
@@ -1575,14 +1676,14 @@ export default function LongitudinalMatrixScreen() {
                 icon={Shuffle}
                 onPress={() => runRandomize()}
                 loading={saving}
-                disabled={saving}
+                disabled={saving || historyMode}
                 style={styles.flex1}
               />
               <Button
                 label="Save Cycle Header"
                 onPress={saveHeader}
                 loading={saving}
-                disabled={saving}
+                disabled={saving || historyMode}
                 style={styles.flex1}
               />
             </View>
@@ -1590,7 +1691,7 @@ export default function LongitudinalMatrixScreen() {
               label="Manage Faculty Preceptors"
               variant="outline"
               onPress={openFacultyManager}
-              disabled={saving}
+              disabled={saving || historyMode}
               style={{ marginTop: spacing.sm }}
             />
             <Text variant="label" tone="secondary" uppercase style={styles.scopeLabel}>
@@ -1603,8 +1704,8 @@ export default function LongitudinalMatrixScreen() {
                   label={DAY_SHORT[day]}
                   variant="outline"
                   fullWidth={false}
-                  onPress={() => runRandomize(day)}
-                  disabled={saving}
+                   onPress={() => runRandomize(day)}
+                   disabled={saving || historyMode}
                 />
               ))}
             </View>
@@ -1615,8 +1716,10 @@ export default function LongitudinalMatrixScreen() {
               <View style={styles.cardPad}>
                 <Pressable
                   onPress={openMetadata}
+                  disabled={historyMode}
                   accessibilityRole="button"
                   accessibilityLabel={`Cycle and schedule metadata: ${headerBarText}`}
+                  accessibilityState={{ disabled: historyMode }}
                   accessibilityHint="Opens a sheet to edit the cycle, week, first day, start date and session times"
                   style={({ pressed }) => [
                     styles.metadataBanner,
@@ -1638,7 +1741,7 @@ export default function LongitudinalMatrixScreen() {
                   icon={Pencil}
                   variant="outline"
                   onPress={openMetadata}
-                  disabled={savingMetadata}
+                  disabled={savingMetadata || historyMode}
                   style={styles.metadataEditButton}
                 />
                 <SectionHeader title="Weekly Clinic Matrix" trailing={`${activeDays.length} days`} />
@@ -1657,7 +1760,7 @@ export default function LongitudinalMatrixScreen() {
                   variant="outline"
                   fullWidth={false}
                   onPress={addMatrixColumn}
-                  disabled={savingColumn}
+                  disabled={savingColumn || historyMode}
                   style={styles.matrixAddColumnButton}
                 />
               </View>
@@ -1674,7 +1777,7 @@ export default function LongitudinalMatrixScreen() {
                     </Text>
                     <Pressable
                       onPress={openAddDay}
-                      disabled={missingDays.length === 0 || savingDay}
+                      disabled={missingDays.length === 0 || savingDay || historyMode}
                       accessibilityRole="button"
                       accessibilityLabel="Add a day row to the CCC week"
                       accessibilityState={{ disabled: missingDays.length === 0 }}
@@ -1781,7 +1884,7 @@ export default function LongitudinalMatrixScreen() {
                         {activeDays.length > 1 ? (
                           <Pressable
                             onPress={() => setDayRemoveTarget(day)}
-                            disabled={savingDay}
+                            disabled={savingDay || historyMode}
                             accessibilityRole="button"
                             accessibilityLabel={`Remove the ${day} row from the CCC week`}
                             style={({ pressed }) => [
@@ -2774,6 +2877,30 @@ export default function LongitudinalMatrixScreen() {
         />
       </Sheet>
 
+      {reportModel ? (
+        <>
+          <ExportMenu
+            visible={exportOpen}
+            onClose={() => setExportOpen(false)}
+            subtitle={headerBarText}
+            onExport={handleExport}
+          />
+          {/*
+            The full-width matrix, mounted out of sight. The JPEG/PNG export
+            captures this node rather than the horizontally-scrolling on-screen
+            grid, so no clinic column is clipped.
+          */}
+          <View
+            style={styles.hiddenReport}
+            pointerEvents="none"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          >
+            <ScheduleReportView ref={reportRef} report={reportModel} />
+          </View>
+        </>
+      ) : null}
+
     </Screen>
   );
 }
@@ -3144,5 +3271,12 @@ const styles = StyleSheet.create({
   catalogText: {
     flex: 1,
     gap: spacing.xxs,
+  },
+  hiddenReport: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    opacity: 0.01,
+    zIndex: -1,
   },
 });

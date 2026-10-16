@@ -87,4 +87,46 @@ function academicYearMatchValues(value) {
  */
 const expandAcademicYear = normalizeAcademicYear;
 
-module.exports = { normalizeAcademicYear, expandAcademicYear, academicYearMatchValues };
+/**
+ * The academic year a calendar date belongs to, e.g. `2026-07-01` -> "2026-2027".
+ *
+ * The programme year opens on 28 June (the mobile client's default Block 1
+ * start), so a date on or after 28 June belongs to the year that begins then,
+ * and anything before it belongs to the year that began the previous June. This
+ * is what lets `primary_care_cycles`, which has no `academic_year` column, be
+ * grouped by year without a schema change — a cycle's year falls out of its
+ * `start_date`.
+ *
+ * @param {string|Date|null|undefined} value - A `YYYY-MM-DD` string or a Date.
+ * @returns {string|null} Canonical "YYYY-YYYY", or null when unreadable.
+ */
+function academicYearForDate(value) {
+  if (value === undefined || value === null) return null;
+
+  let year;
+  let month; // 1-12
+  let day;
+
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    year = value.getFullYear();
+    month = value.getMonth() + 1;
+    day = value.getDate();
+  } else {
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value).trim());
+    if (!match) return null;
+    year = Number(match[1]);
+    month = Number(match[2]);
+    day = Number(match[3]);
+  }
+
+  const startYear = month > 6 || (month === 6 && day >= 28) ? year : year - 1;
+  return `${startYear}-${startYear + 1}`;
+}
+
+module.exports = {
+  normalizeAcademicYear,
+  expandAcademicYear,
+  academicYearMatchValues,
+  academicYearForDate,
+};

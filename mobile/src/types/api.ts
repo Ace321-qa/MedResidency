@@ -817,6 +817,8 @@ export interface PrimaryCareCycle {
   week_number: string;
   /** Plain `YYYY-MM-DD`, normalised server-side. */
   start_date: string;
+  /** Derived server-side from `start_date`, e.g. `2026-2027`. */
+  academic_year?: string | null;
   /** The rotation window in calendar months; `months × 4` = total_weeks. */
   rotation_window_months?: number | null;
   /** Whole weeks the cycle runs, derived from rotation_window_months. */

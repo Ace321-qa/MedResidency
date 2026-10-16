@@ -10,8 +10,11 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Schedule exports post a full grid (up to 52 week columns × every resident),
+// which comfortably exceeds Express's 100kb default, so the JSON limit is
+// raised here rather than shrinking the report.
+app.use(express.json({ limit: '8mb' }));
+app.use(express.urlencoded({ extended: true, limit: '8mb' }));
 
 // Routes
 const residentRoutes = require('./routes/residentRoutes');
@@ -159,3 +162,7 @@ app.use('/api/v1/roster', rosterImportRoutes);
 app.use('/api/v1/letters/templates', letterTemplateRoutes);
 app.use('/api/v1/rotations/import', rotationImportRoutes);
 app.use('/api/v1/requests/rotation', rotationRequestRoutes);
+
+// Schedule exports (styled .xlsx from the shared report model).
+const exportRoutes = require('./routes/exportRoutes');
+app.use('/api/v1/exports', exportRoutes);

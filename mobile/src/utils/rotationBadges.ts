@@ -12,7 +12,7 @@
  * only one.
  */
 
-import { categoricalColors } from '../theme';
+import { categoricalColors } from '../theme/colors';
 
 export interface RotationBadgePalette {
   foreground: string;
