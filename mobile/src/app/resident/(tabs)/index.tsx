@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import {
@@ -35,6 +35,7 @@ import { fetchAttendance } from '../../../services/attendance';
 import { fetchLeaves } from '../../../services/leaves';
 import { fetchResidentLongitudinalAssignments } from '../../../services/longitudinal';
 import { fetchResidentSchedule } from '../../../services/rotations';
+import { fetchUnreadNotificationCount } from '../../../services/notifications';
 import { spacing } from '../../../theme';
 import { formatHours, formatDateRange, formatShortDate, toCalendarDate } from '../../../utils/format';
 import {
@@ -85,6 +86,35 @@ export default function TodayScreen() {
   const leaves = useApiResource(() => fetchLeaves(residentId), [residentId]);
   const clinics = useApiResource(() => fetchResidentLongitudinalAssignments(residentId), [residentId]);
 
+  /**
+   * Unread notification badge.
+   *
+   * Polled rather than pushed: the API has no websocket, so the bell refreshes
+   * every 30 seconds and whenever the screen is refreshed. A failed poll never
+   * touches the dashboard — the badge simply stays at its last known count.
+   */
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+
+  useEffect(() => {
+    if (!residentId) return undefined;
+
+    let cancelled = false;
+    const poll = () => {
+      fetchUnreadNotificationCount(residentId)
+        .then((count) => {
+          if (!cancelled) setUnreadNotifications(count);
+        })
+        .catch(() => {});
+    };
+
+    poll();
+    const timer = setInterval(poll, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [residentId]);
+
   const duty = useMemo(() => summarizeDutyHours(attendance.data ?? []), [attendance.data]);
   const rotations = useMemo(() => summarizeSchedule(schedule.data ?? []), [schedule.data]);
   const leaveSummary = useMemo(() => summarizeLeaves(leaves.data ?? []), [leaves.data]);
@@ -128,6 +158,7 @@ export default function TodayScreen() {
           <IconButton
             icon={Bell}
             accessibilityLabel="Notifications"
+            badgeCount={unreadNotifications}
             onPress={() => router.push('/resident/notifications')}
           />
         }

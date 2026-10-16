@@ -2,6 +2,7 @@ import {
   ActivityIndicator,
   Pressable,
   StyleSheet,
+  View,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
@@ -99,6 +100,8 @@ interface IconButtonProps {
   tone?: 'default' | 'primary' | 'danger';
   disabled?: boolean;
   style?: StyleProp<ViewStyle>;
+  /** Unread count shown as a dot badge; hidden when 0 or undefined. */
+  badgeCount?: number;
 }
 
 /** A square, borderless icon button sized to the 44pt touch target. */
@@ -109,9 +112,12 @@ export function IconButton({
   tone = 'default',
   disabled = false,
   style,
+  badgeCount,
 }: IconButtonProps) {
   const color =
     tone === 'primary' ? colors.primary : tone === 'danger' ? colors.danger : colors.textPrimary;
+
+  const showBadge = typeof badgeCount === 'number' && badgeCount > 0;
 
   return (
     <Pressable
@@ -119,7 +125,9 @@ export function IconButton({
       disabled={disabled}
       hitSlop={6}
       accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel}
+      accessibilityLabel={
+        showBadge ? `${accessibilityLabel}, ${badgeCount} unread` : accessibilityLabel
+      }
       accessibilityState={{ disabled }}
       style={({ pressed }) => [
         styles.iconButton,
@@ -129,6 +137,13 @@ export function IconButton({
       ]}
     >
       <Icon color={disabled ? colors.disabledText : color} size={20} />
+      {showBadge ? (
+        <View style={styles.badge} accessibilityElementsHidden importantForAccessibility="no">
+          <Text variant="label" style={styles.badgeText}>
+            {badgeCount > 9 ? '9+' : String(badgeCount)}
+          </Text>
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -194,6 +209,23 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  badge: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 3,
+    backgroundColor: colors.danger,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: {
+    color: colors.onPrimary,
+    fontSize: 10,
+    lineHeight: 12,
   },
   inert: {
     opacity: 0.6,

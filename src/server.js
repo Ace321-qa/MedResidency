@@ -53,6 +53,12 @@ const leaveRoutes = require('./routes/leaveRoutes');
 // Mount under /api/v1/leaves
 app.use('/api/v1/leaves', leaveRoutes);
 
+// Notifications (resident bell / system event feed)
+const notificationRoutes = require('./routes/notificationRoutes');
+
+// Mount under /api/v1/notifications
+app.use('/api/v1/notifications', notificationRoutes);
+
 // Import the release letter routes
 const releaseLetterRoutes = require('./routes/releaseLetterRoutes');
 
@@ -96,6 +102,16 @@ if (require.main === module) {
     }
 
     await testConnection();
+
+    // Bring the notifications schema up (users scaffold + notifications table)
+    // so the first system event has somewhere to land. Idempotent DDL.
+    try {
+      const NotificationService = require('./services/notificationService');
+      await NotificationService.ensureSchema();
+      console.log('[notifications] schema ready.');
+    } catch (error) {
+      console.error('[notifications] could not ensure schema:', error.message);
+    }
 
     // Seed the standard Continuity of Care Clinics (CCC) for every programme so a fresh
     // install (or a programme created after the last boot) starts with its five

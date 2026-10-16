@@ -9,7 +9,7 @@ import { Text } from '../components/Text';
 /**
  * In-app notifications.
  *
- * The API has no notifications table, so there is no websocket and no push to
+ * The API now persists notifications, but there is no websocket and no push to
  * wait for. What a resident *does* need is an answer to "did that go through?"
  * the instant they submit something — a rotation request that vanishes into a
  * spinner is indistinguishable from one that failed.

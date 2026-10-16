@@ -16,13 +16,6 @@ export {
   type MockAssessmentStatus,
 } from './assessments';
 export {
-  MOCK_NOTIFICATION_CATEGORY_LABEL,
-  MOCK_NOTIFICATION_TONE,
-  fetchMockNotifications,
-  fetchMockUnreadNotificationCount,
-  type MockNotification,
-} from './notifications';
-export {
   fetchMockTrainingProgress,
   type MockProgressMilestone,
   type MockTrainingProgress,

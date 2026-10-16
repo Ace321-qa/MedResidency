@@ -1,5 +1,6 @@
 // Step 1: Import our Hostinger MySQL connection pool
 const db = require('../config/db');
+const NotificationService = require('./notificationService');
 const { academicYearMatchValues } = require('../utils/academicYear');
 const {
   describeWindow,
@@ -287,6 +288,19 @@ class RotationService {
       assignment_type || 'FULL_BLOCK',
       notes || null,
     ]);
+
+    // Tell the resident their rota changed. Best-effort: a notification problem
+    // must not fail an assignment the coordinator just created.
+    await NotificationService.notifyResidentSafe(resident_id, {
+      type: 'ROTATION_APPROVAL',
+      title: 'Rotation assignment confirmed',
+      message: `You have been assigned a ${(assignment_type || 'FULL_BLOCK')
+        .toLowerCase()
+        .replace(/_/g, ' ')} rotation from ${start_date} to ${end_date}.`,
+      reference_id: result.insertId,
+      reference_type: 'resident_rotation_assignments',
+    });
+
     return {
       assignment_id: result.insertId,
       ...assignmentData,

@@ -923,3 +923,52 @@ export interface RandomizeSupervisorsResult {
   rotation_months?: number;
   reason?: string;
 }
+
+/** Mirrors the `type` enum on `notifications`. */
+export const NOTIFICATION_TYPES = [
+  'DUTY_HOUR_BREACH',
+  'LEAVE_STATUS',
+  'ROTATION_APPROVAL',
+  'SYSTEM_ALERT',
+  'GENERAL',
+] as const;
+
+export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
+
+/** One row of `GET /notifications/resident/:resident_id`. */
+export interface Notification {
+  id: number;
+  user_id: number;
+  title: string;
+  message: string;
+  type: NotificationType;
+  /** Id of the row that raised this (violation, leave request, assignment). */
+  reference_id: number | null;
+  /** Table the reference points at, e.g. `resident_leave_requests`. */
+  reference_type: string | null;
+  is_read: boolean;
+  created_at: MinuteDateTimeString;
+  read_at: MinuteDateTimeString | null;
+}
+
+/** `GET /notifications/resident/:resident_id` — list plus badge totals. */
+export interface NotificationPage extends ApiListResponse<Notification> {
+  total: number;
+  unread: number;
+  limit: number;
+  offset: number;
+}
+
+/** `GET /notifications/resident/:resident_id/unread-count`. */
+export interface NotificationUnreadCount {
+  success: boolean;
+  unread: number;
+}
+
+/** `PATCH /notifications/resident/:resident_id/read-all`. */
+export interface NotificationReadAllResult {
+  success: boolean;
+  message: string;
+  changed: number;
+  unread: number;
+}

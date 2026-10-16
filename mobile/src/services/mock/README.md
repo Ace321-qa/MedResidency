@@ -5,7 +5,7 @@ backend, because the backend has no endpoint for it yet.
 
 ## Why this folder exists
 
-Assessments, notifications and progress tracking are core parts of a residency
+Assessments and progress tracking are core parts of a residency
 app, and it is useful to see and review those interfaces now rather than after
 the API is written. Rather than scatter placeholder objects through the screens
 (which is how fake data ends up shipped by accident), every fabricated value lives
@@ -24,9 +24,13 @@ here, in one folder, with one obvious way in and one obvious way out.
 | Module | Used by | Will be replaced by |
 | --- | --- | --- |
 | `assessments.ts` | Resident → Assessments | `GET /assessments` |
-| `notifications.ts` | Resident → Notifications, dashboard alerts | `GET /notifications` |
 | `progress.ts` | Resident → Profile progress summary | `GET /progress` |
 | `programReports.ts` | Coordinator → Reports tab | `GET /reports` |
+
+Notifications are no longer mocked: `src/services/notifications.ts` reads and
+writes the real `GET /api/v1/notifications` endpoints, and
+`resident/notifications.tsx` renders persisted rows (see
+`src/services/notificationService.js` on the backend).
 
 ## How to remove it
 

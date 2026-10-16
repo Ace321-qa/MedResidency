@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const NotificationService = require('./notificationService');
 
 // Mirrors the `leave_type` enum on resident_leave_requests
 const LEAVE_TYPES = [
@@ -30,6 +31,44 @@ function countDays(startDate, endDate) {
   const end = Date.parse(`${endDate}T00:00:00Z`);
   if (Number.isNaN(start) || Number.isNaN(end)) return null;
   return Math.round((end - start) / 86400000) + 1;
+}
+
+/** Human title/message for the resident's leave-status notification. */
+function describeLeaveDecision(status, request, rejectionReason) {
+  const range = `${request.start_date} to ${request.end_date}`;
+  const leaveLabel = String(request.leave_type || 'leave')
+    .toLowerCase()
+    .replace(/_/g, ' ');
+
+  switch (status) {
+    case 'APPROVED':
+      return {
+        title: 'Leave request approved',
+        message: `Your ${leaveLabel} request (${range}) has been approved.`,
+      };
+    case 'APPROVED_BY_CHIEF':
+      return {
+        title: 'Leave request approved by chief',
+        message: `Your ${leaveLabel} request (${range}) was approved by the chief resident and awaits final approval.`,
+      };
+    case 'REJECTED':
+      return {
+        title: 'Leave request rejected',
+        message: `Your ${leaveLabel} request (${range}) was rejected.${
+          rejectionReason ? ` Reason: ${rejectionReason}` : ''
+        }`,
+      };
+    case 'CANCELLED':
+      return {
+        title: 'Leave request cancelled',
+        message: `Your ${leaveLabel} request (${range}) has been cancelled.`,
+      };
+    default:
+      return {
+        title: 'Leave request updated',
+        message: `Your ${leaveLabel} request (${range}) is now ${status}.`,
+      };
+  }
 }
 
 class LeaveService {
@@ -79,7 +118,15 @@ class LeaveService {
     const { status, reviewed_by_user_id, rejection_reason } = statusData;
 
     const [existing] = await db.query(
-      `SELECT id, status FROM resident_leave_requests WHERE id = ?`,
+      `SELECT
+         id,
+         status,
+         resident_id,
+         leave_type,
+         DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
+         DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date
+       FROM resident_leave_requests
+       WHERE id = ?`,
       [requestId]
     );
 
@@ -110,6 +157,19 @@ class LeaveService {
       rejection_reason || null,
       requestId,
     ]);
+
+    // Notify the resident whose request moved. Skipped when the status is
+    // unchanged (a no-op review) so the bell does not fill with duplicates.
+    if (status !== currentStatus) {
+      const { title, message } = describeLeaveDecision(status, existing[0], rejection_reason);
+      await NotificationService.notifyResidentSafe(existing[0].resident_id, {
+        type: 'LEAVE_STATUS',
+        title,
+        message,
+        reference_id: requestId,
+        reference_type: 'resident_leave_requests',
+      });
+    }
 
     return {
       request_id: requestId,

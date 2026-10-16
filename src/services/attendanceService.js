@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const NotificationService = require('./notificationService');
 const {
   normalizeClockTime,
   decimalHoursBetween,
@@ -147,6 +148,21 @@ class AttendanceService {
              (resident_id, attendance_log_id, rule_type, severity, violation_details)
            VALUES (?, ?, 'CONTINUOUS_SHIFT_EXCEEDED', 'CRITICAL_VIOLATION', ?);`,
           [resident_id, logId, breachReason],
+        );
+
+        // Alert the resident. Written on the same connection so the breach and
+        // its notification commit together; a notification failure is swallowed
+        // so it can never roll back the attendance log itself.
+        await NotificationService.notifyResidentSafe(
+          resident_id,
+          {
+            type: 'DUTY_HOUR_BREACH',
+            title: 'Duty-hour breach recorded',
+            message: breachReason,
+            reference_id: logId,
+            reference_type: 'resident_attendance_logs',
+          },
+          connection,
         );
       }
 
@@ -313,11 +329,25 @@ class AttendanceService {
         );
         if (existing.length > 0) continue;
 
-        await connection.query(
+        const [violationResult] = await connection.query(
           `INSERT INTO duty_hour_violations
              (resident_id, attendance_log_id, rule_type, severity, violation_details)
            VALUES (?, ?, 'CONTINUOUS_SHIFT_EXCEEDED', 'CRITICAL_VIOLATION', ?);`,
           [residentId, violation.anchor_log_id, violation.details],
+        );
+
+        // One alert per newly recorded violation; re-imports are skipped above,
+        // so a resident is never told about the same breach twice.
+        await NotificationService.notifyResidentSafe(
+          residentId,
+          {
+            type: 'DUTY_HOUR_BREACH',
+            title: 'Duty-hour breach recorded',
+            message: violation.details,
+            reference_id: violationResult.insertId,
+            reference_type: 'duty_hour_violations',
+          },
+          connection,
         );
       }
     }

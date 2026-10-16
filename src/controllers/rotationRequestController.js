@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const NotificationService = require('../services/notificationService');
 
 /**
  * Rotation requests — a resident asking to be moved onto a hospital rotation
@@ -195,7 +196,25 @@ class RotationRequestController {
       }
 
       const rows = await RotationRequestController.#readOne(requestId);
-      return res.json({ success: true, request: rows[0] ?? null });
+      const decided = rows[0] ?? null;
+
+      // Alert the requesting resident of the decision.
+      if (decided) {
+        await NotificationService.notifyResidentSafe(decided.resident_id, {
+          type: 'ROTATION_APPROVAL',
+          title: `Rotation request ${status.toLowerCase()}`,
+          message:
+            `Your ${decided.request_type} request for ${decided.department_clinic} ` +
+            `(${decided.start_date} to ${decided.end_date}) was ${status.toLowerCase()}` +
+            (status === 'REJECTED' && decided.decision_reason
+              ? `: ${decided.decision_reason}`
+              : '.'),
+          reference_id: requestId,
+          reference_type: 'rotation_requests',
+        });
+      }
+
+      return res.json({ success: true, request: decided });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
@@ -203,7 +222,20 @@ class RotationRequestController {
 
   static async #readOne(requestId) {
     const [rows] = await db.query(
-      `SELECT r.*, CONCAT(res.first_name, ' ', res.last_name) AS resident_name
+      `SELECT
+         r.request_id,
+         r.resident_id,
+         r.program_id,
+         r.request_type,
+         r.department_clinic,
+         DATE_FORMAT(r.start_date, '%Y-%m-%d') AS start_date,
+         DATE_FORMAT(r.end_date, '%Y-%m-%d') AS end_date,
+         r.reason,
+         r.status,
+         r.decision_reason,
+         r.created_at,
+         r.decided_at,
+         CONCAT(res.first_name, ' ', res.last_name) AS resident_name
          FROM rotation_requests r
          LEFT JOIN residents res ON res.id = r.resident_id
         WHERE r.request_id = ?`,
