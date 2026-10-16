@@ -73,6 +73,19 @@ function cellText(value) {
   return String(value ?? '').replace(/\r\n/g, '\n');
 }
 
+/**
+ * The longest line in a cell, counted in characters.
+ *
+ * Column width is sized to the longest *line*, not the whole string, because
+ * every data cell wraps: a four-line CCC day cell should not stretch its column
+ * to the width of all four lines run together.
+ */
+function longestLineLength(value) {
+  return cellText(value)
+    .split('\n')
+    .reduce((longest, line) => Math.max(longest, line.length), 0);
+}
+
 function thinBorder() {
   return {
     top: { style: 'thin', color: { argb: BORDER_COLOR } },
@@ -163,6 +176,11 @@ async function buildWorkbook(report) {
 
   const tableStart = currentRow;
 
+  // The widest content seen per column, measured only from the grid itself —
+  // never the masthead and never a merged banner cell, whose text spans several
+  // columns and would otherwise inflate whichever column it happens to start in.
+  const measuredChars = new Array(span).fill(0);
+
   rows.forEach((rawRow, rowIndex) => {
     const cells = Array.isArray(rawRow) ? rawRow : [];
     const excelRow = sheet.getRow(currentRow);
@@ -174,6 +192,11 @@ async function buildWorkbook(report) {
       const target = excelRow.getCell(column);
       target.value = cellText(cell.text);
       target.border = thinBorder();
+
+      if (cell.colSpan === 1) {
+        const length = longestLineLength(cell.text);
+        if (length > measuredChars[column - 1]) measuredChars[column - 1] = length;
+      }
 
       if (isHeader) {
         target.font = { bold: true, color: { argb: HEADER_TEXT }, size: 10 };
@@ -233,12 +256,16 @@ async function buildWorkbook(report) {
     }
   }
 
-  // Column widths: explicit when the report provides them, otherwise a sensible
-  // default, with the sticky label columns kept wide enough for a resident name.
+  // Column widths: sized from the widest content the grid actually holds, then
+  // clamped so no column stretches absurdly wide (a per-line length of 200 in a
+  // report's declared width must not become a 200-character column). The 14–28
+  // character window keeps every column legible at the sheet's font size, with
+  // `wrapText` letting long names and multi-line cells wrap inside it.
   for (let index = 0; index < span; index += 1) {
-    const declared = declaredColumns[index];
-    const width = Number(declared && declared.width);
-    sheet.getColumn(index + 1).width = Number.isFinite(width) && width > 0 ? width : index === 1 ? 26 : 12;
+    const declared = Number(declaredColumns[index] && declaredColumns[index].width);
+    const measured = measuredChars[index];
+    const base = measured > 0 ? measured : Number.isFinite(declared) && declared > 0 ? declared : 12;
+    sheet.getColumn(index + 1).width = Math.min(Math.max(base + 3, 14), 28);
   }
 
   if (payload.freezeHeader !== false && headerRows > 0) {

@@ -17,7 +17,7 @@ import {
   buildCccMatrixReport,
 } from '../src/utils/scheduleExport/cccMatrixReport';
 import { buildMasterGridReport } from '../src/utils/scheduleExport/masterGrid';
-import { reportColumnCount, reportToHtml } from '../src/utils/scheduleExport/model';
+import { expandRowSpans, reportColumnCount, reportToHtml } from '../src/utils/scheduleExport/model';
 import { renderReportDocx } from '../src/utils/scheduleExport/docx';
 import { renderReportPdf } from '../src/utils/scheduleExport/pdf';
 import type {
@@ -227,12 +227,44 @@ assert('CCC day cell names the resident pair', cccReport.rows[1][1].text, 'Dr. A
 assert('CCC empty clinic reads Unassigned', cccReport.rows[1][2].text, 'Unassigned');
 assert('CCC leaves cell counts the absent', cccReport.rows[1][3].text, '1 away\nDr. Away');
 
+// --- Merged-cell expansion (the pdfmake "a cell is undefined" guard) ---------
+
+assert('expanded row fills a colSpan with placeholders', expandRowSpans(
+  [{ text: 'Day' }, { text: 'catchup', colSpan: 3 }],
+  4,
+).length, 4);
+assert('expanded row keeps the spanning cell at its position', expandRowSpans(
+  [{ text: 'Day' }, { text: 'catchup', colSpan: 3 }],
+  4,
+)[1].text, 'catchup');
+assert('expanded row pads a short row to full width', expandRowSpans([{ text: 'Day' }], 3).length, 3);
+
+// The backup row is the regression this guards: `[Day, catchup(colSpan 3)]` is
+// two cells for a four-column table, which pdfmake rejects.
+const backupRow = cccReport.rows[cccReport.rows.length - 1];
+assert('CCC backup row is short before expansion', backupRow.length, 2);
+assert('CCC backup row spans the full grid after expansion', expandRowSpans(backupRow, 4).length, 4);
+
 // --- Renderers --------------------------------------------------------------
 
 async function checkRenderers(): Promise<void> {
+  // Node has no DOM, so `renderReportPdf` would otherwise fall back to
+  // `expo-print` (unavailable here) and mask a genuine pdfmake failure behind an
+  // unrelated parse error. Pretending a document exists forces pdfmake to
+  // surface its own error, which is what these checks must catch.
+  (globalThis as unknown as { document: unknown }).document = {};
+
   const pdf = await renderReportPdf(blockReport);
   assertTrue('PDF begins with %PDF-', String.fromCharCode(...pdf.slice(0, 5)) === '%PDF-');
   assertTrue('PDF is non-trivial', pdf.length > 1200);
+
+  // The CCC report carries a `colSpan` backup row — the case that used to throw
+  // "Malformed table row, a cell is undefined" — and the weekly grid carries
+  // `colSpan: 4` block banners.
+  const cccPdf = await renderReportPdf(cccReport);
+  assertTrue('CCC PDF (colSpan row) begins with %PDF-', String.fromCharCode(...cccPdf.slice(0, 5)) === '%PDF-');
+  const weeklyPdf = await renderReportPdf(weeklyReport);
+  assertTrue('Weekly PDF (colSpan banners) begins with %PDF-', String.fromCharCode(...weeklyPdf.slice(0, 5)) === '%PDF-');
 
   const docx = await renderReportDocx(cccReport);
   assertTrue('DOCX begins with a zip signature (PK)', docx[0] === 0x50 && docx[1] === 0x4b);

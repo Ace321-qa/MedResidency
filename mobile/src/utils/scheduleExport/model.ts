@@ -111,6 +111,33 @@ export function isRenderableReport(report: ReportModel | null | undefined): repo
   return Boolean(report && Array.isArray(report.rows) && report.rows.length > 0);
 }
 
+/**
+ * Expand one row so it holds exactly `columnCount` cells, the form pdfmake
+ * requires.
+ *
+ * A merged heading is written once in the model (`colSpan: 4`), which ExcelJS
+ * and Word understand directly — they merge *from* a single leading cell. pdfmake
+ * is stricter: it indexes every column position of every row, so a `colSpan: N`
+ * cell must be followed by `N - 1` placeholders, otherwise the columns it covers
+ * evaluate to `undefined` and pdfmake throws "Malformed table row, a cell is
+ * undefined". This turns `[Day, catchup(colSpan 3)]` into
+ * `[Day, catchup, {}, {}]`, and pads any genuinely short trailing row to the
+ * full width as well.
+ */
+export function expandRowSpans(row: ReportCell[], columnCount: number): ReportCell[] {
+  const width = Math.max(1, columnCount);
+  const expanded: ReportCell[] = [];
+  for (const entry of row) {
+    expanded.push(entry);
+    const span = Math.max(1, entry.colSpan ?? 1);
+    for (let filled = 1; filled < span && expanded.length < width; filled += 1) {
+      expanded.push({ text: '' });
+    }
+  }
+  while (expanded.length < width) expanded.push({ text: '' });
+  return expanded;
+}
+
 /** `#RRGGBB`/`#RGB` normalised to upper-case, or undefined when unreadable. */
 export function normalizeHex(value: string | undefined): string | undefined {
   if (!value) return undefined;

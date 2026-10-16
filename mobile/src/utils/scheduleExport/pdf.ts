@@ -2,7 +2,13 @@ import pdfMake from 'pdfmake/build/pdfmake';
 import pdfFonts from 'pdfmake/build/vfs_fonts';
 
 import { base64ToBytes, toBytes } from './bytes';
-import { reportColumnCount, reportToHtml, type ReportCell, type ReportModel } from './model';
+import {
+  expandRowSpans,
+  reportColumnCount,
+  reportToHtml,
+  type ReportCell,
+  type ReportModel,
+} from './model';
 
 /**
  * PDF renderer.
@@ -77,8 +83,13 @@ function legendNodes(report: ReportModel): PdfNode[] {
 function buildDocDefinition(report: ReportModel): PdfNode {
   const columnCount = Math.max(1, reportColumnCount(report));
   // A handful of wide columns size to their content; a dense week-by-week grid
-  // is instead forced to share the page width rather than overflow it.
-  const widths: unknown = columnCount > 16 ? '*' : 'auto';
+  // is instead forced to share the page width rather than overflow it. An
+  // explicit array (not a single scalar) keeps `widths.length` in lock-step with
+  // every expanded body row, which is the invariant pdfmake checks.
+  const widths: unknown[] = new Array(columnCount).fill(columnCount > 16 ? '*' : 'auto');
+  // Expand every row to exactly `columnCount` cells: a merged `colSpan` cell is
+  // followed by its `N - 1` placeholders so no column index is ever undefined.
+  const body = report.rows.map((row) => expandRowSpans(row, columnCount).map(cellToNode));
 
   const content: PdfNode[] = [
     { text: 'MedResidency', fontSize: 9, bold: true, color: '#12558C', characterSpacing: 1.5 },
@@ -102,7 +113,7 @@ function buildDocDefinition(report: ReportModel): PdfNode {
     table: {
       headerRows: report.headerRows,
       widths,
-      body: report.rows.map((row) => row.map(cellToNode)),
+      body,
       dontBreakRows: true,
     },
     layout: { ...GRID_LAYOUT },
