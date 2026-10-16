@@ -1,13 +1,13 @@
 import { Tabs } from 'expo-router';
-import { BarChart3, ClipboardList, LayoutDashboard, Library, Users } from 'lucide-react-native';
+import { BarChart3, ClipboardList, FileText, LayoutDashboard, Library, Users } from 'lucide-react-native';
 
 import { TAB_BAR_STYLE, tabBarIcon } from '../../../navigation/tabBar';
 
 /**
- * Coordinator tabs. Same five-tab budget as the resident side, allocated to the
- * jobs a programme coordinator actually does: check the programme's state,
- * look up a resident, manage the rotation catalogue, clear the leave queue, and
- * read reports.
+ * Coordinator tabs. Same budget as the resident side, allocated to the jobs a
+ * programme coordinator actually does: check the programme's state, look up a
+ * resident, manage the rotation catalogue, author and read the release letters
+ * the hospital is owed, clear the leave queue, and read reports.
  */
 export default function ProgramTabsLayout() {
   return (
@@ -31,6 +31,13 @@ export default function ProgramTabsLayout() {
         options={{
           title: 'Rotations',
           tabBarIcon: tabBarIcon(Library),
+        }}
+      />
+      <Tabs.Screen
+        name="letters"
+        options={{
+          title: 'Letters',
+          tabBarIcon: tabBarIcon(FileText),
         }}
       />
       <Tabs.Screen

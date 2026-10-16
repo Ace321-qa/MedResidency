@@ -1,41 +1,27 @@
 import { useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
-import { FilePlus2, FileText, Trash2 } from 'lucide-react-native';
+import { Trash2 } from 'lucide-react-native';
 
-import { goBack } from '../../../navigation/back';
-import {
-  AppHeader,
-  Banner,
-  Button,
-  Card,
-  ChoiceGroup,
-  EmptyState,
-  ErrorState,
-  ListRow,
-  Screen,
-  SectionHeader,
-  Sheet,
-  SkeletonList,
-  StatusBadge,
-  Text,
-  TextField,
-} from '../../../components';
-import { useApiResource, useSession } from '../../../hooks';
+import { Banner } from './Banner';
+import { Button } from './Button';
+import { ChoiceGroup } from './ChoiceGroup';
+import { Sheet } from './Sheet';
+import { Text } from './Text';
+import { TextField } from './Form';
+import { colors, radius, spacing } from '../theme';
 import {
   createLetterTemplate,
   deleteLetterTemplate,
-  fetchLetterTemplates,
   updateLetterTemplate,
-} from '../../../services/lettersTemplates';
-import { useInAppNotifications } from '../../../services/inAppNotifications';
-import { colors, radius, spacing } from '../../../theme';
-import type { LetterTemplate } from '../../../types/api';
+} from '../services/lettersTemplates';
+import { useInAppNotifications } from '../services/inAppNotifications';
+import type { LetterTemplate } from '../types/api';
 
 /**
- * Release letters — the coordinator's template library.
+ * The release-letter template editor, opened from the Letters tab.
  *
  * A release letter is written once and merged dozens of times, so the template
- * is the artefact that matters: this screen is where it is read, written and
+ * is the artefact that matters: this sheet is where it is read, written and
  * retired. Everything a template can contain is a `{{PLACEHOLDER}}` the server
  * fills when a letter is generated, which is why the placeholder chips sit
  * between the body field and the keyboard — a coordinator who has to remember
@@ -44,6 +30,16 @@ import type { LetterTemplate } from '../../../types/api';
  *
  * Insertion is at the caret, not at the end of the document: the whole point of
  * a chip row is to put the token where the sentence is being written.
+ *
+ * The sheet owns no list. It reports success through `onSaved` so the screen that
+ * hosts it can refetch, and closes itself through `onClose`; that keeps the
+ * create/edit/delete flow reusable from anywhere a template can be opened.
+ *
+ * **The host must re-key this component for every open** (e.g. `key={openSeq}`),
+ * so each session starts from a fresh form seeded off the handed-in `template`.
+ * That is deliberate: seeding from props in an effect is disallowed by React's
+ * lint rules, and re-keying is the sanctioned way to reset state when the target
+ * changes.
  */
 
 const PLACEHOLDER_TOKENS: string[] = [
@@ -87,16 +83,41 @@ interface FieldErrors {
 
 const EMPTY_FORM: FormState = { code: '', name: '', subject: '', body: '', active: '1' };
 
-export default function LettersTemplatesScreen() {
-  const { session } = useSession();
+export interface LetterTemplateEditorSheetProps {
+  visible: boolean;
+  programId: number;
+  /** The template being edited, or `null` to author a new one. */
+  template: LetterTemplate | null;
+  onClose: () => void;
+  /** Called after a successful create, update or delete so the host can refetch. */
+  onSaved: () => void;
+}
+
+export function LetterTemplateEditorSheet({
+  visible,
+  programId,
+  template,
+  onClose,
+  onSaved,
+}: LetterTemplateEditorSheetProps) {
   const { notify } = useInAppNotifications();
-  const programId = session?.programId ?? 0;
 
-  const templates = useApiResource(() => fetchLetterTemplates(programId), [programId]);
-
-  const [sheetOpen, setSheetOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  // The form is seeded once, from the template the host hands in, and the host
+  // re-keys this component for every open (see the docstring). That keeps the
+  // seed out of an effect — which React's lint rules rightly forbid — and means a
+  // list refetch while the sheet is open cannot yank the text out from under the
+  // coordinator.
+  const [form, setForm] = useState<FormState>(() =>
+    template
+      ? {
+          code: template.template_code,
+          name: template.template_name,
+          subject: template.letter_subject,
+          body: template.letter_body,
+          active: template.is_active === 1 ? '1' : '0',
+        }
+      : EMPTY_FORM,
+  );
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -106,7 +127,11 @@ export default function LettersTemplatesScreen() {
    * Caret position, kept in a ref: it is only read when a chip is tapped, and
    * tracking it in state would re-render the whole sheet on every arrow key.
    */
-  const caretRef = useRef({ start: 0, end: 0 });
+  const caretRef = useRef(
+    template
+      ? { start: template.letter_body.length, end: template.letter_body.length }
+      : { start: 0, end: 0 },
+  );
   /**
    * A caret position to apply *once*, after a token is inserted. Cleared on the
    * next selection event so the field returns to being uncontrolled and the
@@ -116,39 +141,12 @@ export default function LettersTemplatesScreen() {
     null,
   );
 
-  const list = templates.data ?? [];
+  const editing = template !== null;
   const includesFaculty = form.body.includes(`{{${FACULTY_TOKEN}}}`);
 
-  function openCreate() {
-    setEditingId(null);
-    setForm(EMPTY_FORM);
-    setFieldErrors({});
-    setSaveError(null);
-    caretRef.current = { start: 0, end: 0 };
-    setPendingSelection(null);
-    setSheetOpen(true);
-  }
-
-  function openEdit(template: LetterTemplate) {
-    setEditingId(template.id);
-    setForm({
-      code: template.template_code,
-      name: template.template_name,
-      subject: template.letter_subject,
-      body: template.letter_body,
-      active: template.is_active === 1 ? '1' : '0',
-    });
-    setFieldErrors({});
-    setSaveError(null);
-    caretRef.current = { start: template.letter_body.length, end: template.letter_body.length };
-    setPendingSelection(null);
-    setSheetOpen(true);
-  }
-
-  function closeSheet() {
+  function close() {
     if (busy) return;
-    setSheetOpen(false);
-    setConfirmingDelete(false);
+    onClose();
   }
 
   /** Insert `{{TOKEN}}` at the caret — or append when nothing is selected. */
@@ -221,15 +219,15 @@ export default function LettersTemplatesScreen() {
 
     setBusy(true);
     try {
-      if (editingId === null) {
+      if (template === null) {
         await createLetterTemplate(payload);
         notify({ title: 'Template created', message: payload.template_name, tone: 'success' });
       } else {
-        await updateLetterTemplate(editingId, payload);
+        await updateLetterTemplate(template.id, payload);
         notify({ title: 'Template updated', message: payload.template_name, tone: 'success' });
       }
-      setSheetOpen(false);
-      templates.refresh();
+      onSaved();
+      onClose();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The template could not be saved.';
       setSaveError(message);
@@ -240,16 +238,16 @@ export default function LettersTemplatesScreen() {
   }
 
   async function remove() {
-    if (editingId === null) return;
+    if (template === null) return;
     setBusy(true);
     setSaveError(null);
 
     try {
-      await deleteLetterTemplate(editingId);
-      notify({ title: 'Template deleted', message: form.name, tone: 'warning' });
-      setSheetOpen(false);
+      await deleteLetterTemplate(template.id);
+      notify({ title: 'Template deleted', message: template.template_name, tone: 'warning' });
+      onSaved();
       setConfirmingDelete(false);
-      templates.refresh();
+      onClose();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The template could not be deleted.';
       setSaveError(message);
@@ -260,90 +258,20 @@ export default function LettersTemplatesScreen() {
   }
 
   return (
-    <Screen onRefresh={templates.refresh} refreshing={templates.isRefreshing} bottomGutter={spacing.xxl}>
-      <AppHeader
-        title="Letter Templates"
-        onBack={goBack}
-        subtitle="View, edit, and create the templates letters are merged from"
-        action={
-          <Button
-            label="New"
-            variant="ghost"
-            fullWidth={false}
-            icon={FilePlus2}
-            onPress={openCreate}
-            accessibilityLabel="Create a release letter template"
-          />
-        }
-      />
-
-      {templates.isLoading ? <SkeletonList rows={4} /> : null}
-
-      {templates.error ? (
-        <ErrorState
-          title="Could not load templates"
-          message={templates.error.message}
-          onRetry={templates.refresh}
-        />
-      ) : null}
-
-      {templates.status === 'ready' ? (
-        <>
-          <SectionHeader title={`${list.length} template${list.length === 1 ? '' : 's'}`} />
-
-          {list.length === 0 ? (
-            <Card>
-              <EmptyState
-                icon={FileText}
-                title="No templates yet"
-                message="Create the first template and every release letter the programme generates will use it."
-                actionLabel="Create a template"
-                onActionPress={openCreate}
-              />
-            </Card>
-          ) : (
-            <Card padded={false}>
-              {list.map((template, index) => (
-                <ListRow
-                  key={template.id}
-                  title={template.template_name}
-                  subtitle={template.letter_subject}
-                  meta={`Code ${template.template_code} · ${template.letter_body.length} characters`}
-                  trailing={
-                    <StatusBadge
-                      label={template.is_active === 1 ? 'Active' : 'Inactive'}
-                      tone={template.is_active === 1 ? 'success' : 'neutral'}
-                    />
-                  }
-                  onPress={() => openEdit(template)}
-                  accessibilityHint="Opens the template for editing"
-                  last={index === list.length - 1}
-                />
-              ))}
-            </Card>
-          )}
-
-          <Banner
-            tone="info"
-            title="How placeholders work"
-            message="Tokens like {{RESIDENT_NAME}} are replaced by the server when a letter is generated. An unknown token is left in the letter as text, so stick to the chips above."
-          />
-        </>
-      ) : null}
-
+    <>
       <Sheet
-        visible={sheetOpen}
-        onClose={closeSheet}
-        title={editingId === null ? 'New release letter template' : 'Edit template'}
+        visible={visible}
+        onClose={close}
+        title={editing ? 'Edit template' : 'New release letter template'}
         subtitle={
-          editingId === null
-            ? 'Written once, merged into every letter the programme sends.'
-            : 'Changes apply to letters generated from now on; letters already sent keep their text.'
+          editing
+            ? 'Changes apply to letters generated from now on; letters already sent keep their text.'
+            : 'Written once, merged into every letter the programme sends.'
         }
         footer={
           <View style={styles.footer}>
             <Button label="Save template" loading={busy} onPress={save} />
-            {editingId !== null ? (
+            {editing ? (
               <Button
                 label="Delete template"
                 variant="danger"
@@ -474,7 +402,7 @@ export default function LettersTemplatesScreen() {
           afterwards. If you only want to stop offering it, set the status to Inactive instead.
         </Text>
       </Sheet>
-    </Screen>
+    </>
   );
 }
 

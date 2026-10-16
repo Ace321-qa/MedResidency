@@ -3,7 +3,7 @@ import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Send, TriangleAlert } from 'lucide-react-native';
 
-import { goBack } from '../../../navigation/back';
+import { goBack } from '../../../../navigation/back';
 import {
   AppHeader,
   Banner,
@@ -18,23 +18,23 @@ import {
   StatusBadge,
   Text,
   TextField,
-} from '../../../components';
-import { useApiResource, useSession } from '../../../hooks';
-import { fetchResidentLongitudinalAssignments } from '../../../services/longitudinal';
-import { generateReleaseLetter, previewReleaseLetter } from '../../../services/letters';
-import { fetchResidentSchedule } from '../../../services/rotations';
-import { fetchResidentList } from '../../../services/residents';
-import { useInAppNotifications } from '../../../services/inAppNotifications';
-import { colors, radius, spacing } from '../../../theme';
-import { formatDateRange, formatTime, humanizeToken, todayCalendarDate } from '../../../utils/format';
-import { parseLetterBody, type LetterBlock } from '../../../utils/letterPreview';
-import { residentFullName, residentSubtitle } from '../../../utils/residents';
+} from '../../../../components';
+import { useApiResource, useSession } from '../../../../hooks';
+import { fetchResidentLongitudinalAssignments } from '../../../../services/longitudinal';
+import { generateReleaseLetter, previewReleaseLetter } from '../../../../services/letters';
+import { fetchResidentSchedule } from '../../../../services/rotations';
+import { fetchResidentList } from '../../../../services/residents';
+import { useInAppNotifications } from '../../../../services/inAppNotifications';
+import { colors, radius, spacing } from '../../../../theme';
+import { formatDateRange, formatTime, humanizeToken, todayCalendarDate } from '../../../../utils/format';
+import { parseLetterBody, type LetterBlock } from '../../../../utils/letterPreview';
+import { residentFullName, residentSubtitle } from '../../../../utils/residents';
 import type {
   GenerateLetterPayload,
   LongitudinalAssignment,
   MergedLetterResult,
   RotationAssignment,
-} from '../../../types/api';
+} from '../../../../types/api';
 
 /**
  * Generator & dispatch window.
@@ -245,7 +245,7 @@ export default function GenerateReleaseLetterScreen() {
           : `${result.resident_name} · ${result.hospital_department_name ?? 'department'} · to ${result.recipient_dept_head}.`,
         tone: unresolved.length ? 'warning' : 'success',
       });
-      router.push('/program/letters/log');
+      router.replace('/program/letters');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The letter could not be sent.';
       setDispatchError(message);

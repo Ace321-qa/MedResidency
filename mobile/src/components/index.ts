@@ -25,6 +25,10 @@ export { MatrixTable, type MatrixColumnDef, type MatrixRowDef } from './MatrixTa
 export { Screen } from './Screen';
 export { ImportTools } from './ImportTools';
 export { LetterPreviewSheet } from './LetterPreviewSheet';
+export {
+  LetterTemplateEditorSheet,
+  type LetterTemplateEditorSheetProps,
+} from './LetterTemplateEditorSheet';
 export { Sheet } from './Sheet';
 export { EmptyState, ErrorState, LoadingState, SkeletonList } from './StateView';
 export { ExportMenu } from './ExportMenu';

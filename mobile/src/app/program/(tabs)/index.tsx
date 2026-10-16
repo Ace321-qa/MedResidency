@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { FileSignature, Send, Settings, TriangleAlert, UserPlus, Users } from 'lucide-react-native';
+import { Settings, TriangleAlert, UserPlus, Users } from 'lucide-react-native';
 
 import {
   AppHeader,
@@ -168,25 +168,6 @@ export default function ProgramOverviewScreen() {
               style={styles.cta}
             />
           ) : null}
-
-          <SectionHeader title="Release letters" />
-          <Card padded={false}>
-            <ListRow
-              title="Letter templates"
-              subtitle="View, edit, and create the templates letters are merged from"
-              leadingIcon={FileSignature}
-              onPress={() => router.push('/program/letters/templates')}
-              accessibilityHint="Opens the release letter template library"
-            />
-            <ListRow
-              title="Dispatched letters log"
-              subtitle="View generated letters sent to hospital department heads"
-              leadingIcon={Send}
-              onPress={() => router.push('/program/letters/log')}
-              accessibilityHint="Opens the log of dispatched release letters"
-              last
-            />
-          </Card>
 
           <Card padded={false}>
             <ListRow
