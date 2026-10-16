@@ -51,6 +51,24 @@ function toArgb(value) {
   return null;
 }
 
+/**
+ * Excel rejects a worksheet name that carries any of `: \ / ? * [ ]`, is blank,
+ * or runs past 31 characters — and ExcelJS enforces that by *throwing*, which
+ * turned a perfectly valid export into a 500. The client composes the sheet name
+ * itself (the master grid uses the display form `2026/2027`), so the trust
+ * boundary sanitises it here rather than trusting the caller.
+ */
+const INVALID_SHEET_NAME_CHARS = /[\\/*?:[\]]/g;
+
+function safeSheetName(value) {
+  const cleaned = String(value ?? '')
+    .replace(INVALID_SHEET_NAME_CHARS, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const capped = cleaned.slice(0, 31).trim();
+  return capped || 'Schedule';
+}
+
 /** A cell payload may be a bare value or the rich `{ text, fill, ... }` shape. */
 function normalizeCell(raw) {
   if (raw === null || raw === undefined) return { text: '', colSpan: 1 };
@@ -129,7 +147,7 @@ async function buildWorkbook(report) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'MedResidency';
   workbook.created = new Date();
-  const sheet = workbook.addWorksheet(String(payload.sheetName || 'Schedule').slice(0, 31), {
+  const sheet = workbook.addWorksheet(safeSheetName(payload.sheetName), {
     views: [{ state: 'frozen' }],
   });
 
@@ -279,4 +297,4 @@ async function buildWorkbook(report) {
   return workbook.xlsx.writeBuffer();
 }
 
-module.exports = { buildWorkbook, toArgb, columnLetter };
+module.exports = { buildWorkbook, safeSheetName, toArgb, columnLetter };

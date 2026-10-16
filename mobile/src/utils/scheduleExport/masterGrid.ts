@@ -285,6 +285,17 @@ function sanitizeFileBase(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'master-grid';
 }
 
+/**
+ * Excel forbids `: \ / ? * [ ]` in a worksheet name and caps it at 31
+ * characters. The academic year is held in its display form (`2026/2027`), so a
+ * raw interpolation would name the sheet `Master Grid 2026/2027` and make the
+ * server's ExcelJS renderer throw. Normalise it to a legal name here as well as
+ * server-side, so the model is valid whichever renderer consumes it.
+ */
+function sanitizeSheetName(value: string): string {
+  return value.replace(/[\\/*?:[\]]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 31) || 'Master Grid';
+}
+
 /** Build the export model for the Master Rotation Grid. */
 export function buildMasterGridReport(input: MasterGridReportInput): ReportModel {
   const gridStart = gridStartFrom(input.startDate);
@@ -323,7 +334,7 @@ export function buildMasterGridReport(input: MasterGridReportInput): ReportModel
 
   return {
     fileName: sanitizeFileBase(`Master Rotation Grid ${input.academicYear} ${weekly ? 'Weekly' : 'Block'}`),
-    sheetName: `Master Grid ${input.academicYear}`.slice(0, 31),
+    sheetName: sanitizeSheetName(`Master Grid ${input.academicYear}`),
     title: 'Master Rotation Grid',
     subtitle: `${input.academicYear} · ${weekly ? 'Weekly view' : 'Block view'} · ${index.residents.length} resident${index.residents.length === 1 ? '' : 's'}`,
     meta,

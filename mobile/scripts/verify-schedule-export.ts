@@ -146,6 +146,24 @@ const weeklyReport = buildMasterGridReport({
 assert('weekly report spans resident + pgy + 52 weeks', reportColumnCount(weeklyReport), 54);
 assert('weekly header row spans 13 four-column block banners', weeklyReport.rows[0].length, 15);
 
+// Excel rejects `: \ / ? * [ ]` in a worksheet name, so a report built from the
+// display-form year (`2026/2027`) must not leave a slash in `sheetName` — that
+// is what made the server's ExcelJS renderer answer 500.
+const slashYearReport = buildMasterGridReport({
+  rows: masterRows,
+  startDate: '2026-06-28',
+  viewMode: 'weekly',
+  academicYear: '2026/2027',
+  cohortLabel: 'All cohorts',
+  programLabel: 'Internal Medicine',
+  programCode: 'IM',
+});
+assertTrue(
+  'master grid sheet name carries no Excel-invalid character',
+  !/[\\/*?:[\]]/.test(slashYearReport.sheetName),
+);
+assertTrue('master grid sheet name is at most 31 characters', slashYearReport.sheetName.length <= 31);
+
 const html = reportToHtml(blockReport);
 assertTrue('HTML serializer includes the report title', html.includes('Master Rotation Grid'));
 assertTrue('HTML serializer paints cell fills', html.includes('background:#'));
