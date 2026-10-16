@@ -31,6 +31,7 @@ import { fetchResidentSchedule } from '../../../services/rotations';
 import { spacing } from '../../../theme';
 import { formatDate, formatDateRange, formatHours, humanizeToken } from '../../../utils/format';
 import { summarizeDutyHours, summarizeSchedule } from '../../../utils/insights';
+import { letterDestinationName, letterStatusTone } from '../../../utils/letterStatus';
 import { humanizeEnum, residentFullName } from '../../../utils/residents';
 import type { ReleaseLetter } from '../../../types/api';
 
@@ -223,10 +224,10 @@ export default function ResidentRecordScreen() {
                 {letterList.map((letter, index) => (
                   <ListRow
                     key={letter.letter_id}
-                    title={letter.clinic_name}
-                    subtitle={letter.site_name ?? undefined}
+                    title={letterDestinationName(letter)}
+                    subtitle={letter.hospital_department_name ?? letter.site_name ?? undefined}
                     meta={`${formatDateRange(letter.release_start_date, letter.release_end_date)} · to ${letter.recipient_dept_head}`}
-                    trailing={<StatusBadge label={humanizeToken(letter.sent_status)} tone="info" />}
+                    trailing={<StatusBadge label={humanizeToken(letter.sent_status)} tone={letterStatusTone(letter.sent_status)} />}
                     onPress={() => setPreviewLetter(letter)}
                     last={index === letterList.length - 1}
                   />

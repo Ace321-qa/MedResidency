@@ -441,33 +441,47 @@ export interface RotationRequest {
 }
 
 /** Mirrors the `sent_status` enum on generated_release_letters. */
-export const LETTER_SENT_STATUSES = [
-  'DRAFT',
-  'GENERATED',
-  'SENT',
-  'ACKNOWLEDGED',
-] as const;
+export const LETTER_SENT_STATUSES = ['DRAFT', 'SENT', 'DELIVERED', 'REVOKED'] as const;
 
 export type LetterSentStatus = (typeof LETTER_SENT_STATUSES)[number];
 
-/** `GET /letters/resident/:resident_id`. */
+/**
+ * `GET /letters/resident/:resident_id` and `GET /letters?program_id=`.
+ *
+ * A letter is anchored to either a clinic assignment or a rotation assignment,
+ * so the clinic fields are nullable and a rotation-anchored letter carries
+ * `rotation_name` instead. Both shapes arrive through the same endpoint — the
+ * resident's list and the coordinator's dispatch log are the same rows.
+ */
 export interface ReleaseLetter {
   letter_id: number;
   resident_name: string;
-  longitudinal_assignment_id: number;
+  longitudinal_assignment_id: number | null;
+  rotation_assignment_id: number | null;
   site_name: string | null;
   day_of_week: string | null;
-  clinic_name: string;
+  start_time: string | null;
+  end_time: string | null;
+  supervisor_name: string | null;
+  clinic_name: string | null;
+  rotation_name: string | null;
+  year_in_program: number | null;
+  program_name: string | null;
+  specialty_name: string | null;
+  institution_name: string | null;
   template_id: number;
   template_code: string;
   template_name: string;
   letter_subject: string;
   recipient_dept_head: string;
   hospital_department_name: string | null;
+  /** Hospital preceptor supervising the resident during the rotation, when assigned. */
+  supervising_faculty: string | null;
   generated_letter_body: string;
   sent_status: LetterSentStatus;
   sent_at: IsoDateString | null;
   created_at: IsoDateString | null;
+  /** Always present: a letter is anchored to at least one dated assignment. */
   release_start_date: CalendarDateString;
   release_end_date: CalendarDateString;
 }
@@ -495,10 +509,44 @@ export interface LeaveStatusPayload {
 /** `POST /letters/generate` — mail-merges a release letter server-side. */
 export interface GenerateLetterPayload {
   resident_id: number;
+  /** Anchor the letter to the weekly clinic release. Auto-resolved when both ids are omitted. */
   longitudinal_assignment_id?: number;
+  /** Anchor the letter to a hospital rotation instead (or as well). */
+  rotation_assignment_id?: number;
   template_code?: string;
-  /** DRAFT | GENERATED | SENT | ACKNOWLEDGED */
+  template_id?: number;
+  /** Recipient department head / chair the letter is addressed to. */
+  recipient_dept_head?: string;
+  hospital_department_name?: string;
+  /** Optional hospital preceptor supervising the resident on this rotation. */
+  supervising_faculty?: string;
+  /** DRAFT | SENT | DELIVERED | REVOKED. Defaults to SENT (dispatched). */
   sent_status?: LetterSentStatus;
+  /** Supersede a live letter already issued for the same assignment. */
+  regenerate?: boolean;
+}
+
+/** The merged letter, exactly as it will be stored, returned by generate and preview. */
+export interface MergedLetterResult {
+  letter_id?: number;
+  supersedes_letter_id?: number | null;
+  existing_letter_id?: number | null;
+  resident_id: number;
+  resident_name: string;
+  pgy_level: string | null;
+  longitudinal_assignment_id: number | null;
+  rotation_assignment_id: number | null;
+  template_id: number;
+  template_code: string;
+  template_name: string;
+  recipient_dept_head: string | null;
+  hospital_department_name: string | null;
+  supervising_faculty: string | null;
+  sent_status?: LetterSentStatus;
+  letter_subject: string;
+  generated_letter_body: string;
+  merge_values: Record<string, string | null>;
+  unresolved_placeholders: string[];
 }
 
 /** `POST /rotations/assignments` — assigns a resident to a rotation block. */

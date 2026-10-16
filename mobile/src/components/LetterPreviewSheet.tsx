@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, Share as ShareApi, StyleSheet, View } from 'react-native';
-import { TriangleAlert } from 'lucide-react-native';
+import { Download, TriangleAlert } from 'lucide-react-native';
 
 // Imported from the modules directly rather than from `./index`: the barrel
 // re-exports this component, and routing the component's own dependencies through
@@ -11,7 +11,10 @@ import { Sheet } from './Sheet';
 import { StatusBadge } from './StatusBadge';
 import { Text } from './Text';
 import { colors, radius, spacing } from '../theme';
-import { formatDate, formatDateRange, humanizeToken } from '../utils/format';
+import { describeSave } from '../utils/fileSave';
+import { formatDate, formatDateRange, formatTime, humanizeToken } from '../utils/format';
+import { downloadLetterPdf } from '../utils/letterPdf';
+import { letterDestinationName, letterStatusTone } from '../utils/letterStatus';
 import {
   letterBlockText,
   letterPlainText,
@@ -20,7 +23,7 @@ import {
   unresolvedPlaceholders,
   type LetterBlock,
 } from '../utils/letterPreview';
-import type { LetterSentStatus, ReleaseLetter } from '../types/api';
+import type { ReleaseLetter } from '../types/api';
 
 /**
  * Release letter preview, as a sheet over the profile.
@@ -48,13 +51,6 @@ import type { LetterSentStatus, ReleaseLetter } from '../types/api';
  * warning banner and highlighted in place rather than rendered as braces.
  */
 
-const LETTER_TONE = {
-  DRAFT: 'neutral',
-  GENERATED: 'info',
-  SENT: 'info',
-  ACKNOWLEDGED: 'success',
-} as const satisfies Record<LetterSentStatus, 'neutral' | 'info' | 'success'>;
-
 export function LetterPreviewSheet({
   letter,
   onClose,
@@ -64,6 +60,8 @@ export function LetterPreviewSheet({
   onClose: () => void;
 }) {
   const [shareError, setShareError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadNote, setDownloadNote] = useState<string | null>(null);
 
   const blocks = useMemo(() => parseLetterBody(letter?.generated_letter_body), [letter?.generated_letter_body]);
   const subject = letter?.letter_subject ?? '';
@@ -85,7 +83,7 @@ export function LetterPreviewSheet({
 
     try {
       await ShareApi.share({
-        title: letterPlainText(letter.letter_subject) || `Release letter — ${letter.clinic_name}`,
+        title: letterPlainText(letter.letter_subject) || `Release letter — ${letter.clinic_name ?? letter.rotation_name ?? letter.resident_name}`,
         message: `${letterPlainText(letter.letter_subject)}\n\n${letterPlainText(letter.generated_letter_body)}`,
       });
     } catch (error) {
@@ -93,11 +91,26 @@ export function LetterPreviewSheet({
     }
   }
 
+  async function handleDownload() {
+    if (!letter || downloading) return;
+
+    setDownloading(true);
+    setDownloadNote(null);
+    try {
+      const saved = await downloadLetterPdf(letter);
+      setDownloadNote(describeSave(saved));
+    } catch (error) {
+      setDownloadNote(error instanceof Error ? error.message : 'Could not produce the PDF.');
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   return (
     <Sheet
       visible={letter !== null}
       onClose={onClose}
-      title={letter?.clinic_name ?? ''}
+      title={letter ? letterDestinationName(letter) : ''}
       subtitle={letter ? `${letter.template_name} · ${letter.template_code}` : undefined}
       footer={
         <Button
@@ -136,10 +149,7 @@ export function LetterPreviewSheet({
           ) : null}
 
           <View style={styles.metaRow}>
-            <StatusBadge
-              label={humanizeToken(letter.sent_status)}
-              tone={LETTER_TONE[letter.sent_status] ?? 'neutral'}
-            />
+            <StatusBadge label={humanizeToken(letter.sent_status)} tone={letterStatusTone(letter.sent_status)} />
             {letter.day_of_week ? <StatusBadge label={humanizeToken(letter.day_of_week)} tone="info" /> : null}
           </View>
 
@@ -169,28 +179,43 @@ export function LetterPreviewSheet({
 
           <Divider />
 
-          {letter.recipient_dept_head ? (
-            <Text variant="caption" tone="muted">
-              To: {letter.recipient_dept_head}
-            </Text>
-          ) : (
-            <Text variant="caption" tone="muted">
-              No addressee recorded
-            </Text>
-          )}
-          {letter.hospital_department_name ? (
-            <Text variant="caption" tone="muted">
-              {letter.hospital_department_name}
-            </Text>
-          ) : null}
-          <Text variant="caption" tone="muted">
-            Release window: {formatDateRange(letter.release_start_date, letter.release_end_date)}
-          </Text>
-          {letter.sent_at ? (
-            <Text variant="caption" tone="muted">
-              Sent {formatDate(letter.sent_at)}
-            </Text>
-          ) : null}
+          <View style={styles.metaList}>
+            <MetaLine label="Date" value={formatDate(letter.created_at)} />
+            <MetaLine label="To" value={letter.recipient_dept_head} />
+            <MetaLine
+              label="Department"
+              value={letter.hospital_department_name ?? 'Not recorded'}
+            />
+            <MetaLine label="Resident" value={letter.resident_name} />
+            <MetaLine
+              label="From"
+              value={letter.program_name ?? letter.specialty_name ?? 'Residency program'}
+            />
+            <MetaLine
+              label="Release schedule"
+              value={formatDateRange(letter.release_start_date, letter.release_end_date)}
+            />
+            {letter.day_of_week ? (
+              <MetaLine
+                label="Weekly slot"
+                value={[humanizeToken(letter.day_of_week), letter.start_time ? formatTime(letter.start_time) : null]
+                  .filter(Boolean)
+                  .join(' · ')}
+              />
+            ) : null}
+            {letter.supervising_faculty ?? letter.supervisor_name ? (
+              <MetaLine
+                label="Supervising faculty"
+                value={(letter.supervising_faculty ?? letter.supervisor_name) as string}
+              />
+            ) : null}
+            {letter.site_name ? <MetaLine label="Site" value={letter.site_name} /> : null}
+            {letter.sent_at ? <MetaLine label="Sent" value={formatDate(letter.sent_at)} /> : null}
+            <MetaLine
+              label="Signature"
+              value={letter.sent_status === 'DRAFT' ? 'Awaiting coordinator sign-off' : 'Signed by program coordinator'}
+            />
+          </View>
 
           <Divider />
 
@@ -202,13 +227,32 @@ export function LetterPreviewSheet({
             blocks.map((block, index) => <LetterBlockView key={`${block.kind}-${index}`} block={block} />)
           )}
 
-          <Button
-            label="Share letter text"
-            variant="outline"
-            onPress={handleShare}
-            style={styles.share}
-            accessibilityHint="Shares the letter as plain text with missing fields marked"
-          />
+          {downloadNote ? (
+            <Text variant="caption" tone="secondary" style={styles.downloadNote}>
+              {downloadNote}
+            </Text>
+          ) : null}
+
+          <View style={styles.actions}>
+            <Button
+              label="Download PDF"
+              icon={Download}
+              onPress={handleDownload}
+              loading={downloading}
+              disabled={unresolved.length > 0}
+              accessibilityHint={
+                unresolved.length > 0
+                  ? 'Unavailable until every field is filled in'
+                  : 'Builds a PDF of the letter and opens the share sheet'
+              }
+            />
+            <Button
+              label="Share letter text"
+              variant="outline"
+              onPress={handleShare}
+              accessibilityHint="Shares the letter as plain text with missing fields marked"
+            />
+          </View>
         </ScrollView>
       ) : null}
     </Sheet>
@@ -270,6 +314,20 @@ function LetterBlockView({ block }: { block: LetterBlock }) {
   );
 }
 
+/** One `Label  Value` pair in the sheet's letterhead block. */
+function MetaLine({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.metaLine}>
+      <Text variant="caption" tone="muted" style={styles.metaLabel}>
+        {label}
+      </Text>
+      <Text variant="bodySmall" style={styles.metaValue}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   scroll: {
     flexGrow: 0,
@@ -297,6 +355,26 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.xs,
   },
+  metaList: {
+    gap: spacing.xxs,
+  },
+  metaLine: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  metaLabel: {
+    width: 118,
+  },
+  metaValue: {
+    flex: 1,
+  },
+  downloadNote: {
+    marginTop: spacing.sm,
+  },
+  actions: {
+    gap: spacing.xs,
+    marginTop: spacing.md,
+  },
   block: {
     marginTop: spacing.xs,
   },
@@ -317,8 +395,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xs,
     paddingVertical: 1,
     overflow: 'hidden',
-  },
-  share: {
-    marginTop: spacing.md,
   },
 });

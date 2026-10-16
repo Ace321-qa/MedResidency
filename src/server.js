@@ -116,6 +116,17 @@ if (require.main === module) {
       console.error('[notifications] could not ensure schema:', error.message);
     }
 
+    // Bring the release-letter engine's schema up (subject column rename,
+    // rotation anchor, sent_status lifecycle) and seed the default
+    // STANDARD-RELEASE template for every programme. Idempotent DDL.
+    try {
+      const ReleaseLetterService = require('./services/releaseLetterService');
+      await ReleaseLetterService.ensureReady();
+      console.log('[release-letters] schema and default templates ready.');
+    } catch (error) {
+      console.error('[release-letters] could not ensure schema:', error.message);
+    }
+
     // Seed the standard Continuity of Care Clinics (CCC) for every programme so a fresh
     // install (or a programme created after the last boot) starts with its five
     // default clinics. Idempotent: existing rows are matched by name.
@@ -154,12 +165,10 @@ const longitudinalRoutes = require('./routes/longitudinalRoutes');
 app.use('/api/v1/longitudinal', longitudinalRoutes);
 
 const rosterImportRoutes = require('./routes/rosterImportRoutes');
-const letterTemplateRoutes = require('./routes/letterTemplateRoutes');
 const rotationImportRoutes = require('./routes/rotationImportRoutes');
 const rotationRequestRoutes = require('./routes/rotationRequestRoutes');
 
 app.use('/api/v1/roster', rosterImportRoutes);
-app.use('/api/v1/letters/templates', letterTemplateRoutes);
 app.use('/api/v1/rotations/import', rotationImportRoutes);
 app.use('/api/v1/requests/rotation', rotationRequestRoutes);
 

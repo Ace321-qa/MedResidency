@@ -11,8 +11,9 @@ import type { ApiListResponse, ApiResponse, LetterTemplate } from '../types/api'
 
 export type LetterTemplateInput = Omit<LetterTemplate, 'id' | 'created_at' | 'updated_at'>;
 
-export async function fetchLetterTemplates(): Promise<LetterTemplate[]> {
-  const response = await request<ApiListResponse<LetterTemplate>>('/letters/templates');
+export async function fetchLetterTemplates(programId?: number): Promise<LetterTemplate[]> {
+  const path = programId ? `/letters/templates?program_id=${programId}` : '/letters/templates';
+  const response = await request<ApiListResponse<LetterTemplate>>(path);
   return response.data ?? [];
 }
 
