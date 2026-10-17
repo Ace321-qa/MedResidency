@@ -56,7 +56,7 @@ import { buildMasterGridColumns } from '../../../utils/masterGridColumns';
 import { sortResidentsByPgy } from '../../../utils/residentOrder';
 
 type ViewMode = 'block' | 'weekly';
-type PgyFilter = 'ALL' | '1' | '2' | '3' | '4';
+type PgyFilter = 'ALL' | '1' | '2' | '3' | '4' | '5';
 
 const PGY_OPTIONS: SelectOption<PgyFilter>[] = [
   { value: 'ALL', label: 'All' },
@@ -64,6 +64,7 @@ const PGY_OPTIONS: SelectOption<PgyFilter>[] = [
   { value: '2', label: 'PGY-2' },
   { value: '3', label: 'PGY-3' },
   { value: '4', label: 'PGY-4' },
+  { value: '5', label: 'PGY-5' },
 ];
 
 const VIEW_OPTIONS: SelectOption<ViewMode>[] = [
