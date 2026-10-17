@@ -17,6 +17,7 @@ import {
   buildCccMatrixReport,
 } from '../src/utils/scheduleExport/cccMatrixReport';
 import { buildMasterGridReport } from '../src/utils/scheduleExport/masterGrid';
+import { pgyRank, sortResidentsByPgy } from '../src/utils/residentOrder';
 import { expandRowSpans, reportColumnCount, reportToHtml } from '../src/utils/scheduleExport/model';
 import { renderReportDocx } from '../src/utils/scheduleExport/docx';
 import { renderReportPdf } from '../src/utils/scheduleExport/pdf';
@@ -130,8 +131,11 @@ assert('block report has header rows plus one row per resident', blockReport.row
 assert('block legend names both rotations', blockReport.legend?.length, 2);
 assertTrue(
   'block report colours a rotation cell',
-  blockReport.rows[2].some((entryCell) => Boolean(entryCell.fill) && entryCell.text.includes('CARD')),
+  blockReport.rows.slice(2).some((row) => row.some((entryCell) => Boolean(entryCell.fill) && entryCell.text.includes('CARD'))),
 );
+// The grid reads senior-first: the PGY-2 fixture must precede the PGY-1 one.
+assert('block report leads with the senior cohort', blockReport.rows[2][1].text, 'PGY-2');
+assert('block report ends with the junior cohort', blockReport.rows[3][1].text, 'PGY-1');
 
 const weeklyReport = buildMasterGridReport({
   rows: masterRows,
@@ -163,6 +167,23 @@ assertTrue(
   !/[\\/*?:[\]]/.test(slashYearReport.sheetName),
 );
 assertTrue('master grid sheet name is at most 31 characters', slashYearReport.sheetName.length <= 31);
+
+// --- Cohort ordering (senior-first) -----------------------------------------
+
+assert('pgyRank reads a bare number', pgyRank(3), 3);
+assert('pgyRank strips the PGY- prefix', pgyRank('PGY-5'), 5);
+assert('pgyRank treats a trailing plus as a half year', pgyRank('PGY-4+'), 4.5);
+assert('pgyRank keeps a decimal level', pgyRank('4.5'), 4.5);
+assert('pgyRank ranks an unknown level below PGY-1', pgyRank(null), 0);
+
+const ordered = sortResidentsByPgy([
+  { resident_id: 1, first_name: 'Zoe', last_name: 'Zed', employee_id: 'E9', pgy_level: 3 },
+  { resident_id: 2, first_name: 'Amy', last_name: 'Ash', employee_id: 'E8', pgy_level: 3 },
+  { resident_id: 3, first_name: 'Ben', last_name: 'Bell', employee_id: 'E7', pgy_level: 1 },
+  { resident_id: 4, first_name: 'Cara', last_name: 'Cole', employee_id: 'E6', pgy_level: 5 },
+]);
+assert('residents sort PGY-5, then the PGY-3 pair, then PGY-1', ordered.map((r) => r.resident_id), [4, 2, 1, 3]);
+assert('same-level residents tie-break on first name', ordered[1].first_name, 'Amy');
 
 const html = reportToHtml(blockReport);
 assertTrue('HTML serializer includes the report title', html.includes('Master Rotation Grid'));

@@ -472,7 +472,7 @@ class RotationService {
     if (academic_year) { query += ' AND rb.academic_year = ?'; params.push(academic_year); }
     if (block_id) { query += ' AND rb.id = ?'; params.push(block_id); }
     if (pgy_level) { query += ' AND re.year_in_program = ?'; params.push(pgy_level); }
-    query += ' ORDER BY rb.academic_year DESC, rb.block_number ASC, re.year_in_program ASC, r.last_name ASC';
+    query += ' ORDER BY rb.academic_year DESC, rb.block_number ASC, re.year_in_program DESC, r.first_name ASC, r.last_name ASC';
     const [rows] = await db.query(query, params);
     return rows;
   }
@@ -510,6 +510,14 @@ class RotationService {
    * column at the server's local midnight, so the raw value is a UTC instant
    * whose local calendar day is the truth and whose `.slice(0, 10)` is a day
    * early for anyone west of the server's offset.
+   *
+   * Rows are ordered block-first so the client's column mapping is stable, and
+   * within a block the senior cohort leads: `year_in_program` descending
+   * (PGY-5 down to PGY-1), then first name, then last name. The grid renders
+   * residents in the order they first appear, so this single ORDER BY sets the
+   * on-screen top-down order. `year_in_program` is a small integer, so a plain
+   * `DESC` is both correct and cheaper than the string-matching `CASE ... LIKE`
+   * a free-text PGY column would require.
    *
    * @param {object} filters
    * @param {string} filters.academic_year - Required. Accepts "2026/2027" or "2026-2027".
@@ -580,7 +588,7 @@ class RotationService {
     if (program_id) { query += ' AND rb.program_id = ?'; params.push(program_id); }
     if (pgy_level) { query += ' AND re.year_in_program = ?'; params.push(pgy_level); }
     if (resident_status) { query += ' AND re.resident_status = ?'; params.push(resident_status); }
-    query += ' ORDER BY rb.block_number ASC, re.year_in_program ASC, r.last_name ASC, r.first_name ASC';
+    query += ' ORDER BY rb.block_number ASC, re.year_in_program DESC, r.first_name ASC, r.last_name ASC';
 
     const [rows] = await db.query(query, params);
     return rows;

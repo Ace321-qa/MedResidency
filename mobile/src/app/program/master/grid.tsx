@@ -53,6 +53,7 @@ import {
   type GridStart,
 } from '../../../utils/masterGridCalendar';
 import { buildMasterGridColumns } from '../../../utils/masterGridColumns';
+import { sortResidentsByPgy } from '../../../utils/residentOrder';
 
 type ViewMode = 'block' | 'weekly';
 type PgyFilter = 'ALL' | '1' | '2' | '3' | '4';
@@ -83,6 +84,9 @@ interface GridBlock {
 interface GridResident {
   resident_id: number;
   resident_name: string;
+  first_name: string;
+  last_name: string;
+  employee_id: string | null;
   pgy_level: number | null;
   contact_number: string | null;
   program_code: string;
@@ -178,6 +182,9 @@ export default function MasterGridScreen() {
         residentMap.set(row.resident_id, {
           resident_id: row.resident_id,
           resident_name: row.resident_name,
+          first_name: row.first_name,
+          last_name: row.last_name,
+          employee_id: row.employee_id ?? null,
           pgy_level: row.pgy_level,
           contact_number: row.contact_number,
           program_code: row.program_code,
@@ -197,7 +204,11 @@ export default function MasterGridScreen() {
 
     return {
       blocksByNumber: byNumber,
-      residents: Array.from(residentMap.values()),
+      // Senior cohorts lead the grid: PGY-5 at the top down to PGY-1, then
+      // alphabetically within a level. The API already orders this way, but the
+      // sort is applied here too so the on-screen rows are correct even if a
+      // cached/serialized response arrives in another order.
+      residents: sortResidentsByPgy(Array.from(residentMap.values())),
       cellFor: (residentId: number, blockId: number): CohortGridCell[] | undefined =>
         cellsByResidentBlock.get(cellKey(residentId, blockId)),
     };

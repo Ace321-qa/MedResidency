@@ -11,6 +11,7 @@ import {
   type GridStart,
 } from '../masterGridCalendar';
 import { rotationBadgeLabel, rotationPalette } from '../rotationBadges';
+import { compareResidentsByPgy, type ResidentOrderFields } from '../residentOrder';
 import { cell, coloredCell, type ReportCell, type ReportModel } from './model';
 
 /**
@@ -60,6 +61,20 @@ interface GridResidentMeta {
   residentId: number;
   name: string;
   pgyLevel: number | null;
+  firstName: string;
+  lastName: string;
+  employeeId: string | null;
+}
+
+/** Adapt the report's camelCase resident to the shared cohort order fields. */
+function residentOrder(resident: GridResidentMeta): ResidentOrderFields {
+  return {
+    resident_id: resident.residentId,
+    first_name: resident.firstName,
+    last_name: resident.lastName,
+    employee_id: resident.employeeId,
+    pgy_level: resident.pgyLevel,
+  };
 }
 
 function isAssigned(row: CohortGridCell): boolean {
@@ -159,6 +174,9 @@ function buildIndex(rows: CohortGridCell[]): {
         residentId: row.resident_id,
         name: row.resident_name,
         pgyLevel: row.pgy_level,
+        firstName: row.first_name,
+        lastName: row.last_name,
+        employeeId: row.employee_id ?? null,
       });
     }
     const key = `${row.resident_id}:${row.block_number}`;
@@ -167,7 +185,15 @@ function buildIndex(rows: CohortGridCell[]): {
     else byResidentBlock.set(key, [row]);
   }
 
-  return { residents: [...residents.values()], blocks, byResidentBlock };
+  return {
+    // Senior cohorts lead the exported grid, matching the on-screen matrix row
+    // order (PGY-5 first, then alphabetical within a level).
+    residents: [...residents.values()].sort((a, b) =>
+      compareResidentsByPgy(residentOrder(a), residentOrder(b)),
+    ),
+    blocks,
+    byResidentBlock,
+  };
 }
 
 /** One resident's block-mode cell: the sub-week slots they are assigned to. */
