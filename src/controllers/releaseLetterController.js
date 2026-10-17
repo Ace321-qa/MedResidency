@@ -3,6 +3,28 @@ const { isForeignKeyViolation, isEnumViolation } = require('../utils/mysqlErrors
 
 const VALID_SENT_STATUSES = ReleaseLetterService.SENT_STATUSES;
 
+/**
+ * The dispatch date (`{{TODAYS_DATE}}`) arrives as `YYYY-MM-DD`; anything else
+ * would be merged into a letter as a wrong or unparseable date, so it is
+ * rejected at the edge with a message the coordinator can act on. Omitting it
+ * entirely is valid — the service dates the letter with today.
+ */
+function invalidIssueDate(letter_issue_date) {
+  if (letter_issue_date === undefined || letter_issue_date === null || letter_issue_date === '') {
+    return null;
+  }
+  const text = String(letter_issue_date).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return 'Invalid letter_issue_date. The dispatch date must be in YYYY-MM-DD form.';
+  }
+  const [year, month, day] = text.split('-').map(Number);
+  const round = new Date(year, month - 1, day);
+  if (round.getFullYear() !== year || round.getMonth() !== month - 1 || round.getDate() !== day) {
+    return `Invalid letter_issue_date: ${text} is not a real calendar date.`;
+  }
+  return null;
+}
+
 /** Translate service-thrown statusCode errors, then the MySQL-level failures. */
 function sendError(res, error, fallbackMessage) {
   console.error(`Error in release letter controller: ${error.message}`);
@@ -46,7 +68,7 @@ class ReleaseLetterController {
    */
   static async generateLetter(req, res) {
     try {
-      const { resident_id, sent_status } = req.body;
+      const { resident_id, sent_status, letter_issue_date } = req.body;
 
       if (!resident_id) {
         return res.status(400).json({
@@ -54,6 +76,11 @@ class ReleaseLetterController {
           error:
             'Missing required field: resident_id. longitudinal_assignment_id and rotation_assignment_id are optional and are auto-resolved when omitted.',
         });
+      }
+
+      const issueDateError = invalidIssueDate(letter_issue_date);
+      if (issueDateError) {
+        return res.status(400).json({ success: false, error: issueDateError });
       }
 
       if (sent_status && !VALID_SENT_STATUSES.includes(sent_status)) {
@@ -85,13 +112,18 @@ class ReleaseLetterController {
    */
   static async previewLetter(req, res) {
     try {
-      const { resident_id } = req.body;
+      const { resident_id, letter_issue_date } = req.body;
 
       if (!resident_id) {
         return res.status(400).json({
           success: false,
           error: 'Missing required field: resident_id.',
         });
+      }
+
+      const issueDateError = invalidIssueDate(letter_issue_date);
+      if (issueDateError) {
+        return res.status(400).json({ success: false, error: issueDateError });
       }
 
       const preview = await ReleaseLetterService.previewLetter(req.body);

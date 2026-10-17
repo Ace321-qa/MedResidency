@@ -180,7 +180,10 @@ export function LetterPreviewSheet({
           <Divider />
 
           <View style={styles.metaList}>
-            <MetaLine label="Date" value={formatDate(letter.created_at)} />
+            <MetaLine
+              label="Date issued"
+              value={formatDate(letter.letter_issue_date ?? letter.created_at)}
+            />
             <MetaLine label="To" value={letter.recipient_dept_head} />
             <MetaLine
               label="Department"
@@ -191,6 +194,12 @@ export function LetterPreviewSheet({
               label="From"
               value={letter.program_name ?? letter.specialty_name ?? 'Residency program'}
             />
+            {letter.program_director_name ? (
+              <MetaLine label="Program director" value={letter.program_director_name} />
+            ) : null}
+            {letter.coordinator_name ? (
+              <MetaLine label="Coordinator" value={letter.coordinator_name} />
+            ) : null}
             <MetaLine
               label="Release schedule"
               value={formatDateRange(letter.release_start_date, letter.release_end_date)}
@@ -203,17 +212,29 @@ export function LetterPreviewSheet({
                   .join(' · ')}
               />
             ) : null}
-            {letter.supervising_faculty ?? letter.supervisor_name ? (
+            {letter.destination_supervising_faculty ??
+            letter.supervising_faculty ??
+            letter.supervisor_name ? (
               <MetaLine
-                label="Supervising faculty"
-                value={(letter.supervising_faculty ?? letter.supervisor_name) as string}
+                label="Destination supervisor"
+                value={
+                  (letter.destination_supervising_faculty ??
+                    letter.supervising_faculty ??
+                    letter.supervisor_name) as string
+                }
               />
             ) : null}
             {letter.site_name ? <MetaLine label="Site" value={letter.site_name} /> : null}
             {letter.sent_at ? <MetaLine label="Sent" value={formatDate(letter.sent_at)} /> : null}
             <MetaLine
               label="Signature"
-              value={letter.sent_status === 'DRAFT' ? 'Awaiting coordinator sign-off' : 'Signed by program coordinator'}
+              value={
+                letter.sent_status === 'DRAFT'
+                  ? 'Awaiting coordinator sign-off'
+                  : letter.coordinator_name
+                    ? `Signed by ${letter.coordinator_name}`
+                    : 'Signed by program coordinator'
+              }
             />
           </View>
 

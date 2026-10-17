@@ -55,6 +55,64 @@ function toDateString(value) {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * The full month names behind `{{TODAYS_DATE}}`, which is formatted the way an
+ * institutional letter dates itself: `MMMM DD, YYYY` ("October 17, 2026").
+ * Deliberately not the `05 Jul 2026` the app's list rows use — a release letter
+ * is a document, and a document does not abbreviate its months.
+ */
+const LETTER_MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/**
+ * Format a stored DATE as `MMMM DD, YYYY` for `{{TODAYS_DATE}}`.
+ * Returns null for anything that is not a real calendar date, so the merge
+ * reports the token as unresolved instead of printing "undefined".
+ */
+function formatLetterDate(value) {
+  const text = toDateString(value);
+  if (!text) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!match) return null;
+  const month = LETTER_MONTHS[Number(match[2]) - 1];
+  if (!month) return null;
+  return `${month} ${match[3]}, ${match[1]}`;
+}
+
+/**
+ * Normalise the dispatch date a client supplies for `{{TODAYS_DATE}}`.
+ *
+ * Absent means "today" — the date the letter is generated/sent, which is
+ * deliberately *not* the release start date. A supplied value must be a real
+ * `YYYY-MM-DD` calendar day; anything else is a 400 rather than a silent
+ * fallback, because a letter dated wrongly is a letter nobody can act on.
+ */
+function normalizeLetterIssueDate(value) {
+  if (value === undefined || value === null || value === '') {
+    return toDateString(new Date());
+  }
+  const text = String(value).trim();
+  const error = new Error('letter_issue_date must be a real calendar date in YYYY-MM-DD form.');
+  error.statusCode = 400;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) throw error;
+  const [year, month, day] = text.split('-').map(Number);
+  const round = new Date(year, month - 1, day);
+  if (round.getFullYear() !== year || round.getMonth() !== month - 1 || round.getDate() !== day) {
+    throw error;
+  }
+  return text;
+}
+
+/** The first non-blank string among `values`, trimmed, or null. */
+function pickName(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') return value.trim();
+  }
+  return null;
+}
+
 async function tableColumns(tableName) {
   const [rows] = await db.query(
     `SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_TYPE
@@ -63,6 +121,47 @@ async function tableColumns(tableName) {
     [tableName]
   );
   return rows;
+}
+
+/**
+ * Add `letter_issue_date DATE DEFAULT CURDATE()` to a letter table.
+ *
+ * The parenthesised expression default is what MySQL 8.0.13+ and current
+ * MariaDB accept; older servers reject it, so the column is retried as a plain
+ * nullable column and the same-day default is applied by the backfill below.
+ * Either way every row — including the ones already stored — ends up with a
+ * real issue date, and the column's own default keeps future inserts correct
+ * even if a write path forgets to send one.
+ */
+async function addLetterIssueDateColumn(table) {
+  try {
+    await db.query(`ALTER TABLE ${table} ADD COLUMN letter_issue_date DATE NULL DEFAULT (CURDATE());`);
+  } catch (error) {
+    // Another boot added it first; nothing left to do.
+    if (error.code === 'ER_DUP_FIELD') return;
+    // 1064 (syntax) / 1067 (invalid default): this server cannot take the
+    // expression default, so fall back to nullable + explicit backfill.
+    if (error.errno !== 1064 && error.errno !== 1067) throw error;
+    await db.query(`ALTER TABLE ${table} ADD COLUMN letter_issue_date DATE NULL DEFAULT NULL;`);
+  }
+
+  // Existing letters were issued the day they were created; anything else
+  // (a fresh column on a table without rows) resolves to today.
+  const fallback =
+    table === 'generated_release_letters'
+      ? 'COALESCE(DATE(created_at), CURDATE())'
+      : 'CURDATE()';
+  await db.query(
+    `UPDATE ${table} SET letter_issue_date = ${fallback} WHERE letter_issue_date IS NULL;`
+  );
+}
+
+/** Add a metadata column when it is missing, keeping `columnNames` in sync. */
+async function addMetadataColumn(table, columnNames, column, definition, afterColumn) {
+  if (columnNames.has(column)) return;
+  const after = afterColumn ? ` AFTER ${afterColumn}` : '';
+  await db.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}${after};`);
+  columnNames.add(column);
 }
 
 /**
@@ -114,6 +213,14 @@ async function applySchema() {
       'ALTER TABLE release_letter_templates ADD COLUMN updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;'
     );
   }
+  // Dispatch metadata: who signs the letters this template produces, when they
+  // are dated, and the preceptor the destination hospital puts in charge. The
+  // template copies are defaults — a letter resolves letterData first, the
+  // template second, and the programme's own roster last.
+  await addLetterIssueDateColumn('release_letter_templates');
+  await addMetadataColumn('release_letter_templates', templateNames, 'coordinator_name', 'VARCHAR(255) NULL');
+  await addMetadataColumn('release_letter_templates', templateNames, 'program_director_name', 'VARCHAR(255) NULL');
+  await addMetadataColumn('release_letter_templates', templateNames, 'destination_supervising_faculty', 'VARCHAR(255) NULL');
 
   // --- generated_release_letters -----------------------------------------
   const letterColumns = await tableColumns('generated_release_letters');
@@ -134,6 +241,37 @@ async function applySchema() {
   if (!letterNames.has('supervising_faculty')) {
     await db.query(
       'ALTER TABLE generated_release_letters ADD COLUMN supervising_faculty VARCHAR(191) NULL AFTER hospital_department_name;'
+    );
+  }
+
+  // The dispatch/destination metadata a mail-merged letter now carries:
+  // `letter_issue_date` is the day the letter was actually issued (today when
+  // generated — never the rotation's start date), the two *_name columns are
+  // the officials on the dispatching side, and `destination_supervising_faculty`
+  // is the preceptor supervising the resident at the *receiving* hospital, kept
+  // as its own column so it can never be confused with the programme-side
+  // `supervisor_name` of the continuity clinic.
+  await addLetterIssueDateColumn('generated_release_letters');
+  await addMetadataColumn('generated_release_letters', letterNames, 'coordinator_name', 'VARCHAR(255) NULL');
+  await addMetadataColumn('generated_release_letters', letterNames, 'program_director_name', 'VARCHAR(255) NULL');
+  await addMetadataColumn(
+    'generated_release_letters',
+    letterNames,
+    'destination_supervising_faculty',
+    'VARCHAR(255) NULL',
+    'supervising_faculty'
+  );
+
+  // Letters dispatched before the destination column existed already carry their
+  // preceptor in `supervising_faculty`; copy it across so the first read after
+  // migration resolves {{SUPERVISING_FACULTY}} for them too.
+  if (letterNames.has('supervising_faculty')) {
+    await db.query(
+      `UPDATE generated_release_letters
+       SET destination_supervising_faculty = supervising_faculty
+       WHERE destination_supervising_faculty IS NULL
+         AND supervising_faculty IS NOT NULL
+         AND supervising_faculty <> '';`
     );
   }
 
@@ -494,11 +632,64 @@ class ReleaseLetterService {
   }
 
   /**
+   * The programme's Program Director, read from the faculty roster — the record
+   * that stands in for "program config" when a dispatch does not name one.
+   * Matching is prefix-based so both spellings in circulation
+   * ("Program Director" and "Program Director (PD)") resolve to the same office,
+   * and an Associate PD never wins over the PD.
+   */
+  static async resolveProgramDirector(programId) {
+    if (!programId) return null;
+    try {
+      const [rows] = await db.query(
+        `SELECT CONCAT(first_name, ' ', last_name) AS name
+         FROM faculty_supervisors
+         WHERE program_id = ?
+           AND administrative_role LIKE 'Program Director%'
+         ORDER BY (administrative_role = 'Program Director (PD)') DESC, is_active DESC, id ASC
+         LIMIT 1;`,
+        [programId]
+      );
+      return pickName(rows[0] && rows[0].name);
+    } catch (error) {
+      // The roster belongs to another service; its absence must never fail a
+      // letter — it only leaves {{PROGRAM_DIRECTOR_NAME}} to be entered by hand.
+      return null;
+    }
+  }
+
+  /**
+   * The coordinator dispatching for the programme, from the provisional `users`
+   * identity table (there is no auth yet, and the table may not have been
+   * created on a fresh database — hence the guard).
+   */
+  static async resolveProgramCoordinator(programId) {
+    if (!programId) return null;
+    try {
+      const [rows] = await db.query(
+        `SELECT full_name
+         FROM users
+         WHERE role = 'COORDINATOR' AND program_id = ? AND is_active = 1
+         ORDER BY updated_at DESC, id ASC
+         LIMIT 1;`,
+        [programId]
+      );
+      return pickName(rows[0] && rows[0].full_name);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
    * Resolve every value a template can reference. Shared by generation and the
    * live preview, so what the coordinator sees before dispatch is exactly what
    * the letter will contain afterwards.
    */
   static async composeLetter(letterData) {
+    // The merge reads the dispatch metadata columns added by `applySchema`, so
+    // the schema has to be converged before any query below runs.
+    await ensureSchema();
+
     const {
       resident_id,
       longitudinal_assignment_id,
@@ -508,7 +699,15 @@ class ReleaseLetterService {
       recipient_dept_head,
       hospital_department_name,
       supervising_faculty,
+      destination_supervising_faculty,
+      letter_issue_date,
+      coordinator_name,
+      program_director_name,
     } = letterData;
+
+    // Today's date, the day the letter is dispatched — never the release start
+    // date. Validated here so preview and generate report the same 400.
+    const issueDate = normalizeLetterIssueDate(letter_issue_date);
 
     const context = await this.getResidentMergeContext(resident_id);
     if (!context) {
@@ -561,7 +760,26 @@ class ReleaseLetterService {
       hospitalDept = rotation.department_name || context.specialty_name || null;
     }
 
+    // Who dispatches the letter, in order of authority: what this dispatch
+    // supplied, then the template's programme-wide default, then the roster's
+    // own record (the faculty member holding the PD office / the coordinator
+    // user row for the programme). The destination preceptor is the one value
+    // that never falls back to the dispatching side — a supervisor from the
+    // wrong hospital is worse than an unfilled token.
+    const officialsProgramId =
+      context.program_id || (longitudinal ? longitudinal.clinic_program_id : null);
+    const coordinatorName =
+      pickName(coordinator_name, template.coordinator_name) ??
+      (await this.resolveProgramCoordinator(officialsProgramId));
+    const programDirectorName =
+      pickName(program_director_name, template.program_director_name) ??
+      (await this.resolveProgramDirector(officialsProgramId));
+    const destinationFaculty = pickName(destination_supervising_faculty, supervising_faculty);
+
     const values = {
+      TODAYS_DATE: formatLetterDate(issueDate),
+      COORDINATOR_NAME: coordinatorName,
+      PROGRAM_DIRECTOR_NAME: programDirectorName,
       RESIDENT_NAME: context.resident_name,
       PGY_LEVEL: context.pgy_level,
       CORPORATE_ID: context.corporate_id,
@@ -574,7 +792,7 @@ class ReleaseLetterService {
       START_TIME: longitudinal ? formatTime(longitudinal.start_time) : null,
       END_TIME: longitudinal ? formatTime(longitudinal.end_time) : null,
       DEPT_HEAD_NAME: recipient_dept_head || null,
-      SUPERVISING_FACULTY: supervising_faculty || null,
+      SUPERVISING_FACULTY: destinationFaculty,
       SUPERVISOR_NAME: longitudinal ? longitudinal.supervisor_name : null,
       ROTATION_NAME: rotation ? rotation.rotation_name : null,
       PROGRAM_NAME: context.program_name,
@@ -598,6 +816,10 @@ class ReleaseLetterService {
       template,
       values,
       hospitalDept,
+      issueDate,
+      coordinatorName,
+      programDirectorName,
+      destinationFaculty,
       body,
       subject,
       unresolved: [...new Set([...subject.unresolved, ...body.unresolved])],
@@ -611,15 +833,25 @@ class ReleaseLetterService {
   static async generateLetter(letterData) {
     const {
       resident_id,
-      supervising_faculty,
       recipient_dept_head,
       sent_status,
       regenerate = false,
     } = letterData;
 
     const composed = await this.composeLetter(letterData);
-    const { context, anchor, longitudinal, template, values, hospitalDept, body, subject } =
-      composed;
+    const {
+      context,
+      anchor,
+      template,
+      values,
+      hospitalDept,
+      issueDate,
+      coordinatorName,
+      programDirectorName,
+      destinationFaculty,
+      body,
+      subject,
+    } = composed;
 
     const existing = await this.findExistingLetter(anchor, template.id);
 
@@ -649,8 +881,9 @@ class ReleaseLetterService {
         `INSERT INTO generated_release_letters
            (longitudinal_assignment_id, rotation_assignment_id, resident_id, template_id,
             recipient_dept_head, hospital_department_name, supervising_faculty,
-            generated_letter_body, sent_status, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+            destination_supervising_faculty, coordinator_name, program_director_name,
+            letter_issue_date, generated_letter_body, sent_status, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
         [
           anchor.longitudinal_assignment_id,
           anchor.rotation_assignment_id,
@@ -658,7 +891,14 @@ class ReleaseLetterService {
           template.id,
           recipient_dept_head || 'Head of Department',
           hospitalDept,
-          supervising_faculty || null,
+          // `supervising_faculty` is the legacy column every list row still
+          // reads; `destination_supervising_faculty` is the destination-side
+          // spelling the new tokens merge from. One value, both columns.
+          destinationFaculty,
+          destinationFaculty,
+          coordinatorName,
+          programDirectorName,
+          issueDate,
           body.merged,
           nextStatus,
           DISPATCHED_STATUSES.includes(nextStatus) ? new Date() : null,
@@ -699,7 +939,11 @@ class ReleaseLetterService {
         template_name: template.template_name,
         recipient_dept_head: recipient_dept_head || 'Head of Department',
         hospital_department_name: hospitalDept,
-        supervising_faculty: supervising_faculty || null,
+        supervising_faculty: destinationFaculty,
+        destination_supervising_faculty: destinationFaculty,
+        coordinator_name: coordinatorName,
+        program_director_name: programDirectorName,
+        letter_issue_date: issueDate,
         sent_status: nextStatus,
         letter_subject: subject.merged,
         generated_letter_body: body.merged,
@@ -736,7 +980,11 @@ class ReleaseLetterService {
       template_name: composed.template.template_name,
       recipient_dept_head: letterData.recipient_dept_head || null,
       hospital_department_name: composed.hospitalDept,
-      supervising_faculty: letterData.supervising_faculty || null,
+      supervising_faculty: composed.destinationFaculty,
+      destination_supervising_faculty: composed.destinationFaculty,
+      coordinator_name: composed.coordinatorName,
+      program_director_name: composed.programDirectorName,
+      letter_issue_date: composed.issueDate,
       letter_subject: composed.subject.merged,
       generated_letter_body: composed.body.merged,
       merge_values: composed.values,
@@ -763,6 +1011,12 @@ class ReleaseLetterService {
    */
   static buildMergeValues(row) {
     return {
+      TODAYS_DATE:
+        formatLetterDate(row.letter_issue_date) ??
+        formatLetterDate(row.created_at) ??
+        formatLetterDate(new Date()),
+      COORDINATOR_NAME: row.coordinator_name ?? null,
+      PROGRAM_DIRECTOR_NAME: row.program_director_name ?? null,
       RESIDENT_NAME: row.resident_name,
       PGY_LEVEL: row.year_in_program ? `PGY-${row.year_in_program}` : null,
       CORPORATE_ID: row.corporate_id ?? null,
@@ -775,7 +1029,7 @@ class ReleaseLetterService {
       START_TIME: formatTime(row.start_time),
       END_TIME: formatTime(row.end_time),
       DEPT_HEAD_NAME: row.recipient_dept_head,
-      SUPERVISING_FACULTY: row.supervising_faculty ?? null,
+      SUPERVISING_FACULTY: row.destination_supervising_faculty ?? row.supervising_faculty ?? null,
       SUPERVISOR_NAME: row.supervisor_name,
       ROTATION_NAME: row.rotation_name ?? null,
       PROGRAM_NAME: row.program_name,
@@ -812,6 +1066,13 @@ class ReleaseLetterService {
         grl.recipient_dept_head,
         grl.hospital_department_name,
         grl.supervising_faculty,
+        grl.destination_supervising_faculty,
+        grl.coordinator_name,
+        grl.program_director_name,
+        DATE_FORMAT(
+          COALESCE(grl.letter_issue_date, DATE(grl.created_at), CURDATE()),
+          '%Y-%m-%d'
+        ) AS letter_issue_date,
         grl.generated_letter_body,
         grl.sent_status,
         grl.sent_at,
@@ -901,7 +1162,9 @@ class ReleaseLetterService {
     }
     const [rows] = await db.query(
       `SELECT id, program_id, template_code, template_name,
-              subject_line AS letter_subject, letter_body, is_active, created_at, updated_at
+              subject_line AS letter_subject, letter_body, is_active,
+              coordinator_name, program_director_name, destination_supervising_faculty,
+              created_at, updated_at
        FROM release_letter_templates${where}
        ORDER BY is_active DESC, template_code ASC;`,
       params
@@ -917,6 +1180,11 @@ class ReleaseLetterService {
       template_name: input.template_name,
       subject_line: subject,
       letter_body: input.letter_body,
+      // Optional programme-wide defaults a letter merges with when its dispatch
+      // does not supply its own; blank means "resolve from the roster instead".
+      coordinator_name: pickName(input.coordinator_name),
+      program_director_name: pickName(input.program_director_name),
+      destination_supervising_faculty: pickName(input.destination_supervising_faculty),
       is_active: input.is_active === undefined || input.is_active === null
         ? 1
         : Number(input.is_active) === 0 || input.is_active === false
@@ -947,14 +1215,18 @@ class ReleaseLetterService {
     try {
       const [result] = await db.query(
         `INSERT INTO release_letter_templates
-           (program_id, template_code, template_name, subject_line, letter_body, is_active)
-         VALUES (?, ?, ?, ?, ?, ?);`,
+           (program_id, template_code, template_name, subject_line, letter_body,
+            coordinator_name, program_director_name, destination_supervising_faculty, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
         [
           data.program_id,
           String(data.template_code).trim(),
           String(data.template_name).trim(),
           String(data.subject_line).trim(),
           data.letter_body,
+          data.coordinator_name,
+          data.program_director_name,
+          data.destination_supervising_faculty,
           data.is_active,
         ]
       );
@@ -991,6 +1263,9 @@ class ReleaseLetterService {
       ['template_name', data.template_name],
       ['subject_line', data.subject_line],
       ['letter_body', data.letter_body],
+      ['coordinator_name', data.coordinator_name],
+      ['program_director_name', data.program_director_name],
+      ['destination_supervising_faculty', data.destination_supervising_faculty],
       ['is_active', data.is_active],
     ]) {
       if (value === undefined || value === null) continue;

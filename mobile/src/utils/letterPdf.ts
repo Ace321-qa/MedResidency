@@ -98,7 +98,7 @@ function blockHtml(block: LetterBlock): string {
  */
 function metaRows(letter: ReleaseLetter): MetaRow[] {
   const rows: MetaRow[] = [
-    { label: 'Date generated', value: formatDate(letter.created_at) },
+    { label: 'Date issued', value: formatDate(letter.letter_issue_date ?? letter.created_at) },
     { label: 'To', value: letter.recipient_dept_head },
     { label: 'Department', value: letter.hospital_department_name ?? '' },
     { label: 'Resident', value: letter.resident_name },
@@ -119,8 +119,21 @@ function metaRows(letter: ReleaseLetter): MetaRow[] {
     .join(' · ');
   if (site) rows.push({ label: 'Release to', value: site });
 
-  const supervisor = letter.supervising_faculty ?? letter.supervisor_name;
-  if (supervisor) rows.push({ label: 'Supervising faculty', value: supervisor });
+  // The destination preceptor wins: `supervising_faculty` mirrors it for older
+  // rows, but when the two ever disagree the receiving hospital's own record is
+  // the one the letter is citing.
+  const supervisor =
+    letter.destination_supervising_faculty ??
+    letter.supervising_faculty ??
+    letter.supervisor_name;
+  if (supervisor) rows.push({ label: 'Destination supervisor', value: supervisor });
+
+  if (letter.program_director_name) {
+    rows.push({ label: 'Program director', value: letter.program_director_name });
+  }
+  if (letter.coordinator_name) {
+    rows.push({ label: 'Coordinator', value: letter.coordinator_name });
+  }
 
   return rows.filter((row) => row.value.trim().length > 0);
 }
@@ -181,7 +194,7 @@ export function letterHtml(letter: ReleaseLetter): string {
   ${blocks.map(blockHtml).join('\n  ') || '<p class="block">This letter has no body text yet.</p>'}
 
   <div class="footer">
-    Generated via the residency management system on ${escapeHtml(formatDate(letter.created_at))}.
+    Issued via the residency management system on ${escapeHtml(formatDate(letter.letter_issue_date ?? letter.created_at))}.
   </div>
 </body>
 </html>`;

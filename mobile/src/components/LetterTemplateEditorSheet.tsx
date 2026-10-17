@@ -43,6 +43,10 @@ import type { LetterTemplate } from '../types/api';
  */
 
 const PLACEHOLDER_TOKENS: string[] = [
+  'TODAYS_DATE',
+  'COORDINATOR_NAME',
+  'PROGRAM_DIRECTOR_NAME',
+  'SUPERVISING_FACULTY',
   'RESIDENT_NAME',
   'PGY_LEVEL',
   'CORPORATE_ID',
@@ -55,14 +59,28 @@ const PLACEHOLDER_TOKENS: string[] = [
   'RELEASE_DAY',
   'START_TIME',
   'END_TIME',
-  'SUPERVISING_FACULTY',
   'SUPERVISOR_NAME',
+  'ROTATION_NAME',
   'PROGRAM_NAME',
   'SPECIALTY_NAME',
   'INSTITUTION_NAME',
   'RELEASE_START_DATE',
   'RELEASE_END_DATE',
 ];
+
+/**
+ * The tooltip a chip shows once it has been tapped — the difference between
+ * "this token fills in a date" and "this token fills in *today*, the day the
+ * letter is dispatched, which is not the release start date". The two date
+ * tokens read almost identically by name, so the ones that are easy to confuse
+ * are spelled out here rather than left to the placeholder's own wording.
+ */
+const PLACEHOLDER_HINTS: Record<string, string> = {
+  TODAYS_DATE: 'Inserts the actual date the letter is generated/sent.',
+  COORDINATOR_NAME: "Inserts the dispatching coordinator's name.",
+  PROGRAM_DIRECTOR_NAME: "Inserts the dispatching program director's name.",
+  SUPERVISING_FACULTY: 'Inserts the supervisor assigned at the destination hospital.',
+};
 
 const FACULTY_TOKEN = 'SUPERVISING_FACULTY';
 
@@ -122,6 +140,8 @@ export function LetterTemplateEditorSheet({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  /** The token whose tooltip is showing; set by tapping or long-pressing a chip. */
+  const [hintToken, setHintToken] = useState<string | null>(null);
 
   /**
    * Caret position, kept in a ref: it is only read when a chip is tapped, and
@@ -339,9 +359,14 @@ export function LetterTemplateEditorSheet({
               {PLACEHOLDER_TOKENS.map((token) => (
                 <Pressable
                   key={token}
-                  onPress={() => insertToken(token)}
+                  onPress={() => {
+                    insertToken(token);
+                    setHintToken(token);
+                  }}
+                  onLongPress={() => setHintToken(token)}
                   accessibilityRole="button"
                   accessibilityLabel={`Insert {{${token}}} placeholder`}
+                  accessibilityHint={PLACEHOLDER_HINTS[token]}
                   style={styles.chip}
                 >
                   <Text variant="caption" style={styles.chipText}>
@@ -350,6 +375,15 @@ export function LetterTemplateEditorSheet({
                 </Pressable>
               ))}
             </View>
+            {hintToken && PLACEHOLDER_HINTS[hintToken] ? (
+              <Text variant="caption" tone="muted" accessibilityRole="text">
+                {`{{${hintToken}}}: ${PLACEHOLDER_HINTS[hintToken]}`}
+              </Text>
+            ) : (
+              <Text variant="caption" tone="muted">
+                Tap a placeholder to insert it at the cursor; long-press to read what it fills in.
+              </Text>
+            )}
           </View>
 
           <ChoiceGroup

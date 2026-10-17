@@ -9,6 +9,7 @@ import {
   Banner,
   Button,
   Card,
+  DateField,
   Divider,
   ErrorState,
   Screen,
@@ -20,13 +21,27 @@ import {
   TextField,
 } from '../../../../components';
 import { useApiResource, useSession } from '../../../../hooks';
-import { fetchResidentLongitudinalAssignments } from '../../../../services/longitudinal';
-import { generateReleaseLetter, previewReleaseLetter } from '../../../../services/letters';
+import {
+  fetchFacultySupervisors,
+  fetchResidentLongitudinalAssignments,
+} from '../../../../services/longitudinal';
+import {
+  fetchDispatchedLetters,
+  generateReleaseLetter,
+  previewReleaseLetter,
+} from '../../../../services/letters';
 import { fetchResidentSchedule } from '../../../../services/rotations';
 import { fetchResidentList } from '../../../../services/residents';
 import { useInAppNotifications } from '../../../../services/inAppNotifications';
 import { colors, radius, spacing } from '../../../../theme';
-import { formatDateRange, formatTime, humanizeToken, todayCalendarDate } from '../../../../utils/format';
+import {
+  formatDate,
+  formatDateRange,
+  formatTime,
+  humanizeToken,
+  todayCalendarDate,
+} from '../../../../utils/format';
+import { isCalendarDate } from '../../../../utils/dateCalc';
 import { parseLetterBody, type LetterBlock } from '../../../../utils/letterPreview';
 import { residentFullName, residentSubtitle } from '../../../../utils/residents';
 import type {
@@ -100,9 +115,17 @@ export default function GenerateReleaseLetterScreen() {
 
   const [residentId, setResidentId] = useState<string | null>(null);
   const [assignmentKey, setAssignmentKey] = useState<string | null>(null);
+  // Dispatch details, distinct from the release window: the date the letter is
+  // sent and the people signing it. `{{TODAYS_DATE}}` reads from `issueDate`,
+  // never from the rotation's start date.
+  const [issueDate, setIssueDate] = useState(() => todayCalendarDate());
+  // The officials are drafts: `null` means "untouched, keep showing the
+  // auto-populated default", a string means the coordinator has typed their own.
+  const [programDirectorDraft, setProgramDirectorDraft] = useState<string | null>(null);
+  const [coordinatorDraft, setCoordinatorDraft] = useState<string | null>(null);
   const [deptHead, setDeptHead] = useState('');
   const [deptName, setDeptName] = useState('');
-  const [faculty, setFaculty] = useState('');
+  const [destinationFaculty, setDestinationFaculty] = useState('');
   const [busy, setBusy] = useState(false);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
 
@@ -117,6 +140,45 @@ export default function GenerateReleaseLetterScreen() {
     () => (residentIdNum ? fetchResidentSchedule(residentIdNum) : Promise.resolve([])),
     [residentIdNum],
   );
+
+  /**
+   * The two auto-population sources for the dispatch officials. There is no
+   * auth in this build, so "program config" is the faculty roster's Program
+   * Director and "the active logged-in user" is the coordinator on the
+   * programme's most recent dispatch — both are real records, and both stay
+   * editable fields rather than silent defaults.
+   */
+  const facultyRoster = useApiResource(
+    () => (programId ? fetchFacultySupervisors(programId, { includeInactive: true }) : Promise.resolve([])),
+    [programId],
+  );
+  const letterLog = useApiResource(
+    () => (programId ? fetchDispatchedLetters(programId) : Promise.resolve([])),
+    [programId],
+  );
+
+  /**
+   * The auto-populated defaults, derived during render: the faculty member
+   * holding the Program Director office, and the coordinator on the
+   * programme's most recent dispatch. The drafts above override them the moment
+   * anyone types, so a late-arriving roster can never overwrite an edit.
+   */
+  const defaultProgramDirector = useMemo(() => {
+    const director = (facultyRoster.data ?? []).find((person) =>
+      (person.administrative_role ?? '').trim().toLowerCase().startsWith('program director'),
+    );
+    return director ? `${director.first_name} ${director.last_name}`.trim() : '';
+  }, [facultyRoster.data]);
+
+  const defaultCoordinator = useMemo(() => {
+    const latest = (letterLog.data ?? []).find(
+      (letter) => (letter.coordinator_name ?? '').trim() !== '',
+    );
+    return latest?.coordinator_name ?? '';
+  }, [letterLog.data]);
+
+  const programDirector = programDirectorDraft ?? defaultProgramDirector;
+  const coordinator = coordinatorDraft ?? defaultCoordinator;
 
   const residentOptions = useMemo(
     () =>
@@ -165,9 +227,15 @@ export default function GenerateReleaseLetterScreen() {
     setDeptName(rotation?.department_name ?? '');
   }, [selection, schedule.data]);
 
+  const issueDateValue = issueDate.trim();
+  const issueDateInvalid = issueDateValue !== '' && !isCalendarDate(issueDateValue);
+
   /** The exact payload /preview and /generate will receive. */
   const payload = useMemo<GenerateLetterPayload | null>(() => {
     if (!residentIdNum || !selection || deptHead.trim() === '') return null;
+    // A dispatch date is required: it is what {{TODAYS_DATE}} prints.
+    if (!isCalendarDate(issueDate.trim())) return null;
+    const destination = destinationFaculty.trim();
     return {
       resident_id: residentIdNum,
       ...(selection.kind === 'clinic'
@@ -175,9 +243,25 @@ export default function GenerateReleaseLetterScreen() {
         : { rotation_assignment_id: selection.id }),
       recipient_dept_head: deptHead.trim(),
       hospital_department_name: deptName.trim() || undefined,
-      supervising_faculty: faculty.trim() || undefined,
+      // Sent under both spellings: `supervising_faculty` keeps the stored-list
+      // rows and PDF readable, `destination_supervising_faculty` is the field
+      // the destination-side token merges from.
+      supervising_faculty: destination || undefined,
+      destination_supervising_faculty: destination || undefined,
+      letter_issue_date: issueDate.trim(),
+      coordinator_name: coordinator.trim() || undefined,
+      program_director_name: programDirector.trim() || undefined,
     };
-  }, [residentIdNum, selection, deptHead, deptName, faculty]);
+  }, [
+    residentIdNum,
+    selection,
+    deptHead,
+    deptName,
+    destinationFaculty,
+    issueDate,
+    coordinator,
+    programDirector,
+  ]);
 
   const payloadKey = payload ? JSON.stringify(payload) : null;
 
@@ -320,40 +404,69 @@ export default function GenerateReleaseLetterScreen() {
             </View>
           </Card>
 
-          <SectionHeader title="2. Who receives it" />
+          <SectionHeader title="2. Who dispatches it" />
+          <Card>
+            <View style={styles.form}>
+              <DateField
+                label="Dispatch date (today's date)"
+                required
+                value={issueDate}
+                onChangeText={setIssueDate}
+                placeholder="YYYY-MM-DD"
+                error={issueDateInvalid ? 'Enter a date as YYYY-MM-DD.' : undefined}
+                hint="Fills {{TODAYS_DATE}} — the day the letter is sent. Independent of the release start date."
+              />
+              <TextField
+                label="Dispatching program director"
+                value={programDirector}
+                onChangeText={setProgramDirectorDraft}
+                placeholder="Dr. Program Director"
+                hint="Fills {{PROGRAM_DIRECTOR_NAME}}. Auto-filled from the programme's program director when one is on the roster."
+              />
+              <TextField
+                label="Dispatching coordinator"
+                value={coordinator}
+                onChangeText={setCoordinatorDraft}
+                placeholder="Programme coordinator"
+                hint="Fills {{COORDINATOR_NAME}}. Auto-filled from the programme's most recent dispatch — edit for whoever is sending today."
+              />
+            </View>
+          </Card>
+
+          <SectionHeader title="3. Who receives it" />
           <Card>
             <View style={styles.form}>
               <TextField
-                label="Receiving department head"
+                label="Destination department head"
                 required
                 value={deptHead}
                 onChangeText={setDeptHead}
                 placeholder="Dr. Head of Internal Medicine"
-                hint="The chair or head the letter is formally addressed to."
+                hint="The chair or head at the receiving hospital the letter is formally addressed to. Fills {{DEPT_HEAD_NAME}}."
               />
               <TextField
-                label="Department name"
+                label="Destination hospital department"
                 value={deptName}
                 onChangeText={setDeptName}
                 placeholder="Internal Medicine Inpatient Wards"
                 hint="Fills the {{HOSPITAL_DEPT}} token."
               />
               <TextField
-                label="Supervising faculty (optional)"
-                value={faculty}
-                onChangeText={setFaculty}
-                placeholder="Dr. Preceptor supervising the hospital rotation"
-                hint="Fills {{SUPERVISING_FACULTY}} when the template uses it."
+                label="Destination supervising faculty"
+                value={destinationFaculty}
+                onChangeText={setDestinationFaculty}
+                placeholder="Dr. Preceptor supervising the resident at the receiving hospital"
+                hint="Fills {{SUPERVISING_FACULTY}} — the supervisor assigned at the destination department, not the dispatching programme."
               />
             </View>
           </Card>
 
-          <SectionHeader title="3. Preview" />
+          <SectionHeader title="4. Preview" />
           <Card>
             {!payload ? (
               <Text variant="bodySmall" tone="muted">
-                Choose a resident, an assignment and a receiving department head — the merged letter
-                appears here before it is sent.
+                Choose a resident, an assignment, a dispatch date and a destination department
+                head — the merged letter appears here before it is sent.
               </Text>
             ) : null}
 
@@ -390,8 +503,20 @@ export default function GenerateReleaseLetterScreen() {
 
                 <MetaRow label="To" value={`${preview.recipient_dept_head ?? 'Department head'} — ${preview.hospital_department_name ?? 'Department'}`} />
                 <MetaRow
+                  label="Issued"
+                  value={formatDate(preview.letter_issue_date)}
+                />
+                <MetaRow
                   label="From"
                   value={`${preview.merge_values.PROGRAM_NAME ?? 'Residency programme'}${preview.merge_values.INSTITUTION_NAME ? ` · ${preview.merge_values.INSTITUTION_NAME}` : ''}`}
+                />
+                <MetaRow
+                  label="Program director"
+                  value={preview.program_director_name ?? 'Not recorded'}
+                />
+                <MetaRow
+                  label="Coordinator"
+                  value={preview.coordinator_name ?? 'Not recorded'}
                 />
                 <MetaRow
                   label="Resident"
@@ -407,7 +532,7 @@ export default function GenerateReleaseLetterScreen() {
                 />
                 <MetaRow
                   label="Supervising"
-                  value={preview.supervising_faculty ?? 'Not assigned'}
+                  value={preview.destination_supervising_faculty ?? preview.supervising_faculty ?? 'Not assigned'}
                 />
 
                 <Divider />

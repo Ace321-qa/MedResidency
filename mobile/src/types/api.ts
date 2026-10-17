@@ -412,6 +412,13 @@ export interface LetterTemplate {
   template_name: string;
   letter_subject: string;
   letter_body: string;
+  /**
+   * Optional programme-wide defaults the merge falls back on when a dispatch
+   * does not name its own officials / destination preceptor.
+   */
+  coordinator_name?: string | null;
+  program_director_name?: string | null;
+  destination_supervising_faculty?: string | null;
   is_active: number;
   created_at: IsoDateString | null;
   updated_at: IsoDateString | null;
@@ -477,6 +484,18 @@ export interface ReleaseLetter {
   hospital_department_name: string | null;
   /** Hospital preceptor supervising the resident during the rotation, when assigned. */
   supervising_faculty: string | null;
+  /**
+   * The preceptor supervising the resident at the *receiving* hospital
+   * department — the destination-side counterpart of the programme's own
+   * `supervisor_name`. Prefer this over `supervising_faculty`.
+   */
+  destination_supervising_faculty: string | null;
+  /** Name of the Program Coordinator who dispatched the letter. */
+  coordinator_name: string | null;
+  /** Name of the dispatching Program Director. */
+  program_director_name: string | null;
+  /** The day the letter was issued — today when generated, never the rotation start. */
+  letter_issue_date: CalendarDateString | null;
   generated_letter_body: string;
   sent_status: LetterSentStatus;
   sent_at: IsoDateString | null;
@@ -520,6 +539,14 @@ export interface GenerateLetterPayload {
   hospital_department_name?: string;
   /** Optional hospital preceptor supervising the resident on this rotation. */
   supervising_faculty?: string;
+  /** Preceptor supervising the resident at the receiving department (destination side). */
+  destination_supervising_faculty?: string;
+  /** Date of dispatch, `YYYY-MM-DD`. Defaults to today — not the release start date. */
+  letter_issue_date?: CalendarDateString;
+  /** Program Coordinator sending the letter; fills `{{COORDINATOR_NAME}}`. */
+  coordinator_name?: string;
+  /** Program Director of the dispatching programme; fills `{{PROGRAM_DIRECTOR_NAME}}`. */
+  program_director_name?: string;
   /** DRAFT | SENT | DELIVERED | REVOKED. Defaults to SENT (dispatched). */
   sent_status?: LetterSentStatus;
   /** Supersede a live letter already issued for the same assignment. */
@@ -542,6 +569,10 @@ export interface MergedLetterResult {
   recipient_dept_head: string | null;
   hospital_department_name: string | null;
   supervising_faculty: string | null;
+  destination_supervising_faculty: string | null;
+  coordinator_name: string | null;
+  program_director_name: string | null;
+  letter_issue_date: CalendarDateString | null;
   sent_status?: LetterSentStatus;
   letter_subject: string;
   generated_letter_body: string;
