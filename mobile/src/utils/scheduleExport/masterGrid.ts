@@ -133,8 +133,8 @@ function headerCell(text: string, colSpan?: number): ReportCell {
   return cell(text, { fill: HEADER_FILL, textColor: HEADER_TEXT, bold: true, align: 'center', colSpan });
 }
 
-function subHeaderCell(text: string): ReportCell {
-  return cell(text, { fill: SUBHEADER_FILL, textColor: SUBHEADER_TEXT, bold: false, align: 'center' });
+function subHeaderCell(text: string, options: Omit<ReportCell, 'text'> = {}): ReportCell {
+  return cell(text, { fill: SUBHEADER_FILL, textColor: SUBHEADER_TEXT, bold: false, align: 'center', ...options });
 }
 
 function rotationCell(text: string, rotation: CohortGridCell): ReportCell {
@@ -288,7 +288,14 @@ function buildWeeklyHeader(gridStart: string): ReportCell[][] {
   }
   for (let week = 1; week <= 52; week += 1) {
     const window = weekWindow(week, gridStart);
-    weekRow.push(subHeaderCell(window ? `${window.blockNumber}.${window.weekInBlock}` : String(week)));
+    // Tier 2 keeps the `1.1` sub-week code *and* the 7-day window itself, so the
+    // date range the on-screen matrix rotates down each column survives to every
+    // export. The newline lets narrow renderers (Excel wrap, Word, the rotated
+    // image cell) stack the two rather than clip one.
+    const label = window
+      ? `${window.blockNumber}.${window.weekInBlock}\n${formatShortRange(window.start, window.end)}`
+      : String(week);
+    weekRow.push(subHeaderCell(label, { vertical: true }));
   }
   return [blockRow, weekRow];
 }

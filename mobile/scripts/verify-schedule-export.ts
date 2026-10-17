@@ -149,6 +149,12 @@ const weeklyReport = buildMasterGridReport({
 
 assert('weekly report spans resident + pgy + 52 weeks', reportColumnCount(weeklyReport), 54);
 assert('weekly header row spans 13 four-column block banners', weeklyReport.rows[0].length, 15);
+// The weekly sub-column must carry the 7-day window the on-screen matrix rotates
+// down each column, not just the `1.1` code, or every export loses the dates.
+assert('weekly sub-column header carries its 7-day window', weeklyReport.rows[1][2].text, '1.1\n28/06–04/07');
+assertTrue('weekly date header is flagged for vertical rendering', weeklyReport.rows[1][2].vertical === true);
+assert('block sub-column header carries its block window', blockReport.rows[1][2].text, '28/06–25/07');
+assertTrue('block sub-column header is not forced vertical', !blockReport.rows[1][2].vertical);
 
 // Excel rejects `: \ / ? * [ ]` in a worksheet name, so a report built from the
 // display-form year (`2026/2027`) must not leave a slash in `sheetName` — that

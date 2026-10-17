@@ -25,6 +25,16 @@ export interface ReportCell {
   align?: ReportAlign;
   /** How many columns this cell spans (a merged "Block 3" heading spans four). */
   colSpan?: number;
+  /**
+   * A header cell whose text should run top-to-bottom rather than across.
+   *
+   * The weekly sub-columns carry a date window (`28/06–04/07`) far wider than
+   * their column, so a raster/HTML renderer paints the run rotated — the same
+   * orientation the on-screen matrix uses. Excel, PDF and Word ignore the flag:
+   * they size the column (or wrap the text) instead, which is the natural way
+   * each of those formats keeps the full string visible.
+   */
+  vertical?: boolean;
 }
 
 export interface ReportColumn {
@@ -195,7 +205,8 @@ export function reportToHtml(report: ReportModel): string {
         if (entry.bold || isHeader) styles.push('font-weight:700');
         if (entry.align) styles.push(`text-align:${entry.align}`);
         const spanAttr = entry.colSpan && entry.colSpan > 1 ? ` colspan="${entry.colSpan}"` : '';
-        return `<td class="${isHeader ? 'head' : ''}" style="${styles.join(';')}"${spanAttr}>${escapeHtml(
+        const classes = [isHeader ? 'head' : '', entry.vertical ? 'vertical' : ''].filter(Boolean).join(' ');
+        return `<td class="${classes}" style="${styles.join(';')}"${spanAttr}>${escapeHtml(
           entry.text,
         )}</td>`;
       })
@@ -230,8 +241,11 @@ export function reportToHtml(report: ReportModel): string {
   .meta dt { color: #64748b; }
   .meta dd { margin: 0; font-weight: 600; }
   table { border-collapse: collapse; width: 100%; }
-  td { border: 1px solid #cbd5e1; padding: 3px 5px; font-size: 9px; vertical-align: top; }
+  td { border: 1px solid #cbd5e1; padding: 3px 5px; font-size: 9px; vertical-align: top; white-space: pre-line; }
   td.head { background: #0f2c45; color: #ffffff; text-align: center; }
+  /* A rotated date header reads top-to-bottom so a full week window fits a
+     column too narrow to hold it horizontally, matching the on-screen matrix. */
+  td.vertical { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; text-transform: uppercase; }
   .legend { margin-top: 10px; font-size: 10px; color: #475569; display: flex; flex-wrap: wrap; gap: 12px; }
   .legend-item { display: inline-flex; align-items: center; gap: 4px; }
   .legend-item i { width: 10px; height: 10px; display: inline-block; border: 1px solid #cbd5e1; }

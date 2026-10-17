@@ -52,20 +52,27 @@ function alignmentFor(
 function buildCell(entry: ReportCell, isHeader: boolean): TableCell {
   const fill = isHeader ? HEADER_FILL : docxColor(entry.fill);
   const color = isHeader ? 'FFFFFF' : docxColor(entry.textColor);
+  // A cell may hold several lines (a stacked rotation badge, a weekly date
+  // header's sub-week code above its window). Word needs a `break` run between
+  // them — a raw `\n` inside one run would be swallowed — so split on newlines
+  // and break before every line after the first.
+  const runs = entry.text.split('\n').map(
+    (line, index) =>
+      new TextRun({
+        text: line,
+        bold: isHeader || entry.bold,
+        color,
+        size: isHeader ? 17 : 16,
+        ...(index > 0 ? { break: 1 } : {}),
+      }),
+  );
   const options: ITableCellOptions = {
     verticalAlign: VerticalAlign.CENTER,
     shading: fill ? { type: ShadingType.CLEAR, color: 'auto', fill } : undefined,
     children: [
       new Paragraph({
         alignment: alignmentFor(entry.align, isHeader ? AlignmentType.CENTER : AlignmentType.LEFT),
-        children: [
-          new TextRun({
-            text: entry.text,
-            bold: isHeader || entry.bold,
-            color,
-            size: isHeader ? 17 : 16,
-          }),
-        ],
+        children: runs.length > 0 ? runs : [new TextRun({ text: '' })],
       }),
     ],
     ...(entry.colSpan && entry.colSpan > 1 ? { columnSpan: entry.colSpan } : {}),
@@ -82,7 +89,11 @@ function buildTable(report: ReportModel): Table {
   const rows = report.rows.map(
     (row, index) =>
       new TableRow({
+        // `tableHeader` repeats the headings on every page; `cantSplit` stops a
+        // header row breaking across a page boundary. Together they keep the
+        // date headers glued to the columns they label, however long the grid.
         tableHeader: index < report.headerRows,
+        ...(index < report.headerRows ? { cantSplit: true } : {}),
         children: row.map((entry) => buildCell(entry, index < report.headerRows)),
       }),
   );

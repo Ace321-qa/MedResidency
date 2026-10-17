@@ -1,5 +1,5 @@
 import { forwardRef } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View, type TextStyle } from 'react-native';
 
 import { colors, spacing } from '../theme';
 import type { ReportCell, ReportModel } from '../utils/scheduleExport';
@@ -20,6 +20,34 @@ interface ScheduleReportViewProps {
 
 const DEFAULT_COLUMN_WIDTH = 120;
 
+/**
+ * Minimum height of a header row that carries a rotated date, e.g. the weekly
+ * sub-columns' `28/06–04/07`. The run is ~70px long plus the sub-week code
+ * above it; without the extra height the capture clips the date. Settling the
+ * row higher before `captureRef` runs is what keeps the whole range in the
+ * exported image.
+ */
+const VERTICAL_HEADER_MIN_HEIGHT = 110;
+
+/**
+ * Turn a date header into a top-to-bottom run inside a column too narrow to hold
+ * it horizontally. `writingMode` and `whiteSpace` are web-style names React
+ * Native's `TextStyle` does not declare, but react-native-web forwards them to
+ * the DOM verbatim — which is exactly where the raster capture needs them. The
+ * cast keeps TypeScript out of that arrangement, and mirrors the on-screen
+ * matrix's `verticalDateStyle`.
+ */
+const verticalTextStyle = {
+  writingMode: 'vertical-rl',
+  transform: [{ rotate: '180deg' }],
+  textTransform: 'uppercase',
+  whiteSpace: 'nowrap',
+  fontSize: 10,
+  fontWeight: '600',
+  paddingVertical: 6,
+  alignSelf: 'center',
+} as TextStyle;
+
 function columnWidths(report: ReportModel): number[] {
   return report.columns.map((column) => column.width ?? DEFAULT_COLUMN_WIDTH);
 }
@@ -37,6 +65,7 @@ function cellStyle(entry: ReportCell, width: number) {
     styles.cell,
     { width, backgroundColor: entry.fill ?? 'transparent' },
     entry.textColor ? { borderColor: colors.borderStrong } : null,
+    entry.vertical ? styles.verticalCell : null,
   ];
 }
 
@@ -46,6 +75,7 @@ function textStyle(entry: ReportCell, isHeader: boolean) {
     isHeader || entry.bold ? styles.bold : null,
     entry.textColor ? { color: entry.textColor } : null,
     entry.align ? { textAlign: entry.align } : null,
+    entry.vertical ? verticalTextStyle : null,
   ];
 }
 
@@ -77,9 +107,13 @@ export const ScheduleReportView = forwardRef<View, ScheduleReportViewProps>(func
       <View style={styles.table}>
         {report.rows.map((row, rowIndex) => {
           const isHeader = rowIndex < report.headerRows;
+          const hasVerticalDate = isHeader && row.some((entry) => entry.vertical);
           let columnCursor = 0;
           return (
-            <View key={`row-${rowIndex}`} style={styles.row}>
+            <View
+              key={`row-${rowIndex}`}
+              style={[styles.row, hasVerticalDate ? styles.verticalHeaderRow : null]}
+            >
               {row.map((entry, cellIndex) => {
                 const span = entry.colSpan && entry.colSpan > 1 ? entry.colSpan : 1;
                 const width = spannedWidth(widths, columnCursor, span);
@@ -159,6 +193,14 @@ const styles = StyleSheet.create({
   },
   row: {
     flexDirection: 'row',
+  },
+  verticalHeaderRow: {
+    minHeight: VERTICAL_HEADER_MIN_HEIGHT,
+    alignItems: 'stretch',
+  },
+  verticalCell: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   cell: {
     borderRightWidth: 1,

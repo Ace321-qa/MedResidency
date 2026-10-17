@@ -201,6 +201,22 @@ async function buildWorkbook(report) {
   // columns and would otherwise inflate whichever column it happens to start in.
   const measuredChars = new Array(span).fill(0);
 
+  // A header cell can stack two lines (a weekly sub-week code above its
+  // `28/06–04/07` window). Size every header row to the tallest heading so the
+  // wrapped date is never clipped to one line or left as `###`, while a plain
+  // one-line heading still keeps the compact 30px band.
+  let headerLineCount = 1;
+  for (let index = 0; index < headerRows; index += 1) {
+    const cells = Array.isArray(rows[index]) ? rows[index] : [];
+    for (const rawCell of cells) {
+      const cell = normalizeCell(rawCell);
+      if (cell.colSpan === 1) {
+        headerLineCount = Math.max(headerLineCount, cellText(cell.text).split('\n').length);
+      }
+    }
+  }
+  const headerHeight = Math.max(30, headerLineCount * 14 + 8);
+
   rows.forEach((rawRow, rowIndex) => {
     const cells = Array.isArray(rawRow) ? rawRow : [];
     const excelRow = sheet.getRow(currentRow);
@@ -255,7 +271,7 @@ async function buildWorkbook(report) {
     }
 
     const perLine = String(cells.map((c) => normalizeCell(c).text).join('')).length;
-    excelRow.height = isHeader ? 30 : perLine > 120 ? 40 : 20;
+    excelRow.height = isHeader ? headerHeight : perLine > 120 ? 40 : 20;
     currentRow += 1;
   });
 
