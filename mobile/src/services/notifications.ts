@@ -12,9 +12,9 @@ import type {
  * Persisted notifications.
  *
  * Rows are written by the backend when a system event happens (a duty-hour
- * breach, a leave decision, a rotation assignment) and read back here. Endpoints
- * are resident-scoped because the app's identity today is the chosen resident;
- * the server resolves that to its internal user.
+ * breach, a leave decision, a rotation assignment) and read back here. The
+ * owner is identified by `resident_id` (the app's only identity today); the
+ * server resolves that to its internal `users.id`.
  *
  * There is no websocket or push channel. Screens poll these endpoints on a
  * short interval so a decision made elsewhere shows up without a manual pull.
@@ -27,13 +27,14 @@ export interface NotificationQuery {
   offset?: number;
 }
 
-/** `GET /notifications/resident/:resident_id`. */
+/** `GET /notifications?resident_id=` — the resident's rows, newest first. */
 export async function fetchNotifications(
   residentId: number,
   query: NotificationQuery = {},
 ): Promise<Notification[]> {
   const response = await request<NotificationPage>(
-    `/notifications/resident/${residentId}${queryString({
+    `/notifications${queryString({
+      resident_id: residentId,
       type: query.type,
       unread: query.unreadOnly ? '1' : undefined,
       limit: query.limit,
@@ -43,10 +44,10 @@ export async function fetchNotifications(
   return response.data ?? [];
 }
 
-/** `GET /notifications/resident/:resident_id/unread-count` — the bell badge. */
+/** `GET /notifications/unread-count?resident_id=` — the bell badge. */
 export async function fetchUnreadNotificationCount(residentId: number): Promise<number> {
   const response = await request<NotificationUnreadCount>(
-    `/notifications/resident/${residentId}/unread-count`,
+    `/notifications/unread-count${queryString({ resident_id: residentId })}`,
   );
   return response.unread ?? 0;
 }
@@ -63,10 +64,10 @@ export async function markNotificationRead(
   return response.data;
 }
 
-/** `PATCH /notifications/resident/:resident_id/read-all`. Returns how many changed. */
+/** `PATCH /notifications/read-all?resident_id=`. Returns how many changed. */
 export async function markAllNotificationsRead(residentId: number): Promise<number> {
   const response = await request<NotificationReadAllResult>(
-    `/notifications/resident/${residentId}/read-all`,
+    `/notifications/read-all${queryString({ resident_id: residentId })}`,
     { method: 'PATCH' },
   );
   return response.changed ?? 0;

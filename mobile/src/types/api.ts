@@ -83,6 +83,49 @@ export interface ResidentListItem {
   mobile?: string | null;
 }
 
+/** `GET /programs` and the create/update responses. */
+export interface Program {
+  id: number;
+  program_code: string;
+  program_name: string;
+  specialty_name: string | null;
+  institution_name: string | null;
+  /** 1 = offered on the sign-in picker, 0 = deactivated. */
+  is_active: number;
+  /** Actively enrolled residents (`ACTIVE_FULL_TIME` / `ACTIVE_PART_TIME`). */
+  resident_count: number;
+  created_at: IsoDateString;
+  updated_at: IsoDateString;
+}
+
+/** Body of `POST /programs`. `name` and `code` are the only required fields. */
+export interface CreateProgramPayload {
+  program_name: string;
+  program_code: string;
+  specialty_name?: string | null;
+  institution_name?: string | null;
+  country_code?: string | null;
+  is_active?: number;
+}
+
+/** Body of `PUT /programs/:id` — every field optional, only what changed. */
+export interface UpdateProgramPayload {
+  program_name?: string;
+  program_code?: string;
+  specialty_name?: string | null;
+  institution_name?: string | null;
+  is_active?: number;
+}
+
+/** `DELETE /programs/:id` — reports whether the row was removed or deactivated. */
+export interface DeleteProgramResult {
+  id: number;
+  deleted: boolean;
+  deactivated: boolean;
+  resident_count: number;
+  program: Program | null;
+}
+
 /** `GET /rotations/blocks?program_id=`. */
 export interface RotationBlock {
   block_id: number;

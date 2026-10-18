@@ -39,6 +39,7 @@ export const FACULTY_APPOINTMENT_OPTIONS: FacultySelectOption[] = [
   { value: 'Core Faculty', label: 'Core Faculty' },
   { value: 'Teaching Faculty', label: 'Teaching Faculty' },
   { value: 'Adjunct / Visiting Faculty', label: 'Adjunct / Visiting Faculty' },
+  { value: 'Pending', label: 'Pending' },
 ];
 
 /**
@@ -55,6 +56,7 @@ export const ADMINISTRATIVE_ROLE_OPTIONS: FacultySelectOption[] = [
   { value: 'Associate Program Director (APD)', label: 'Associate Program Director (APD)' },
   { value: 'Continuity Clinic Lead', label: 'Continuity Clinic Lead' },
   { value: 'Rotation Director', label: 'Rotation Director' },
+  { value: 'Academic Mentor', label: 'Academic Mentor' },
 ];
 
 export const CLINICAL_TITLE_HINT = 'Professional rank within the health system.';

@@ -50,6 +50,12 @@ app.use('/api/v1/attendance', attendanceRoutes);
 // API Routes
 app.use('/api/v1/residents', residentRoutes);
 
+// Programme registry — create, rename, deactivate and delete residency
+// programmes. Read by the sign-in picker and the coordinator settings screen.
+const programRoutes = require('./routes/programRoutes');
+
+app.use('/api/v1/programs', programRoutes);
+
 // Import the leave request routes
 const leaveRoutes = require('./routes/leaveRoutes');
 

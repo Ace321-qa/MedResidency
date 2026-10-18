@@ -137,12 +137,24 @@ async function addLetterIssueDateColumn(table) {
   try {
     await db.query(`ALTER TABLE ${table} ADD COLUMN letter_issue_date DATE NULL DEFAULT (CURDATE());`);
   } catch (error) {
-    // Another boot added it first; nothing left to do.
-    if (error.code === 'ER_DUP_FIELD') return;
-    // 1064 (syntax) / 1067 (invalid default): this server cannot take the
-    // expression default, so fall back to nullable + explicit backfill.
-    if (error.errno !== 1064 && error.errno !== 1067) throw error;
-    await db.query(`ALTER TABLE ${table} ADD COLUMN letter_issue_date DATE NULL DEFAULT NULL;`);
+    // Another boot added it first. MySQL/MariaDB report a duplicate column as
+    // errno 1060 / SQLSTATE 42S21 with the code `ER_DUP_FIELDNAME` (older
+    // wording: `ER_DUP_FIELD`), so all three spellings are accepted — and the
+    // run falls through to the idempotent backfill below rather than aborting
+    // the whole migration on a second boot.
+    const duplicate =
+      error.errno === 1060 ||
+      error.code === 'ER_DUP_FIELDNAME' ||
+      error.code === 'ER_DUP_FIELD';
+    if (duplicate) {
+      // Column already present — nothing to add.
+    } else if (error.errno === 1064 || error.errno === 1067) {
+      // 1064 (syntax) / 1067 (invalid default): this server cannot take the
+      // expression default, so fall back to nullable + explicit backfill.
+      await db.query(`ALTER TABLE ${table} ADD COLUMN letter_issue_date DATE NULL DEFAULT NULL;`);
+    } else {
+      throw error;
+    }
   }
 
   // Existing letters were issued the day they were created; anything else

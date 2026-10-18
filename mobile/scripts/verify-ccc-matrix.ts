@@ -400,15 +400,15 @@ assert(
 );
 
 console.log('\n-- the faculty appointments are the accreditation categories --');
-assert('there are three appointments', FACULTY_APPOINTMENT_OPTIONS.length, 3);
+assert('there are four appointments', FACULTY_APPOINTMENT_OPTIONS.length, 4);
 assert(
   'they are the agreed categories',
   FACULTY_APPOINTMENT_OPTIONS.map((option) => option.value),
-  ['Core Faculty', 'Teaching Faculty', 'Adjunct / Visiting Faculty'],
+  ['Core Faculty', 'Teaching Faculty', 'Adjunct / Visiting Faculty', 'Pending'],
 );
 
 console.log('\n-- the administrative roles are optional programme offices --');
-assert('there are five roles', ADMINISTRATIVE_ROLE_OPTIONS.length, 5);
+assert('there are six roles', ADMINISTRATIVE_ROLE_OPTIONS.length, 6);
 assert('the first option is the affirmative "None"', ADMINISTRATIVE_ROLE_OPTIONS[0].value, 'None');
 assert('and "None" is not treated as a real office', hasAdministrativeRole('None'), false);
 assert('an empty role is not a real office', hasAdministrativeRole(''), false);

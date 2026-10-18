@@ -1,15 +1,31 @@
 const db = require('../config/db');
+const LongitudinalService = require('./longitudinalService');
 
+/**
+ * Supervisor allocation engine.
+ *
+ * Reallocates supervising faculty to residents over a rotation period (three
+ * months by default, or any shorter interval). Two guarantees the caller relies
+ * on:
+ *
+ *  - Atomicity: every reassignment in one run commits together. If any update
+ *    fails the whole run rolls back, so a rotation never leaves half the slots
+ *    on the old supervisor and half on the new one.
+ *  - Auditability: each change writes a row to `primary_care_rotation_audit`
+ *    through `LongitudinalService.recordRotationAudit`, which is best-effort and
+ *    will not fail the rotation if the audit write fails.
+ */
 class SupervisorService {
   /**
-   * Randomize or rotate supervising faculty to residents within a 3-month cycle
-   * (or shorter customized periods).
+   * Randomize or rotate supervising faculty against the existing clinic
+   * supervisor assignments in `longitudinal_clinic_supervisor_assignments`.
+   *
    * @param {object} options
    * @param {number} options.programId
-   * @param {number} [options.clinicTypeId]
-   * @param {number} [options.rotationMonths=3]
-   * @param {boolean} [options.randomize=true]
-   * @param {string} [options.rationale]
+   * @param {number} [options.clinicTypeId] Limit to one clinic type
+   * @param {number} [options.rotationMonths=3] Length of the new rotation
+   * @param {boolean} [options.randomize=true] Shuffle, or rotate in faculty order
+   * @param {string} [options.rationale] Free-text reason stored on the audit row
    */
   static async randomizeSupervisors(options = {}) {
     const { programId, clinicTypeId, rotationMonths = 3, randomize = true, rationale = null } = options;
@@ -19,59 +35,90 @@ class SupervisorService {
       throw error;
     }
 
-    // Fetch current supervisor assignments
-    let query = `
-      SELECT lsa.*
-      FROM longitudinal_clinic_supervisor_assignments lsa
-      WHERE lsa.program_id = ? AND lsa.is_active = 1
+    const months = Number(rotationMonths) > 0 ? Number(rotationMonths) : 3;
+    const reason = rationale || (randomize ? 'Randomized rotation assignment' : 'Manual rotation');
+
+    let assignmentQuery = `
+      SELECT lsa.*, CONCAT(fs.first_name, ' ', fs.last_name) AS previous_faculty_name
+        FROM longitudinal_clinic_supervisor_assignments lsa
+        LEFT JOIN faculty_supervisors fs ON fs.id = lsa.faculty_supervisor_id
+       WHERE lsa.program_id = ? AND lsa.is_active = 1
     `;
     const params = [programId];
     if (clinicTypeId) {
-      query += ' AND lsa.clinic_type_id = ?';
+      assignmentQuery += ' AND lsa.clinic_type_id = ?';
       params.push(clinicTypeId);
     }
-    const [assignments] = await db.query(query, params);
+    const [assignments] = await db.query(assignmentQuery, params);
 
     if (assignments.length === 0) {
-      return { updated: 0, assignments: [] };
+      return { updated: 0, assignments: [], reason: 'no_assignments' };
     }
 
-    // Fetch available faculty
     const [faculty] = await db.query(
-      'SELECT id, first_name, last_name, title FROM faculty_supervisors WHERE is_active = 1 AND program_id = ?',
-      [programId]
+      `SELECT id, first_name, last_name, title
+         FROM faculty_supervisors
+        WHERE is_active = 1 AND program_id = ?
+        ORDER BY id ASC`,
+      [programId],
     );
 
     if (faculty.length === 0) {
-      return { updated: 0, assignments: [] };
+      return { updated: 0, assignments: [], reason: 'no_active_faculty' };
     }
 
-    // Simple randomization - shuffle faculty
-    const shuffled = [...faculty].sort(() => Math.random() - 0.5);
+    const pool = randomize ? [...faculty].sort(() => Math.random() - 0.5) : [...faculty];
 
+    const connection = await db.getConnection();
     const updates = [];
-    let idx = 0;
-    for (let i = 0; i < assignments.length; i++) {
-      const assignment = assignments[i];
-      const chosen = shuffled[idx % shuffled.length];
-      idx++;
+    let auditEntries = [];
 
-      const newEndDate = new Date(assignment.start_date);
-      newEndDate.setMonth(newEndDate.getMonth() + Number(rotationMonths || 3));
+    try {
+      await connection.beginTransaction();
 
-      await db.query(
-        `UPDATE longitudinal_clinic_supervisor_assignments
-         SET faculty_supervisor_id = ?, end_date = ?, rotation_period_months = ?, notes = ?
-         WHERE id = ?`,
-        [
-          chosen.id,
-          newEndDate.toISOString().split('T')[0],
-          Number(rotationMonths || 3),
-          rationale || (randomize ? 'Randomized rotation assignment' : 'Manual rotation'),
-          assignment.id,
-        ]
-      );
-      updates.push({ id: assignment.id, newFacultyId: chosen.id });
+      for (let index = 0; index < assignments.length; index += 1) {
+        const assignment = assignments[index];
+        const chosen = pool[index % pool.length];
+
+        // Advance the end date from the existing start when present; otherwise
+        // from today, so a null start never becomes the epoch.
+        const base = assignment.start_date ? new Date(assignment.start_date) : new Date();
+        const newEndDate = new Date(base);
+        newEndDate.setMonth(newEndDate.getMonth() + months);
+        const endDate = newEndDate.toISOString().split('T')[0];
+
+        await connection.query(
+          `UPDATE longitudinal_clinic_supervisor_assignments
+              SET faculty_supervisor_id = ?, end_date = ?, rotation_period_months = ?, notes = ?
+            WHERE id = ?`,
+          [chosen.id, endDate, months, reason, assignment.id],
+        );
+
+        auditEntries.push({
+          programId,
+          clinicSlotId: assignment.longitudinal_clinic_slot_id || null,
+          previousFacultyName: assignment.previous_faculty_name || null,
+          newFacultyId: chosen.id,
+          newFacultyName: `Dr. ${chosen.first_name} ${chosen.last_name}`,
+          rationale: reason,
+          rotationMonths: months,
+        });
+
+        updates.push({ id: assignment.id, newFacultyId: chosen.id });
+      }
+
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    // Best-effort, outside the transaction so a missing audit table can never
+    // undo a committed rotation.
+    for (const entry of auditEntries) {
+      await LongitudinalService.recordRotationAudit(entry);
     }
 
     return { updated: updates.length, assignments: updates };
@@ -98,23 +145,40 @@ class SupervisorService {
       throw error;
     }
 
-    await db.query('DELETE FROM primary_care_backup_faculty WHERE daily_header_id = ? AND day_of_week = ?', [
-      dailyHeaderId,
-      dayOfWeek,
-    ]);
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
 
-    const inserts = [];
-    for (let i = 0; i < facultyList.length; i++) {
-      const f = facultyList[i];
-      inserts.push([dailyHeaderId, dayOfWeek, f.faculty_name || null, f.faculty_id || null, i + 1]);
-    }
-    if (inserts.length > 0) {
-      await db.query(
-        'INSERT INTO primary_care_backup_faculty (daily_header_id, day_of_week, faculty_name, faculty_id, priority_order) VALUES ?',
-        [inserts]
+      await connection.query(
+        'DELETE FROM primary_care_backup_faculty WHERE daily_header_id = ? AND day_of_week = ?',
+        [dailyHeaderId, dayOfWeek],
       );
+
+      if (facultyList.length > 0) {
+        const inserts = facultyList.map((entry, i) => {
+          const name = typeof entry === 'string' ? entry : entry.name;
+          const facultyId =
+            typeof entry === 'string' ? null : entry.faculty_id ?? entry.id ?? null;
+          return [dailyHeaderId, dayOfWeek, name || null, facultyId, i + 1];
+        });
+
+        await connection.query(
+          `INSERT INTO primary_care_backup_faculty
+             (daily_header_id, day_of_week, faculty_name, faculty_id, priority_order)
+           VALUES ?`,
+          [inserts],
+        );
+      }
+
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
     }
-    return this.getBackupFaculty(dayOfWeek, { dailyHeaderId });
+
+    return SupervisorService.getBackupFaculty(dayOfWeek, { dailyHeaderId });
   }
 }
 

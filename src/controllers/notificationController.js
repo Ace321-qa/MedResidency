@@ -8,6 +8,23 @@ const NotificationService = require('../services/notificationService');
  * internal `users.id`. When authentication lands, a `user`-scoped alias can be
  * added without changing the service layer.
  */
+/**
+ * Resolve the notification owner from the request.
+ *
+ * The resident-scoped routes carry `:resident_id` in the path; the auth-style
+ * root routes carry `resident_id` or `user_id` in the query (GET) or body
+ * (PATCH). The service accepts either because it maps a resident to the
+ * internal `users.id`.
+ */
+function resolveOwner(req) {
+  const residentId = req.params?.resident_id ?? req.query?.resident_id ?? req.body?.resident_id;
+  const userId = req.query?.user_id ?? req.body?.user_id;
+  return {
+    resident_id: residentId ? Number(residentId) : null,
+    user_id: userId ? Number(userId) : null,
+  };
+}
+
 class NotificationController {
   /**
    * GET /api/v1/notifications/resident/:resident_id
@@ -214,6 +231,124 @@ class NotificationController {
       return res.status(500).json({
         success: false,
         error: 'Failed to create notification',
+        details: error.message,
+      });
+    }
+  }
+
+  /**
+   * GET /api/v1/notifications?resident_id=1 (or ?user_id=1)
+   * Query: type, unread (truthy), limit, offset
+   *
+   * Auth-style alias of `listForResident`: identity travels in the query rather
+   * than the path so it matches the endpoints documented for the client.
+   */
+  static async list(req, res) {
+    try {
+      const owner = resolveOwner(req);
+      if (!owner.resident_id && !owner.user_id) {
+        return res.status(400).json({
+          success: false,
+          error: 'Pass resident_id or user_id to identify the notification owner.',
+        });
+      }
+
+      const { type, limit, offset } = req.query;
+      const unreadOnly = ['1', 'true', 'yes'].includes(String(req.query.unread).toLowerCase());
+
+      if (type && !NotificationService.getNotificationTypes().includes(type)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid type. Must be one of: ${NotificationService.getNotificationTypes().join(', ')}`,
+        });
+      }
+
+      const result = await NotificationService.list({
+        resident_id: owner.resident_id,
+        user_id: owner.user_id,
+        type,
+        unread_only: unreadOnly,
+        limit,
+        offset,
+      });
+
+      if (!result.user_id) {
+        return res.status(404).json({
+          success: false,
+          error: 'Recipient not found. Ensure resident_id exists.',
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        count: result.data.length,
+        total: result.total,
+        unread: result.unread,
+        limit: result.limit,
+        offset: result.offset,
+        data: result.data,
+      });
+    } catch (error) {
+      console.error('Error in NotificationController.list:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to list notifications',
+        details: error.message,
+      });
+    }
+  }
+
+  /**
+   * GET /api/v1/notifications/unread-count?resident_id=1 (or ?user_id=1)
+   * The badge count. Never 404s on an unknown recipient — it reports zero.
+   */
+  static async unreadCountByOwner(req, res) {
+    try {
+      const owner = resolveOwner(req);
+      if (!owner.resident_id && !owner.user_id) {
+        return res.status(400).json({
+          success: false,
+          error: 'Pass resident_id or user_id to identify the notification owner.',
+        });
+      }
+
+      const unread = await NotificationService.getUnreadCount(owner);
+      return res.status(200).json({ success: true, unread });
+    } catch (error) {
+      console.error('Error in NotificationController.unreadCountByOwner:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to count unread notifications',
+        details: error.message,
+      });
+    }
+  }
+
+  /**
+   * PATCH /api/v1/notifications/read-all?resident_id=1 (or body { user_id })
+   */
+  static async markAllReadByOwner(req, res) {
+    try {
+      const owner = resolveOwner(req);
+      if (!owner.resident_id && !owner.user_id) {
+        return res.status(400).json({
+          success: false,
+          error: 'Pass resident_id or user_id to identify the notification owner.',
+        });
+      }
+
+      const result = await NotificationService.markAllRead(owner);
+      return res.status(200).json({
+        success: true,
+        message: `${result.changed} notification(s) marked as read`,
+        changed: result.changed,
+        unread: result.unread,
+      });
+    } catch (error) {
+      console.error('Error in NotificationController.markAllReadByOwner:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update notifications',
         details: error.message,
       });
     }

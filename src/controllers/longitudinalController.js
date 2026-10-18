@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const LongitudinalService = require('../services/longitudinalService');
+const SupervisorService = require('../services/supervisorService');
 const { generateFacultyTemplate, parseFacultyFile } = require('../utils/excel/faculty');
 
 class LongitudinalController {
@@ -191,6 +192,35 @@ class LongitudinalController {
       await LongitudinalService.rotateSupervisor(assignment_id, faculty_supervisor_id, start_date, end_date, notes);
       return res.status(200).json({ success: true, message: 'Supervisor rotated successfully' });
     } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * POST /api/v1/longitudinal/supervisor-assignments/randomize
+   * Body: { program_id, clinic_type_id?, rotation_months?, randomize?, rationale? }
+   *
+   * Reallocates supervising faculty across the clinic supervisor assignments in
+   * one atomic, audited rotation run.
+   */
+  static async randomizeSupervisorAllocations(req, res) {
+    try {
+      const { program_id, clinic_type_id, rotation_months, randomize, rationale } = req.body ?? {};
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      const data = await SupervisorService.randomizeSupervisors({
+        programId: program_id,
+        clinicTypeId: clinic_type_id,
+        rotationMonths: rotation_months,
+        randomize: randomize === undefined ? true : Boolean(randomize),
+        rationale,
+      });
+      return res.status(200).json({ success: true, ...data });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
       return res.status(500).json({ success: false, error: error.message });
     }
   }

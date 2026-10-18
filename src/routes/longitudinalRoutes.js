@@ -18,6 +18,7 @@ router.delete('/faculty-supervisors/:id', LongitudinalController.deleteFacultySu
 router.get('/clinic-slots', LongitudinalController.getClinicSlots);
 router.get('/supervisor-assignments', LongitudinalController.getSupervisorAssignments);
 router.post('/supervisor-assignments', LongitudinalController.createSupervisorAssignment);
+router.post('/supervisor-assignments/randomize', LongitudinalController.randomizeSupervisorAllocations);
 router.patch('/supervisor-assignments/:assignment_id/rotate', LongitudinalController.rotateSupervisor);
 
 router.get('/cycle-schedule', LongitudinalController.getCycleSchedule);

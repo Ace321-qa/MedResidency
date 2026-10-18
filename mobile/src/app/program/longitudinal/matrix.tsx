@@ -549,14 +549,23 @@ export default function LongitudinalMatrixScreen() {
   );
 
   const facultyOptions = useMemo<SelectOption<string>[]>(() => {
-    const options: SelectOption<string>[] = [{ value: NONE_FACULTY, label: '— None —' }];
-    for (const faculty of facultyResource.data ?? []) {
-      const value = withDoctorTitle(faculty.display_name ?? `${faculty.first_name} ${faculty.last_name}`);
-      if (!value) continue;
-      const badges = facultyBadges(faculty).map((badge) => badge.label).join(' • ');
-      options.push({ value, label: badges ? `${value} • ${badges}` : value });
-    }
-    return options;
+    // Non-hierarchical: preceptors are listed alphabetically by name, never by
+    // rank or appointment, so the dropdown never implies a supervision order.
+    const options = (facultyResource.data ?? [])
+      .map((faculty) => {
+        const value = withDoctorTitle(
+          faculty.display_name ?? `${faculty.first_name} ${faculty.last_name}`,
+        );
+        if (!value) return null;
+        const badges = facultyBadges(faculty)
+          .map((badge) => badge.label)
+          .join(' • ');
+        return { value, label: badges ? `${value} • ${badges}` : value };
+      })
+      .filter((option): option is SelectOption<string> => option !== null)
+      .sort((a, b) => a.value.localeCompare(b.value));
+
+    return [{ value: NONE_FACULTY, label: '— None —' }, ...options];
   }, [facultyResource.data]);
 
   const facultyIdByName = useMemo(() => {
