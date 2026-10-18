@@ -2,6 +2,7 @@ const db = require('../config/db');
 const LongitudinalService = require('../services/longitudinalService');
 const SupervisorService = require('../services/supervisorService');
 const { generateFacultyTemplate, parseFacultyFile } = require('../utils/excel/faculty');
+const { generateCccMatrixTemplate, parseCccMatrixFile, buildDynamicTemplate } = require('../utils/excel/ccc');
 
 class LongitudinalController {
   static async getClinicTypes(req, res) {
@@ -652,6 +653,227 @@ const added = [];
       return res.status(500).json({ success: false, error: error.message });
     }
   }
+
+  static async downloadMatrixTemplate(req, res) {
+    try {
+      const options = {
+        viewMode: req.query.viewMode,
+        clinicCount: req.query.clinicCount,
+        startDate: req.query.startDate,
+        endDate: req.query.endDate,
+        cycle: req.query.cycle,
+        academicYear: req.query.academicYear,
+        duration: req.query.duration,
+      };
+      const buffer = req.query.viewMode || req.query.clinicCount ? buildDynamicTemplate(options) : generateCccMatrixTemplate();
+      res.setHeader('Content-Disposition', 'attachment; filename="Continuity_of_Care_Clinics_Template.xlsx"');
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      return res.send(buffer);
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async importMatrix(req, res) {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file was uploaded.' });
+    }
+
+    const programId = Number((req.body ?? {}).program_id);
+    if (!Number.isInteger(programId) || programId <= 0) {
+      return res.status(400).json({ success: false, error: 'program_id is required to import the matrix.' });
+    }
+
+    let parsed;
+    try {
+      parsed = parseCccMatrixFile(req.file.buffer);
+    } catch (error) {
+      return res.status(400).json({ success: false, issues: [{ message: error.message }] });
+    }
+
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const issues = [...(parsed.errors || [])];
+      const residentMap = new Map();
+      const facultyMap = new Map();
+
+      const [residents] = await conn.query(
+        `SELECT r.id, r.first_name, r.middle_initial, r.last_name, re.year_in_program
+           FROM residents r
+           LEFT JOIN residency_enrollments re ON re.resident_id = r.id AND re.program_id = ? AND re.is_active = 1
+          WHERE EXISTS (SELECT 1 FROM residency_enrollments re2 WHERE re2.resident_id = r.id AND re2.program_id = ? AND re2.resident_status IN ('ACTIVE_FULL_TIME','ACTIVE_PART_TIME','STARTED_OFF_CYCLE','LEAVE_OF_ABSENCE'))
+          ORDER BY r.id`,
+        [programId, programId],
+      );
+      for (const r of residents) {
+        const full = LongitudinalService.formatResidentName ? LongitudinalService.formatResidentName(`${r.first_name} ${r.middle_initial || ''} ${r.last_name}`) : `${r.first_name} ${r.last_name}`.trim();
+        const norm = full.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (norm) {
+          if (!residentMap.has(norm)) residentMap.set(norm, { id: r.id, name: full, pgy: r.year_in_program });
+        }
+      }
+
+      const [faculty] = await conn.query(
+        'SELECT id, first_name, last_name, is_active FROM faculty_supervisors WHERE program_id = ?',
+        [programId],
+      );
+      for (const f of faculty) {
+        const full = LongitudinalService.formatFacultyName ? LongitudinalService.formatFacultyName(`${f.first_name} ${f.last_name}`) : `Dr. ${f.first_name} ${f.last_name}`.trim();
+        const norm = full.toLowerCase().replace(/^dr\.\s*/, '').trim();
+        if (norm) {
+          if (!facultyMap.has(norm)) facultyMap.set(norm, { id: f.id, name: full });
+        }
+      }
+
+      const clean = [];
+      for (const row of parsed.rows) {
+        let ok = true;
+        const r1Key = row.resident1Name.toLowerCase().replace(/^dr\.\s*/, '').trim();
+        const r1 = residentMap.get(r1Key);
+        if (!r1) {
+          issues.push({ row: row.row, field: 'Resident 1 Name', message: `Resident '${row.resident1Name}' not found in active program roster` });
+          ok = false;
+        }
+        let r2 = null;
+        if (row.resident2Name) {
+          const r2Key = row.resident2Name.toLowerCase().replace(/^dr\.\s*/, '').trim();
+          r2 = residentMap.get(r2Key);
+          if (!r2) {
+            issues.push({ row: row.row, field: 'Resident 2 Name', message: `Resident '${row.resident2Name}' not found in active program roster` });
+            ok = false;
+          }
+        }
+        const sfKey = row.supervisingFaculty.toLowerCase().replace(/^dr\.\s*/, '').trim();
+        const sf = facultyMap.get(sfKey);
+        if (!sf) {
+          issues.push({ row: row.row, field: 'Supervising Faculty', message: `Faculty '${row.supervisingFaculty}' not found in faculty list` });
+          ok = false;
+        }
+        let fic = null;
+        if (row.facultyInCharge) {
+          const ficKey = row.facultyInCharge.toLowerCase().replace(/^dr\.\s*/, '').trim();
+          fic = facultyMap.get(ficKey) || { id: null, name: row.facultyInCharge };
+        }
+        if (!ok) continue;
+        clean.push({ ...row, r1, r2, sf, fic });
+      }
+
+      // dedup day+clinic
+      const seen = new Map();
+      for (const c of clean) {
+        const day = c.dayTime;
+        const clinic = c.clinicColumn;
+        const key = `${day}||${clinic}`.toLowerCase();
+        if (seen.has(key)) {
+          issues.push({ row: c.row, message: `Duplicate entry for Day/Time and Clinic Column: ${day} / ${clinic}` });
+          continue;
+        }
+        seen.set(key, c.row);
+      }
+
+      if (issues.length > 0) {
+        await conn.rollback();
+        return res.status(400).json({ success: false, issues });
+      }
+
+      // resolve cycle
+      let cycleId = null;
+      const meta = parsed.metadata || {};
+      if (req.body.cycle_id) {
+        cycleId = Number(req.body.cycle_id);
+      } else if (meta.cycleNumber || meta.startDate) {
+        const cn = meta.cycleNumber ? (meta.cycleNumber.toLowerCase().startsWith('cycle') ? meta.cycleNumber : `Cycle ${meta.cycleNumber}`) : null;
+        const sd = meta.startDate || null;
+        if (cn && sd) {
+          const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND cycle_number = ? AND start_date = ?', [programId, cn, sd]);
+          if (rows[0]) cycleId = rows[0].id;
+        } else if (cn) {
+          const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND cycle_number = ? ORDER BY id DESC LIMIT 1', [programId, cn]);
+          if (rows[0]) cycleId = rows[0].id;
+        }
+      }
+      if (!cycleId) {
+        const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+        if (rows[0]) cycleId = rows[0].id;
+      }
+      if (!cycleId) {
+        const [res] = await conn.query('INSERT INTO primary_care_cycles (program_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, CURDATE())', [programId, 'Cycle 1', 'Week 1']);
+        cycleId = res.insertId;
+      }
+
+      await LongitudinalService.ensureClinicColumns(programId);
+
+      const inserted = 0;
+      const sessions = [];
+      for (const c of clean) {
+        const m = c.dayTime.match(/(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)[^\d]*(\d{1,2}[:.]\d{2})\s*[–—-]\s*(\d{1,2}[:.]\d{2})/i);
+        const dow = m ? m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase() : (c.dayTime.split(/\s+/)[0] || 'Sunday');
+        let shift = m ? `${m[2].replace('.',':')} - ${m[3].replace('.',':')}` : c.dayTime.replace(/[–—-]/, ' - ');
+        const [h] = await conn.query('SELECT id, in_charge_faculty_id, in_charge_faculty_name FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ?', [cycleId, dow]);
+        let headerId = h[0]?.id;
+        const inChargeName = c.fic?.name || h[0]?.in_charge_faculty_name || null;
+        const inChargeId = c.fic?.id || h[0]?.in_charge_faculty_id || null;
+        if (!headerId) {
+          const [r] = await conn.query('INSERT INTO primary_care_daily_headers (cycle_id, day_of_week, shift_time, pgy_level, in_charge_faculty_id, in_charge_faculty_name) VALUES (?, ?, ?, ?, ?, ?)', [cycleId, dow, shift, c.sessionContext, inChargeId, inChargeName]);
+          headerId = r.insertId;
+          await LongitudinalService.ensureClinicColumns(programId);
+          const cols = await LongitudinalService.getMatrixColumns(programId);
+          const max = cols.reduce((x, col) => Math.max(x, col.clinic_number), 0);
+          const ins = [];
+          for (let i = 1; i <= max; i++) ins.push([headerId, i, null, null, null, null]);
+          if (ins.length > 0) {
+            await conn.query('INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id) VALUES ?', [ins]);
+          }
+        } else {
+          await conn.query('UPDATE primary_care_daily_headers SET shift_time = COALESCE(NULLIF(?, ""), shift_time), pgy_level = COALESCE(NULLIF(?, ""), pgy_level), in_charge_faculty_id = COALESCE(?, in_charge_faculty_id), in_charge_faculty_name = COALESCE(NULLIF(?, ""), in_charge_faculty_name) WHERE id = ?', [shift, c.sessionContext, inChargeId, inChargeName, headerId]);
+        }
+
+        // parse clinic number/label
+        let clinicNum = null;
+        const m2 = c.clinicColumn.match(/(\d+)/);
+        if (m2) clinicNum = Number(m2[1]);
+        if (!clinicNum) {
+          const cols = await LongitudinalService.getMatrixColumns(programId);
+          const found = cols.find((x) => (x.label || '').toLowerCase() === c.clinicColumn.toLowerCase());
+          clinicNum = found?.clinic_number || 1;
+        }
+        // ensure column exists
+        const cols2 = await LongitudinalService.getMatrixColumns(programId);
+        if (!cols2.find((x) => x.clinic_number === clinicNum)) {
+          await LongitudinalService.addClinicColumn(programId, clinicNum, c.clinicColumn);
+        }
+
+        const [slot] = await conn.query('SELECT id FROM primary_care_clinic_slots WHERE daily_header_id = ? AND clinic_number = ?', [headerId, clinicNum]);
+        if (slot[0]) {
+          await conn.query('UPDATE primary_care_clinic_slots SET resident_1_name = ?, resident_2_name = ?, faculty_name = ?, faculty_id = ? WHERE id = ?', [c.r1.name, c.r2?.name || null, c.sf.name, c.sf.id, slot[0].id]);
+        } else {
+          await conn.query('INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id) VALUES (?, ?, ?, ?, ?, ?)', [headerId, clinicNum, c.r1.name, c.r2?.name || null, c.sf.name, c.sf.id]);
+        }
+        inserted++;
+        sessions.push(dow);
+      }
+
+      await conn.commit();
+      return res.status(201).json({
+        success: true,
+        count: inserted,
+        sessions: [...new Set(sessions)].length,
+        summary: `Successfully imported ${inserted} clinic slots across ${[...new Set(sessions)].length} sessions`,
+      });
+    } catch (error) {
+      await conn.rollback();
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    } finally {
+      conn.release();
+    }
+  }
+
 }
 
 module.exports = LongitudinalController;

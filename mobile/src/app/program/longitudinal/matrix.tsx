@@ -48,7 +48,7 @@ import {
 import { fetchResidentList } from '../../../services/residents';
 import { downloadScheduleReport } from '../../../services/scheduleExport';
 import { buildCccMatrixReport } from '../../../utils/scheduleExport';
-import { uploadFacultySupervisors } from '../../../services/excelTemplates';
+import { uploadFacultySupervisors , uploadCccMatrix } from '../../../services/excelTemplates';
 import {
   CCC_SCHEDULE_ROWS,
   dayOfWeekMatches,
@@ -1565,6 +1565,19 @@ export default function LongitudinalMatrixScreen() {
         onPress={() => setExportOpen(true)}
         disabled={!reportModel}
         accessibilityHint="Download this CCC clinic matrix as Excel, PDF, Word or an image."
+      />
+      <ImportTools
+        template="ccc"
+        upload={(file) => {
+          const payload: any = { program_id: programId };
+          return uploadCccMatrix(file, payload);
+        }}
+        onImported={() => {
+          void schedule.refresh();
+          void cycles.refresh();
+        }}
+        autoDismissSuccessMs={6000}
+        hint="Upload a filled Continuity of Care Clinics matrix template (.xlsx)."
       />
 
       {actionError ? (

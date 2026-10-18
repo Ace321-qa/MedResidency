@@ -35,4 +35,7 @@ router.put('/cycle-schedule/columns/:clinic_number', LongitudinalController.rena
 router.delete('/cycle-schedule/columns/:clinic_number', LongitudinalController.deleteClinicColumn);
 router.post('/cycle-schedule/randomize', LongitudinalController.randomizeSupervisors);
 
+router.get('/matrix/template', LongitudinalController.downloadMatrixTemplate);
+router.post('/matrix/import', upload.single('file'), LongitudinalController.importMatrix);
+
 module.exports = router;

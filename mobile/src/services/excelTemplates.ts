@@ -468,7 +468,7 @@ const TEMPLATES: Record<TemplateKind, TemplateSpec> = {
   },
   ccc: {
     fileName: 'continuity_care_clinics_template.xlsx',
-    endpoint: '/rotations/import/ccc/template',
+    endpoint: '/longitudinal/matrix/template',
     sheetName: 'Continuity Care Clinics',
     rows: PRIMARY_CARE_CLINICS_ROWS,
   },
@@ -630,7 +630,7 @@ export async function pickSpreadsheet(): Promise<DocumentPicker.DocumentPickerAs
  *   understands `{ uri, name, type }` and streams the bytes from the copy the
  *   picker wrote to the cache directory.
  */
-async function appendPickedFile(
+export async function appendPickedFile(
   form: FormData,
   field: string,
   file: DocumentPicker.DocumentPickerAsset,
@@ -762,13 +762,17 @@ export const uploadRoster = (file: DocumentPicker.DocumentPickerAsset, programId
 
 export const uploadMasterGrid = (
   file: DocumentPicker.DocumentPickerAsset,
-  fields: { program_id: number; academic_year: string },
+  fields: { program_id: number; academic_year: string } | Record<string, string | number>,
 ) => uploadSpreadsheet('/rotations/import/master', file, fields);
 
 export const uploadCccMatrix = (
   file: DocumentPicker.DocumentPickerAsset,
-  fields: { program_id: number; academic_year: string },
-) => uploadSpreadsheet('/rotations/import/ccc', file, fields);
+  fields: { program_id: number; academic_year: string } | Record<string, string | number> | Record<string, string | number> = {},
+  extra?: Record<string, string | number>,
+) => {
+  const payload = extra ? { ...fields, ...extra } : fields;
+  return uploadSpreadsheet('/longitudinal/matrix/import', file, payload as any);
+};
 
 export const uploadTimesheet = (file: DocumentPicker.DocumentPickerAsset, residentId: number) =>
   uploadSpreadsheet('/attendance/import', file, { resident_id: residentId });
