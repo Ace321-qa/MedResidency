@@ -37,5 +37,9 @@ router.post('/cycle-schedule/randomize', LongitudinalController.randomizeSupervi
 
 router.get('/matrix/template', LongitudinalController.downloadMatrixTemplate);
 router.post('/matrix/import', upload.single('file'), LongitudinalController.importMatrix);
+router.post('/matrix/template', LongitudinalController.downloadMatrixTemplate);
+router.get('/matrix/export/pdf', LongitudinalController.exportMatrixPdf);
+router.post('/matrix/export/pdf', LongitudinalController.exportMatrixPdf);
+
 
 module.exports = router;

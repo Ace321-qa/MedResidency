@@ -221,7 +221,9 @@ function buildDayRow(
   cycle: PrimaryCareCycle | null,
 ): ReportCell[] {
   const header = headerForDay(headers, day);
-  const dateIso = weekDayDate(cycle?.start_date ?? null, index);
+  const seq = weekDaySequence(cycle?.start_date ?? null);
+  const offset = seq.indexOf(day);
+  const dateIso = offset >= 0 ? weekDayDate(cycle?.start_date ?? null, offset) ?? null : null;
   const row: ReportCell[] = [cell(dayCellText(day, dateIso, header), { bold: true })];
   for (const column of columns) {
     if (column.isLeaves) {

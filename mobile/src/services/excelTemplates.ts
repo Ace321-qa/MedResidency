@@ -2,7 +2,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import { Platform } from 'react-native';
 
 import { API_BASE_URL } from '../config/env';
-import { buildXlsx, type XlsxCellValue } from '../utils/xlsx';
+import { buildXlsx, buildXlsxSheets, type XlsxCellValue } from '../utils/xlsx';
+import { cccTemplateSheets, cccTemplateBanner, type CccTemplatePayload } from '../utils/cccTemplate';
 import { saveSpreadsheet, type SavedFile } from '../utils/fileSave';
 import { allWeeks, formatDmy, MASTER_GRID_START } from '../utils/masterGridCalendar';
 
@@ -506,6 +507,16 @@ export interface TemplateOptions {
    * Coordinator's chosen start day.
    */
   startDate?: string;
+  /**
+   * CCC only: the payload the CCC screen just rendered. The template mirrors
+   * the live state — this cycle's day rows, this programme's clinic columns,
+   * the Leaves column and the backup pools — so a workbook downloaded from the
+   * matrix is the same matrix. Without it (an older caller, or the API being
+   * asked directly) the endpoint falls back to building one from the database.
+   */
+  ccc?: CccTemplatePayload;
+  /** CCC only: the programme the payload belongs to, forwarded to the API. */
+  programId?: number;
 }
 
 /**
@@ -545,6 +556,12 @@ export async function downloadTemplate(
   kind: TemplateKind,
   options: TemplateOptions = {},
 ): Promise<DownloadOutcome> {
+  // The CCC template is stateful: it must mirror the schedule on screen, so it
+  // is sent as a payload rather than described by query parameters.
+  if (kind === 'ccc' && options.ccc) {
+    return downloadCccTemplate(options.ccc, options.programId);
+  }
+
   const spec = templateSpec(kind, options);
   const endpoint = spec.endpoint && options.startDate && kind === 'master'
     ? `${spec.endpoint}?start_date=${encodeURIComponent(options.startDate)}`
@@ -560,12 +577,78 @@ export async function downloadTemplate(
   return { ...saved, source: fromServer ? 'server' : 'device' };
 }
 
-async function fetchTemplateBytes(endpoint: string): Promise<Uint8Array | null> {
+/**
+ * Download the CCC template for `payload`, in the order that keeps the file the
+ * import endpoint expects:
+ *
+ *  1. **POST the payload** — the server renders exactly what the screen holds,
+ *     including the banner and the backup pools, from the same rows the client
+ *     would write. This is the path that keeps the two sides identical.
+ *  2. **GET with the payload's parameters** — an older API that only knows the
+ *     query form still answers with a database-driven template.
+ *  3. **Build it on this device** — `cccTemplateSheets` writes the same layout
+ *     the server writes, so an unreachable backend produces the same workbook
+ *     rather than a smaller one.
+ */
+async function downloadCccTemplate(
+  payload: CccTemplatePayload,
+  programId?: number,
+): Promise<DownloadOutcome> {
+  const spec = TEMPLATES.ccc;
+  const fromPost = await fetchTemplateBytes(
+    spec.endpoint ?? '/longitudinal/matrix/template',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, program_id: programId ?? null }),
+    },
+    8000,
+  );
+
+  const query = cccTemplateQuery(payload, programId);
+  const fromGet = fromPost
+    ? null
+    : await fetchTemplateBytes(`${spec.endpoint ?? '/longitudinal/matrix/template'}${query}`, undefined, 6000);
+  const fromServer = fromPost ?? fromGet;
+
+  let bytes: any = fromServer ?? buildXlsxSheets(cccTemplateSheets(payload), 'CCC Matrix');
+  if (bytes instanceof ArrayBuffer) {
+    bytes = new Uint8Array(bytes);
+  }
+  const saved = await saveSpreadsheet(spec.fileName, bytes);
+  return { ...saved, source: fromServer ? 'server' : 'device' };
+}
+
+/** The payload expressed as the endpoint's query-string form. */
+function cccTemplateQuery(payload: CccTemplatePayload, programId?: number): string {
+  const params: Record<string, string> = {
+    viewMode: payload.viewMode,
+    academicYear: payload.academicYear,
+    cycle: payload.cycleNumber,
+    week: payload.weekNumber,
+    startDate: payload.weekStartDate,
+    endDate: payload.weekEndDate,
+    duration: payload.durationLabel,
+    clinicCount: String(payload.columns.filter((column) => !column.isLeaves).length),
+    banner: cccTemplateBanner(payload),
+  };
+  if (programId) params.program_id = String(programId);
+  const query = Object.entries(params)
+    .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+    .join('&');
+  return `?${query}`;
+}
+
+async function fetchTemplateBytes(
+  endpoint: string,
+  init?: RequestInit,
+  timeoutMs = 6000,
+): Promise<Uint8Array | null> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, { signal: controller.signal });
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, { ...init, signal: controller.signal });
     if (!response.ok) return null;
     const buffer = await response.arrayBuffer();
     // An error body or an empty reply is not a workbook; treat it as absence.
@@ -752,7 +835,7 @@ export function flattenIssues(body: any): string[] {
 
 export const downloadRosterTemplate = () => downloadTemplate('roster');
 export const downloadMasterGridTemplate = () => downloadTemplate('master');
-export const downloadCccTemplate = () => downloadTemplate('ccc');
+// export const downloadCccTemplate = () => downloadTemplate('ccc');
 export const downloadMonthlyTimesheetTemplate = () => downloadTemplate('timesheet');
 export const downloadCatalogueTemplate = () => downloadTemplate('catalogue');
 export const downloadFacultyTemplate = () => downloadTemplate('faculty');

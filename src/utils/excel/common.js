@@ -22,4 +22,35 @@ function makeBuffer(headers, rows, sheetName = 'Sheet1') {
   return makeSheetBuffer([headers, ...rows], sheetName);
 }
 
-module.exports = { makeBuffer, makeSheetBuffer };
+/**
+ * Build a workbook holding several sheets, in array order.
+ *
+ * The CCC template needs this: its matrix (or roster) sheet and its metadata
+ * sheet are one file, because the import reads the first sheet for the grid and
+ * the second for the banner, the rotation window and the backup pools. Every
+ * sheet must have a unique, non-empty name, so a duplicate is a caller bug that
+ * gets numbered rather than silently dropped.
+ */
+function makeWorkbookBuffer(sheets, fallbackName = 'Sheet1') {
+  const wb = XLSX.utils.book_new();
+  const used = new Set();
+  sheets.forEach((sheet, index) => {
+    const ws = XLSX.utils.aoa_to_sheet(sheet.rows || []);
+    if (sheet.merges && sheet.merges.length > 0) ws['!merges'] = sheet.merges;
+    let name = String(sheet.name || '').trim() || (index === 0 ? fallbackName : `Sheet${index + 1}`);
+    let unique = name;
+    let suffix = 2;
+    while (used.has(unique.toLowerCase())) {
+      unique = `${name.slice(0, 28)} ${suffix}`;
+      suffix += 1;
+    }
+    used.add(unique.toLowerCase());
+    XLSX.utils.book_append_sheet(wb, ws, unique);
+  });
+  if (wb.SheetNames.length === 0) {
+    return makeSheetBuffer([], fallbackName);
+  }
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+}
+
+module.exports = { makeBuffer, makeSheetBuffer, makeWorkbookBuffer };

@@ -49,6 +49,7 @@ import { fetchResidentList } from '../../../services/residents';
 import { downloadScheduleReport } from '../../../services/scheduleExport';
 import { buildCccMatrixReport } from '../../../utils/scheduleExport';
 import { uploadFacultySupervisors , uploadCccMatrix } from '../../../services/excelTemplates';
+import { buildCccTemplatePayload } from '../../../utils/cccTemplate';
 import {
   CCC_SCHEDULE_ROWS,
   dayOfWeekMatches,
@@ -469,6 +470,21 @@ export default function LongitudinalMatrixScreen() {
 
   const data = schedule.data;
   const cycle: PrimaryCareCycle | null = data?.cycle ?? null;
+
+  const cccTemplatePayload = useMemo(() => {
+    if (!data) return null;
+    try {
+      const payload = buildCccTemplatePayload(data, {
+        viewMode,
+        rotationMonths: Number(rotationMonths) || 3,
+        rationale: rationale || undefined,
+        programLabel: session?.programLabel ?? undefined,
+      });
+      return payload;
+    } catch {
+      return null;
+    }
+  }, [data, viewMode, rotationMonths, rationale, session?.programLabel]);
 
   const cycleList = useMemo(() => cycles.data ?? [], [cycles.data]);
   const latestCycleId = cycleList.length > 0 ? cycleList[cycleList.length - 1].id : null;
@@ -1568,16 +1584,14 @@ export default function LongitudinalMatrixScreen() {
       />
       <ImportTools
         template="ccc"
+        downloadOptions={cccTemplatePayload ? { ccc: cccTemplatePayload, programId } : { programId }}
         upload={(file) => {
           const payload: any = { program_id: programId };
           return uploadCccMatrix(file, payload);
         }}
         onImported={() => {
-          void schedule.refresh();
-          void cycles.refresh();
+          schedule.refresh();
         }}
-        autoDismissSuccessMs={6000}
-        hint="Upload a filled Continuity of Care Clinics matrix template (.xlsx)."
       />
 
       {actionError ? (

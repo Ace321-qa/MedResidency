@@ -1,8 +1,12 @@
 const db = require('../config/db');
 const LongitudinalService = require('../services/longitudinalService');
+const { buildCccTemplatePayload } = require('../services/cccTemplateService');
+const { buildCccPdf } = require('../utils/pdf/matrix');
+const { buildCccTemplateBuffer, parseCccMatrixFile } = require('../utils/excel/ccc');
 const SupervisorService = require('../services/supervisorService');
 const { generateFacultyTemplate, parseFacultyFile } = require('../utils/excel/faculty');
-const { generateCccMatrixTemplate, parseCccMatrixFile, buildDynamicTemplate } = require('../utils/excel/ccc');
+const { generateCccMatrixTemplate, buildDynamicTemplate } = require('../utils/excel/ccc');
+const { normalizeName, bestMatch, nameDistance } = require('./cccMatrixController');
 
 class LongitudinalController {
   static async getClinicTypes(req, res) {
@@ -664,8 +668,24 @@ const added = [];
         cycle: req.query.cycle,
         academicYear: req.query.academicYear,
         duration: req.query.duration,
+        programId: req.query.program_id ? Number(req.query.program_id) : undefined,
+        rotationMonths: req.query.rotationMonths ? Number(req.query.rotationMonths) : undefined,
+        rationale: req.query.rationale || undefined,
       };
-      const buffer = req.query.viewMode || req.query.clinicCount ? buildDynamicTemplate(options) : generateCccMatrixTemplate();
+      let buffer;
+      const bodyPayload = req.body && Array.isArray(req.body.days) && Array.isArray(req.body.columns)
+        ? req.body
+        : null;
+      if (bodyPayload) {
+        buffer = buildCccTemplateBuffer(bodyPayload);
+      } else if (options.programId) {
+        const payload = await buildCccTemplatePayload({ programId: options.programId, viewMode: options.viewMode === 'roster' ? 'roster' : 'matrix', rotationMonths: options.rotationMonths, rationale: options.rationale });
+        buffer = buildCccTemplateBuffer(payload);
+      } else if (req.query.viewMode || req.query.clinicCount) {
+        buffer = buildDynamicTemplate(options);
+      } else {
+        buffer = generateCccMatrixTemplate();
+      }
       res.setHeader('Content-Disposition', 'attachment; filename="Continuity_of_Care_Clinics_Template.xlsx"');
       res.setHeader(
         'Content-Type',
@@ -673,7 +693,7 @@ const added = [];
       );
       return res.send(buffer);
     } catch (error) {
-      return res.status(500).json({ success: false, error: error.message });
+      return res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
   }
 
@@ -689,7 +709,8 @@ const added = [];
 
     let parsed;
     try {
-      parsed = parseCccMatrixFile(req.file.buffer);
+      const columns = await LongitudinalService.getMatrixColumns(programId);
+      parsed = parseCccMatrixFile(req.file.buffer, { columns });
     } catch (error) {
       return res.status(400).json({ success: false, issues: [{ message: error.message }] });
     }
@@ -701,20 +722,21 @@ const added = [];
       const issues = [...(parsed.errors || [])];
       const residentMap = new Map();
       const facultyMap = new Map();
+      const facultyNameToId = new Map();
 
       const [residents] = await conn.query(
         `SELECT r.id, r.first_name, r.middle_initial, r.last_name, re.year_in_program
            FROM residents r
-           LEFT JOIN residency_enrollments re ON re.resident_id = r.id AND re.program_id = ? AND re.is_active = 1
-          WHERE EXISTS (SELECT 1 FROM residency_enrollments re2 WHERE re2.resident_id = r.id AND re2.program_id = ? AND re2.resident_status IN ('ACTIVE_FULL_TIME','ACTIVE_PART_TIME','STARTED_OFF_CYCLE','LEAVE_OF_ABSENCE'))
+           INNER JOIN residency_enrollments re ON re.resident_id = r.id AND re.program_id = ?
+          WHERE re.resident_status IN ('ACTIVE_FULL_TIME','ACTIVE_PART_TIME','STARTED_OFF_CYCLE','LEAVE_OF_ABSENCE')
           ORDER BY r.id`,
-        [programId, programId],
+        [programId],
       );
       for (const r of residents) {
         const full = LongitudinalService.formatResidentName ? LongitudinalService.formatResidentName(`${r.first_name} ${r.middle_initial || ''} ${r.last_name}`) : `${r.first_name} ${r.last_name}`.trim();
-        const norm = full.replace(/\s+/g, ' ').trim().toLowerCase();
-        if (norm) {
-          if (!residentMap.has(norm)) residentMap.set(norm, { id: r.id, name: full, pgy: r.year_in_program });
+        const norm = normalizeName(full);
+        if (norm && !residentMap.has(norm)) {
+          residentMap.set(norm, { id: r.id, name: full, pgy: r.year_in_program });
         }
       }
 
@@ -724,53 +746,82 @@ const added = [];
       );
       for (const f of faculty) {
         const full = LongitudinalService.formatFacultyName ? LongitudinalService.formatFacultyName(`${f.first_name} ${f.last_name}`) : `Dr. ${f.first_name} ${f.last_name}`.trim();
-        const norm = full.toLowerCase().replace(/^dr\.\s*/, '').trim();
+        const norm = normalizeName(full);
         if (norm) {
           if (!facultyMap.has(norm)) facultyMap.set(norm, { id: f.id, name: full });
+          facultyNameToId.set(norm, f.id);
         }
       }
 
       const clean = [];
-      for (const row of parsed.rows) {
+      for (const row of parsed.rows || []) {
         let ok = true;
-        const r1Key = row.resident1Name.toLowerCase().replace(/^dr\.\s*/, '').trim();
-        const r1 = residentMap.get(r1Key);
-        if (!r1) {
-          issues.push({ row: row.row, field: 'Resident 1 Name', message: `Resident '${row.resident1Name}' not found in active program roster` });
-          ok = false;
-        }
-        let r2 = null;
-        if (row.resident2Name) {
-          const r2Key = row.resident2Name.toLowerCase().replace(/^dr\.\s*/, '').trim();
-          r2 = residentMap.get(r2Key);
-          if (!r2) {
-            issues.push({ row: row.row, field: 'Resident 2 Name', message: `Resident '${row.resident2Name}' not found in active program roster` });
-            ok = false;
+        const resNames = Array.isArray(row.residents) ? row.residents : [];
+        let r1 = null, r2 = null;
+        if (resNames[0]) {
+          const n = resNames[0];
+          const norm = normalizeName(n);
+          let m = residentMap.get(norm) || (norm ? residentMap.get(norm) : null);
+          if (!m) {
+            const key = [...residentMap.keys()].find(k => nameDistance(k,n)<0.4);
+            if (key) m = residentMap.get(key);
           }
+          if (!m) {
+            issues.push({ row: row.row, field: 'Resident 1', message: `Resident '${n}' not found in active program roster` });
+            ok = false;
+          } else { r1 = m; }
         }
-        const sfKey = row.supervisingFaculty.toLowerCase().replace(/^dr\.\s*/, '').trim();
-        const sf = facultyMap.get(sfKey);
-        if (!sf) {
-          issues.push({ row: row.row, field: 'Supervising Faculty', message: `Faculty '${row.supervisingFaculty}' not found in faculty list` });
-          ok = false;
+        if (resNames[1]) {
+          const n = resNames[1];
+          const norm = normalizeName(n);
+          let m = residentMap.get(norm) || null;
+          if (!m) {
+            const key = [...residentMap.keys()].find(k => nameDistance(k,n)<0.4);
+            if (key) m = residentMap.get(key);
+          }
+          if (!m) {
+            issues.push({ row: row.row, field: 'Resident 2', message: `Resident '${n}' not found in active program roster` });
+            ok = false;
+          } else { r2 = m; }
+        }
+        const facultyCell = row.faculty || null;
+        let sf = null;
+        if (facultyCell) {
+          const norm = normalizeName(facultyCell);
+          let m = facultyMap.get(norm) || null;
+          if (!m) {
+            const key = [...facultyMap.keys()].find(k => nameDistance(k,norm||facultyCell)<0.4);
+            if (key) m = facultyMap.get(key);
+          }
+          if (!m) {
+            issues.push({ row: row.row, field: 'Supervising Faculty', message: `Faculty '${facultyCell}' not found in faculty list` });
+            ok = false;
+          } else { sf = m; }
         }
         let fic = null;
-        if (row.facultyInCharge) {
-          const ficKey = row.facultyInCharge.toLowerCase().replace(/^dr\.\s*/, '').trim();
-          fic = facultyMap.get(ficKey) || { id: null, name: row.facultyInCharge };
+        if (row.inCharge) {
+          const norm = normalizeName(row.inCharge);
+          let m = facultyMap.get(norm) || null;
+          if (!m) {
+            const key = [...facultyMap.keys()].find(k => nameDistance(k,norm||row.inCharge)<0.4);
+            if (key) m = facultyMap.get(key);
+          }
+          if (!m) {
+            issues.push({ row: row.row, field: 'Faculty In-charge', message: `Faculty '${row.inCharge}' not found in faculty list` });
+            ok = false;
+          } else { fic = m; }
         }
         if (!ok) continue;
         clean.push({ ...row, r1, r2, sf, fic });
       }
 
-      // dedup day+clinic
       const seen = new Map();
       for (const c of clean) {
-        const day = c.dayTime;
-        const clinic = c.clinicColumn;
+        const day = c.dayOfWeek;
+        const clinic = c.clinicTitle || c.clinicNumber;
         const key = `${day}||${clinic}`.toLowerCase();
         if (seen.has(key)) {
-          issues.push({ row: c.row, message: `Duplicate entry for Day/Time and Clinic Column: ${day} / ${clinic}` });
+          issues.push({ row: c.row, message: `Duplicate entry for Day and Clinic: ${day} / ${clinic}` });
           continue;
         }
         seen.set(key, c.row);
@@ -781,18 +832,18 @@ const added = [];
         return res.status(400).json({ success: false, issues });
       }
 
-      // resolve cycle
       let cycleId = null;
       const meta = parsed.metadata || {};
       if (req.body.cycle_id) {
         cycleId = Number(req.body.cycle_id);
-      } else if (meta.cycleNumber || meta.startDate) {
-        const cn = meta.cycleNumber ? (meta.cycleNumber.toLowerCase().startsWith('cycle') ? meta.cycleNumber : `Cycle ${meta.cycleNumber}`) : null;
-        const sd = meta.startDate || null;
+      } else {
+        const cn = meta.cycleNumber ? (String(meta.cycleNumber).toLowerCase().startsWith('cycle') ? String(meta.cycleNumber) : `Cycle ${meta.cycleNumber}`) : null;
+        const sd = meta.weekStartCalendarDate || meta.startDate || null;
         if (cn && sd) {
           const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND cycle_number = ? AND start_date = ?', [programId, cn, sd]);
           if (rows[0]) cycleId = rows[0].id;
-        } else if (cn) {
+        }
+        if (!cycleId && cn) {
           const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND cycle_number = ? ORDER BY id DESC LIMIT 1', [programId, cn]);
           if (rows[0]) cycleId = rows[0].id;
         }
@@ -808,51 +859,38 @@ const added = [];
 
       await LongitudinalService.ensureClinicColumns(programId);
 
-      const inserted = 0;
+      let inserted = 0;
       const sessions = [];
       for (const c of clean) {
-        const m = c.dayTime.match(/(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)[^\d]*(\d{1,2}[:.]\d{2})\s*[–—-]\s*(\d{1,2}[:.]\d{2})/i);
-        const dow = m ? m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase() : (c.dayTime.split(/\s+/)[0] || 'Sunday');
-        let shift = m ? `${m[2].replace('.',':')} - ${m[3].replace('.',':')}` : c.dayTime.replace(/[–—-]/, ' - ');
+        const dow = c.dayOfWeek;
+        const shift = c.shift;
         const [h] = await conn.query('SELECT id, in_charge_faculty_id, in_charge_faculty_name FROM primary_care_daily_headers WHERE cycle_id = ? AND day_of_week = ?', [cycleId, dow]);
         let headerId = h[0]?.id;
         const inChargeName = c.fic?.name || h[0]?.in_charge_faculty_name || null;
         const inChargeId = c.fic?.id || h[0]?.in_charge_faculty_id || null;
         if (!headerId) {
-          const [r] = await conn.query('INSERT INTO primary_care_daily_headers (cycle_id, day_of_week, shift_time, pgy_level, in_charge_faculty_id, in_charge_faculty_name) VALUES (?, ?, ?, ?, ?, ?)', [cycleId, dow, shift, c.sessionContext, inChargeId, inChargeName]);
+          const [r] = await conn.query('INSERT INTO primary_care_daily_headers (cycle_id, day_of_week, shift_time, pgy_level, in_charge_faculty_id, in_charge_faculty_name) VALUES (?, ?, ?, ?, ?, ?)', [cycleId, dow, shift, c.pgy, inChargeId, inChargeName]);
           headerId = r.insertId;
-          await LongitudinalService.ensureClinicColumns(programId);
-          const cols = await LongitudinalService.getMatrixColumns(programId);
-          const max = cols.reduce((x, col) => Math.max(x, col.clinic_number), 0);
-          const ins = [];
-          for (let i = 1; i <= max; i++) ins.push([headerId, i, null, null, null, null]);
-          if (ins.length > 0) {
-            await conn.query('INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id) VALUES ?', [ins]);
-          }
         } else {
-          await conn.query('UPDATE primary_care_daily_headers SET shift_time = COALESCE(NULLIF(?, ""), shift_time), pgy_level = COALESCE(NULLIF(?, ""), pgy_level), in_charge_faculty_id = COALESCE(?, in_charge_faculty_id), in_charge_faculty_name = COALESCE(NULLIF(?, ""), in_charge_faculty_name) WHERE id = ?', [shift, c.sessionContext, inChargeId, inChargeName, headerId]);
+          await conn.query('UPDATE primary_care_daily_headers SET shift_time = COALESCE(NULLIF(?, ""), shift_time), pgy_level = COALESCE(NULLIF(?, ""), pgy_level), in_charge_faculty_id = COALESCE(?, in_charge_faculty_id), in_charge_faculty_name = COALESCE(NULLIF(?, ""), in_charge_faculty_name) WHERE id = ?', [shift, c.pgy, inChargeId, inChargeName, headerId]);
         }
 
-        // parse clinic number/label
-        let clinicNum = null;
-        const m2 = c.clinicColumn.match(/(\d+)/);
-        if (m2) clinicNum = Number(m2[1]);
-        if (!clinicNum) {
-          const cols = await LongitudinalService.getMatrixColumns(programId);
-          const found = cols.find((x) => (x.label || '').toLowerCase() === c.clinicColumn.toLowerCase());
-          clinicNum = found?.clinic_number || 1;
+        let clinicNum = c.clinicNumber;
+        if (!clinicNum && c.clinicTitle) {
+          const m2 = String(c.clinicTitle).match(/(\d+)/);
+          if (m2) clinicNum = Number(m2[1]);
         }
-        // ensure column exists
+        if (!clinicNum) clinicNum = 1;
         const cols2 = await LongitudinalService.getMatrixColumns(programId);
-        if (!cols2.find((x) => x.clinic_number === clinicNum)) {
-          await LongitudinalService.addClinicColumn(programId, clinicNum, c.clinicColumn);
+        if (!cols2.find((x) => Number(x.clinic_number) === Number(clinicNum))) {
+          await LongitudinalService.addClinicColumn(programId, clinicNum, c.clinicTitle);
         }
 
         const [slot] = await conn.query('SELECT id FROM primary_care_clinic_slots WHERE daily_header_id = ? AND clinic_number = ?', [headerId, clinicNum]);
         if (slot[0]) {
-          await conn.query('UPDATE primary_care_clinic_slots SET resident_1_name = ?, resident_2_name = ?, faculty_name = ?, faculty_id = ? WHERE id = ?', [c.r1.name, c.r2?.name || null, c.sf.name, c.sf.id, slot[0].id]);
+          await conn.query('UPDATE primary_care_clinic_slots SET resident_1_name = ?, resident_2_name = ?, faculty_name = ?, faculty_id = ? WHERE id = ?', [c.r1.name, c.r2?.name || null, c.sf?.name || null, c.sf?.id || null, slot[0].id]);
         } else {
-          await conn.query('INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id) VALUES (?, ?, ?, ?, ?, ?)', [headerId, clinicNum, c.r1.name, c.r2?.name || null, c.sf.name, c.sf.id]);
+          await conn.query('INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name, resident_2_name, faculty_name, faculty_id) VALUES (?, ?, ?, ?, ?, ?)', [headerId, clinicNum, c.r1.name, c.r2?.name || null, c.sf?.name || null, c.sf?.id || null]);
         }
         inserted++;
         sessions.push(dow);
@@ -874,6 +912,26 @@ const added = [];
     }
   }
 
+  static async exportMatrixPdf(req, res) {
+    try {
+      const programId = Number(req.query.program_id || req.body?.program_id);
+      if (!Number.isInteger(programId) || programId <= 0) {
+        return res.status(400).json({ success: false, error: 'program_id is required' });
+      }
+      const payload = await buildCccTemplatePayload({
+        programId,
+        viewMode: (req.query.viewMode || req.body?.viewMode) === 'roster' ? 'roster' : 'matrix',
+        rotationMonths: req.query.rotationMonths ? Number(req.query.rotationMonths) : (req.body?.rotationMonths ? Number(req.body.rotationMonths) : undefined),
+        rationale: req.query.rationale || req.body?.rationale || undefined,
+      });
+      const buffer = buildCccPdf(payload);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="Continuity_of_Care_Clinics.pdf"');
+      return res.send(buffer);
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  }
 }
 
 module.exports = LongitudinalController;
