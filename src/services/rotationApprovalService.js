@@ -1,6 +1,13 @@
 const { rotationMatchKey, rotationLooseKey } = require('../utils/rotationMatch');
 const { MAX_ABBREVIATION_LENGTH, MAX_NAME_LENGTH } = require('../utils/excel/catalogue');
-const { weeksSpanned } = require('../utils/masterGridCalendar');
+const {
+  MASTER_GRID_START,
+  WEEKS_PER_BLOCK,
+  blockWindow,
+  weekNumberForDate,
+  weeksSpanned,
+} = require('../utils/masterGridCalendar');
+const { academicYearForDate, academicYearMatchValues } = require('../utils/academicYear');
 
 /**
  * Placing an approved rotation request onto the rota.
@@ -12,18 +19,31 @@ const { weeksSpanned } = require('../utils/masterGridCalendar');
  * that gap: it resolves the block the request sits in and the rotation the
  * request names, then upserts the assignment the grid reads.
  *
- * Two shapes of resolution, both mirroring the Master Grid importer so the same
- * human text always lands on the same rows:
+ * Three rules, each earned from a real mismatch between the queue and the grid:
  *
- *  - **Block** by date containment. The request carries a window, not a block
- *    number, so the block is whichever one in the programme's calendar holds the
- *    request's first day; an exact window match wins, an active block beats an
- *    inactive one, and a request that runs past its block is clamped to it rather
- *    than rejected — a resident asking to join "Block 6" is placed in Block 6.
- *  - **Rotation** by case- and punctuation-insensitive name, then a contains
- *    fallback, then auto-catalogue. A department this programme has never
- *    catalogued becomes a new active rotation, because the alternative is an
- *    approval that silently paints nothing.
+ *  - **Block by greatest overlap, not by containment.** A request carries a
+ *    window, not a block number, and the window routinely straddles two rows of
+ *    `rotation_blocks` (a resident asking for "Block 5" whose stored block starts
+ *    a week later). Picking the block that merely contains the first day lands
+ *    the badge one column to the left; picking the block that shares the most
+ *    days lands it where the resident — and the grid header — expect it.
+ *  - **Window kept inside the block the grid draws.** `rotation_blocks` rows can
+ *    be a week out of step with the 13-block calendar the Master Grid renders
+ *    (`masterGridCalendar`), so a request that exactly matches the column the
+ *    coordinator sees can otherwise be shortened by a week. The window is
+ *    clamped to the *rendered* window for the resolved block number — a request
+ *    that already matches it survives verbatim, and one that overruns it cannot
+ *    spill into the neighbouring column.
+ *  - **Rotation matched exactly as the importer matches it** — case- and
+ *    punctuation-insensitive name, then the code, then a contains fallback, then
+ *    auto-catalogue. `rotationMatch.js` is shared with the importer precisely so
+ *    the same human text cannot resolve to two different rows.
+ *
+ * The block calendar itself is repaired lazily: a request inside the 13-block
+ * grid whose block row is missing gets that row created, so a future request is
+ * never refused for want of a calendar nobody has drawn yet. A request outside
+ * the grid is refused with a sentence the coordinator can act on, because an
+ * approval that silently paints nothing is the bug this service exists to close.
  *
  * The upsert keys on `(resident_id, rotation_block_id)` and is a SELECT followed
  * by INSERT or UPDATE rather than `INSERT ... ON DUPLICATE KEY UPDATE`: no
@@ -69,9 +89,39 @@ async function resolveProgramId(conn, request) {
 }
 
 /**
- * The block that holds `start`. An exact `start_date`/`end_date` match is
- * preferred (the resident picked the block's own window), then an active block,
- * then the lowest block number.
+ * The resident a request names, matched strictly on `resident_id`.
+ *
+ * `rotation_requests.resident_id` is `NOT NULL` and points at `residents.id`, so
+ * there is no legacy row without one and no name to fall back to — which is the
+ * point. This programme holds two distinct residents both named "Yasser Fahad
+ * Taylor", so matching a request by name would place the wrong person on the
+ * rota. The id is checked against `residents` so a dangling reference is refused
+ * with a sentence rather than surfacing later as a foreign-key 500.
+ */
+async function resolveResident(conn, request) {
+  const residentId = Number(request.resident_id);
+  if (!Number.isInteger(residentId) || residentId <= 0) {
+    throw reject(400, 'The request is missing a resident and cannot be placed on the rota.');
+  }
+
+  const [rows] = await conn.query('SELECT id FROM residents WHERE id = ? LIMIT 1', [residentId]);
+  if (!rows[0]) {
+    throw reject(
+      400,
+      `The request names resident ${residentId}, who is not in the resident register. ` +
+        'Correct the request before approving it.',
+    );
+  }
+  return residentId;
+}
+
+/**
+ * The block that shares the most days with `[start, end]`.
+ *
+ * Overlap is measured inclusively (`2026-10-18`…`2026-10-24` is seven days), an
+ * exact window match is worth the whole span, an active block breaks a tie
+ * before the block number does, and the lower block number breaks a remaining
+ * tie so the choice is deterministic.
  *
  * `is_active` orders the candidates rather than filtering them: the Master Grid
  * draws a block whether or not it is flagged active, so refusing an approval for
@@ -82,74 +132,162 @@ async function resolveBlock(conn, programId, start, end) {
   const [rows] = await conn.query(
     `SELECT id, block_number, block_name,
             DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date_iso,
-            DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date_iso
+            DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date_iso,
+            DATEDIFF(LEAST(end_date, ?), GREATEST(start_date, ?)) + 1 AS overlap_days
        FROM rotation_blocks
       WHERE program_id = ?
         AND start_date <= ?
         AND end_date >= ?
-      ORDER BY (start_date = ? AND end_date = ?) DESC, is_active DESC, block_number ASC
+      ORDER BY overlap_days DESC, is_active DESC, block_number ASC
       LIMIT 1`,
-    [programId, start, start, start, end],
+    [end, start, programId, end, start],
+  );
+  return rows[0] ?? null;
+}
+
+/** A block for `blockNumber` in `academicYear`, matched under both spellings. */
+async function findBlockByNumber(conn, programId, blockNumber, academicYear) {
+  const years = academicYearMatchValues(academicYear);
+  const [rows] = await conn.query(
+    `SELECT id, block_number, block_name,
+            DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date_iso,
+            DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date_iso
+       FROM rotation_blocks
+      WHERE program_id = ?
+        AND block_number = ?
+        AND academic_year IN (${years.map(() => '?').join(', ')})
+      ORDER BY is_active DESC, id ASC
+      LIMIT 1`,
+    [programId, blockNumber, ...years],
   );
   return rows[0] ?? null;
 }
 
 /**
- * The rotation a request names, or a freshly catalogued one.
+ * The `rotation_blocks` row for the request's block, created from the 13-block
+ * calendar when the programme has not drawn it yet.
  *
- * Returns `{ id, rotation_code, rotation_name, catalogued }` where `catalogued`
- * is true when this call inserted the row.
+ * Only reached when no block overlaps the request — blocks 1–7 normally cover
+ * the year — so this fills the future blocks (8…13) rather than rewriting a
+ * calendar already in use. Returns `null` when the request falls outside the
+ * 52-week grid, which the caller turns into an actionable 4xx.
  */
-async function resolveRotation(conn, programId, rawName) {
-  const name = String(rawName ?? '').trim().slice(0, MAX_NAME_LENGTH);
-  if (name === '') {
-    throw reject(400, 'The request names no department or clinic, so it cannot be placed on the rota.');
+async function ensureBlock(conn, programId, start) {
+  const week = weekNumberForDate(start, MASTER_GRID_START);
+  if (!week) return null;
+  const blockNumber = Math.ceil(week / WEEKS_PER_BLOCK);
+
+  const academicYear = academicYearForDate(start);
+  if (!academicYear) return null;
+
+  const existing = await findBlockByNumber(conn, programId, blockNumber, academicYear);
+  if (existing) return existing;
+
+  const window = blockWindow(blockNumber, MASTER_GRID_START);
+  if (!window) return null;
+
+  const blockName = `Block ${blockNumber}`;
+  try {
+    const [result] = await conn.query(
+      `INSERT INTO rotation_blocks
+         (program_id, academic_year, block_number, block_name, start_date, end_date, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [programId, academicYear, blockNumber, blockName, window.start, window.end],
+    );
+    return {
+      id: result.insertId,
+      block_number: blockNumber,
+      block_name: blockName,
+      start_date_iso: window.start,
+      end_date_iso: window.end,
+    };
+  } catch (error) {
+    // A concurrent approval drew the same block first; take theirs.
+    if (error.code === 'ER_DUP_ENTRY') {
+      return findBlockByNumber(conn, programId, blockNumber, academicYear);
+    }
+    throw error;
+  }
+}
+
+/**
+ * The window the assignment is recorded against.
+ *
+ * The Master Grid paints a block from `masterGridCalendar`, so an assignment
+ * hanging off block N belongs to block N's *rendered* window. When that window
+ * overlaps the request the rendered one is used (which is how a resident who
+ * asked for exactly "Block 5" keeps the full four weeks even though the stored
+ * `rotation_blocks` row for that number is a week adrift); otherwise the stored
+ * row's own window is the only sensible clamp.
+ */
+function windowBounds(block, start, end) {
+  const rendered = blockWindow(block.block_number, MASTER_GRID_START);
+  if (rendered && !(end < rendered.start || start > rendered.end)) {
+    return { start: rendered.start, end: rendered.end };
+  }
+  return { start: block.start_date_iso, end: block.end_date_iso };
+}
+
+/**
+ * The rotation a request names, or a new active rotation catalogued from it.
+ *
+ * The match fields are `rotation_name` and `rotation_code` — the same two the
+ * Master Grid importer registers — so the same human text always resolves to the
+ * same row. Nothing here looks at `department_name`: the importer never does, and
+ * matching it here would let "Internal Medicine" find an "Internal Medicine
+ * Inpatient Wards" row on the approval path while the importer catalogued a
+ * brand-new "Internal Medicine", which is exactly the drift `rotationMatch.js`
+ * exists to prevent.
+ */
+async function resolveRotation(conn, programId, departmentClinic) {
+  const name = String(departmentClinic ?? '').trim().slice(0, MAX_NAME_LENGTH);
+  if (!name) {
+    throw reject(400, 'The request names no rotation, so there is nothing to place on the rota.');
   }
 
-  const [rotations] = await conn.query(
+  // Active rotations are the ones a new request may join; every code the
+  // programme has ever used (active or retired) is read separately so a freshly
+  // catalogued abbreviation cannot collide with a retired one.
+  const [rows] = await conn.query(
     `SELECT id, rotation_code, rotation_name, department_name
        FROM rotations
-      WHERE program_id = ?
-      ORDER BY is_active DESC, id ASC`,
+      WHERE program_id = ? AND is_active = 1
+      ORDER BY id ASC`,
     [programId],
   );
-
-  const wanted = rotationMatchKey(name);
-  const wantedLoose = rotationLooseKey(name);
-
-  // Exact key first (name, abbreviation or department), then the no-punctuation
-  // key, then a contains fallback between keys of at least four characters.
-  const hasKey = (rotation, keyOf, target) => {
-    const fields = [rotation.rotation_name, rotation.rotation_code, rotation.department_name];
-    return fields.some((field) => field != null && keyOf(field) === target);
-  };
-  const exact = rotations.find((rotation) => hasKey(rotation, rotationMatchKey, wanted));
-  if (exact) return { ...exact, catalogued: false };
-
-  const loose = rotations.find((rotation) => hasKey(rotation, rotationLooseKey, wantedLoose));
-  if (loose) return { ...loose, catalogued: false };
-
-  if (wantedLoose.length >= 4) {
-    const near = rotations.find((rotation) => {
-      const fields = [rotation.rotation_name, rotation.rotation_code, rotation.department_name];
-      return fields.some((field) => {
-        const key = rotationLooseKey(field);
-        return key.length >= 4 && (key.includes(wantedLoose) || wantedLoose.includes(key));
-      });
-    });
-    if (near) return { ...near, catalogued: false };
-  }
-
-  // Nothing matched: catalogue it, mirroring the importer's abbreviation rule so
-  // the same name never yields two different codes.
   const [codeRows] = await conn.query(
     'SELECT rotation_code FROM rotations WHERE program_id = ?',
     [programId],
   );
+
+  const wantedExact = rotationMatchKey(name);
+  const wantedLoose = rotationLooseKey(name);
+
+  const byExact = rows.find(
+    (row) => rotationMatchKey(row.rotation_name) === wantedExact || rotationMatchKey(row.rotation_code) === wantedExact,
+  );
+  if (byExact) return { ...byExact, catalogued: false };
+
+  const byLoose = rows.find(
+    (row) => rotationLooseKey(row.rotation_name) === wantedLoose || rotationLooseKey(row.rotation_code) === wantedLoose,
+  );
+  if (byLoose) return { ...byLoose, catalogued: false };
+
+  if (wantedLoose.length >= 4) {
+    const byContains = rows.find((row) => {
+      const looseName = rotationLooseKey(row.rotation_name);
+      const looseCode = rotationLooseKey(row.rotation_code);
+      return [looseName, looseCode].some(
+        (key) => key.length >= 4 && (key.includes(wantedLoose) || wantedLoose.includes(key)),
+      );
+    });
+    if (byContains) return { ...byContains, catalogued: false };
+  }
+
+  // Nothing matched: catalogue it, mirroring the importer's abbreviation rule so
+  // the same name never yields two different codes.
   const takenCodes = new Set(
-    codeRows
-      .map((row) => String(row.rotation_code ?? '').trim().toLowerCase())
-      .filter(Boolean),
+    codeRows.map((row) => String(row.rotation_code ?? '').trim().toLowerCase()).filter(Boolean),
   );
 
   const base = name.toUpperCase().slice(0, MAX_ABBREVIATION_LENGTH);
@@ -188,44 +326,51 @@ class RotationApprovalService {
    * @returns {Promise<object>}
    */
   static async syncApprovedRequest(conn, request) {
-    const residentId = Number(request.resident_id);
     const start = isoDate(request.start_date);
     const end = isoDate(request.end_date);
-    if (!Number.isInteger(residentId) || residentId <= 0) {
-      throw reject(400, 'The request is missing a resident and cannot be placed on the rota.');
-    }
     if (!start || !end || end < start) {
       throw reject(400, 'The request has no valid date window and cannot be placed on the rota.');
     }
+
+    const residentId = await resolveResident(conn, request);
 
     const programId = await resolveProgramId(conn, request);
     if (!programId) {
       throw reject(400, 'The request could not be tied to a programme, so there is no block calendar to read.');
     }
 
-    const block = await resolveBlock(conn, programId, start, end);
+    const block =
+      (await resolveBlock(conn, programId, start, end)) ?? (await ensureBlock(conn, programId, start));
     if (!block) {
       throw reject(
         400,
-        `No rotation block covers ${start} to ${end} for this programme. ` +
-          'Create the block calendar for that period, then approve again.',
+        `No rotation block covers ${start} to ${end} for this programme, and the date falls outside ` +
+          'the 13-block academic calendar. Move the request inside the academic year, then approve again.',
       );
     }
 
-    // Clamp the window to the block so the assignment can never fall outside the
-    // column the grid will render it in.
-    const assignStart = start < block.start_date_iso ? block.start_date_iso : start;
-    const assignEnd = end > block.end_date_iso ? block.end_date_iso : end;
-    const coversWholeBlock =
-      assignStart === block.start_date_iso && assignEnd === block.end_date_iso;
+    // Clamp the window to the block the grid renders so the badge can never spill
+    // into the neighbouring column, while the resident's stated window survives.
+    const bounds = windowBounds(block, start, end);
+    const assignStart = start < bounds.start ? bounds.start : start;
+    const assignEnd = end > bounds.end ? bounds.end : end;
+    if (assignStart > assignEnd) {
+      throw reject(
+        400,
+        `The request window ${start} to ${end} does not sit inside block ${block.block_number}. ` +
+          'Check the block calendar, then approve again.',
+      );
+    }
+    const coversWholeBlock = assignStart === bounds.start && assignEnd === bounds.end;
     const assignmentType = coversWholeBlock ? 'FULL_BLOCK' : 'PARTIAL_BLOCK';
 
     const rotation = await resolveRotation(conn, programId, request.department_clinic);
 
     const [existing] = await conn.query(
       `SELECT id FROM resident_rotation_assignments
-        WHERE resident_id = ? AND rotation_block_id = ?
-        ORDER BY id ASC LIMIT 1`,
+        WHERE resident_id = ?
+          AND rotation_block_id = ?
+        LIMIT 1`,
       [residentId, block.id],
     );
 
@@ -233,15 +378,15 @@ class RotationApprovalService {
     let assignmentId;
     let created;
     if (existing[0]) {
-      assignmentId = existing[0].id;
-      created = false;
-      await conn.query(
+      const [result] = await conn.query(
         `UPDATE resident_rotation_assignments
-            SET rotation_id = ?, start_date = ?, end_date = ?,
-                assigned_weeks = ?, assignment_type = ?, notes = ?
+            SET rotation_id = ?, start_date = ?, end_date = ?, assigned_weeks = ?,
+                assignment_type = ?, notes = ?
           WHERE id = ?`,
-        [rotation.id, assignStart, assignEnd, assignedWeeks, assignmentType, NOTES, assignmentId],
+        [rotation.id, assignStart, assignEnd, assignedWeeks, assignmentType, NOTES, existing[0].id],
       );
+      assignmentId = existing[0].id;
+      created = result.affectedRows === 0;
     } else {
       const [result] = await conn.query(
         `INSERT INTO resident_rotation_assignments
@@ -267,7 +412,7 @@ class RotationApprovalService {
       assignment_type: assignmentType,
       notes: NOTES,
       created,
-      catalogued_rotation: rotation.catalogued,
+      catalogued_rotation: Boolean(rotation.catalogued),
     };
   }
 }
