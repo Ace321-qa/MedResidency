@@ -23,7 +23,7 @@ import {
   TextField,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
-import { fetchResidentLongitudinalAssignments } from '../../../services/longitudinal';
+import { fetchClinicTypes, fetchResidentLongitudinalAssignments } from '../../../services/longitudinal';
 import { fetchResidentSchedule } from '../../../services/rotations';
 import { fetchRotationCatalogue } from '../../../services/rotationCatalogue';
 import { createRotationRequest } from '../../../services/rotationRequests';
@@ -31,13 +31,14 @@ import { useInAppNotifications } from '../../../services/inAppNotifications';
 import {
   OTHER_REASON,
   OTHER_REASON_LABEL,
-  REASON_OPTIONS,
   buildReason,
+  reasonOptionsFor,
 } from '../../../constants/reasons';
 import { spacing } from '../../../theme';
+import { buildClinicRequestOptions, rotationCatalogueLabel } from '../../../utils/clinicRequestOptions';
 import { formatDateRange, formatShortDate, formatWeeks, normalizeToISODate } from '../../../utils/format';
 import { groupScheduleByBlock, type RotationPhase } from '../../../utils/insights';
-import type { RotationCatalogueEntry, RotationRequestType } from '../../../types/api';
+import type { RotationRequestType } from '../../../types/api';
 
 /**
  * Rotations — the resident's schedule, grouped by academic block.
@@ -80,8 +81,14 @@ interface RequestForm {
   /** The catalogue row picked from the department list, as a string id. */
   rotationId: string | null;
   /**
-   * Free text — the clinic field, and the department field when the catalogue
-   * has nothing to offer and the resident has to type.
+   * The clinic row picked from the clinic pick-list (a `ClinicRequestOption`
+   * value). `null` means nothing picked yet, or the resident switched to typing.
+   */
+  clinicValue: string | null;
+  /**
+   * Free text — the department field when the catalogue has nothing to offer,
+   * and the clinic field when the resident chose to type a clinic that is not
+   * in the list.
    */
   departmentClinic: string;
   startDate: string;
@@ -94,23 +101,13 @@ interface RequestForm {
 
 const EMPTY_FORM: RequestForm = {
   rotationId: null,
+  clinicValue: null,
   departmentClinic: '',
   startDate: '',
   endDate: '',
   reasonValue: '',
   customReason: '',
 };
-
-/**
- * The label the department list shows: name, abbreviation, hospital department.
- *
- * All three sit on one line because all three are things a resident searches by —
- * "IM", "wards", "internal medicine" — and `SheetSelectField` filters on the label.
- */
-function catalogueLabel(entry: RotationCatalogueEntry): string {
-  const name = entry.abbreviation ? `${entry.full_name} (${entry.abbreviation})` : entry.full_name;
-  return entry.department ? `${name} — ${entry.department}` : name;
-}
 
 function looksLikeDate(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
@@ -138,48 +135,81 @@ export default function RotationsScreen() {
     () =>
       (catalogue.data ?? [])
         .filter((entry) => entry.is_active === 1)
-        .map((entry) => ({ value: String(entry.id), label: catalogueLabel(entry) })),
+        .map((entry) => ({ value: String(entry.id), label: rotationCatalogueLabel(entry) })),
     [catalogue.data],
   );
 
-  const reasonOptions = useMemo(
-    () => [
-      ...REASON_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
-      { value: OTHER_REASON, label: OTHER_REASON_LABEL },
-    ],
-    [],
+  /**
+   * The programme's clinic catalogue (`longitudinal_clinic_types`), for the
+   * clinic request form. Read separately from the resident's own clinic
+   * assignments: what a resident is *on* and what the programme *runs* are two
+   * different questions.
+   */
+  const clinicTypes = useApiResource(() => fetchClinicTypes(programId), [programId]);
+
+  /**
+   * The clinic pick-list: the standard primary-care clinics, the programme's
+   * active clinics, then the active Rotations Catalogue entries. Built in a
+   * pure function (`utils/clinicRequestOptions`) so the ordering and the
+   * deduplication are testable without rendering the sheet.
+   */
+  const clinicOptions = useMemo(
+    () =>
+      buildClinicRequestOptions({
+        clinicTypes: clinicTypes.data ?? [],
+        catalogue: catalogue.data ?? [],
+      }),
+    [clinicTypes.data, catalogue.data],
   );
 
   const blocks = useMemo(() => groupScheduleByBlock(schedule.data ?? []), [schedule.data]);
   const [showGrid, setShowGrid] = useState(false);
   const [requestType, setRequestType] = useState<RotationRequestType | null>(null);
   const [form, setForm] = useState<RequestForm>(EMPTY_FORM);
+  /** True when the resident chose "my clinic is not listed" and is typing instead. */
+  const [clinicManual, setClinicManual] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  const reasonOptions = useMemo(() => {
+    const presets = reasonOptionsFor(requestType ?? 'HOSPITAL');
+    return [
+      ...presets.map((option) => ({ value: option.value, label: option.label })),
+      { value: OTHER_REASON, label: OTHER_REASON_LABEL },
+    ];
+  }, [requestType]);
 
   /** The hint under the reason group: what the chosen option means, once chosen. */
   const reasonHint = useMemo(() => {
     if (form.reasonValue === OTHER_REASON) return 'Opens a field for your own words.';
-    const picked = REASON_OPTIONS.find((option) => option.value === form.reasonValue);
+    const picked = reasonOptionsFor(requestType ?? 'HOSPITAL').find(
+      (option) => option.value === form.reasonValue,
+    );
     return picked ? picked.hint : 'Optional, but it is what the coordinator reads first.';
-  }, [form.reasonValue]);
+  }, [form.reasonValue, requestType]);
 
   /**
-   * Which department control this request gets.
+   * Which department control a hospital request gets.
    *
    * A hospital request picks from the catalogue when the catalogue answers;
    * while it is loading, and when it comes back empty or errors, the resident
    * falls back to typing rather than being blocked by a screen they cannot fix.
-   * A clinic request never had a catalogue to pick from.
+   *
+   * A clinic request always has a pick-list — the standard primary-care clinics
+   * are constants, so it cannot be empty — and the "type it instead" control is
+   * the fallback for a clinic the programme has not catalogued.
    */
   const showCataloguePicker = requestType === 'HOSPITAL' && catalogueOptions.length > 0;
   const showLoadingPicker = requestType === 'HOSPITAL' && catalogue.isLoading && catalogueOptions.length === 0;
   const showManualDepartment = requestType === 'HOSPITAL' && !catalogue.isLoading && catalogueOptions.length === 0;
+  const clinicListIncomplete =
+    requestType === 'CLINIC' && Boolean(clinicTypes.error || catalogue.error);
 
   const residentName = session?.residentName ?? 'Your schedule';
 
   function openRequest(type: RotationRequestType) {
     setForm(EMPTY_FORM);
+    setClinicManual(false);
     setFormError(null);
     setRequestType(type);
     // The pick-list is fetched when the screen mounts, but the catalogue is the
@@ -187,6 +217,7 @@ export default function RotationsScreen() {
     // re-read it as the form opens. The previous list stays on screen until the
     // fresh one lands, so a slow or offline reload never blanks the field.
     catalogue.refresh();
+    clinicTypes.refresh();
   }
 
   function closeRequest() {
@@ -198,17 +229,33 @@ export default function RotationsScreen() {
   async function submitRequest() {
     if (!requestType) return;
 
-    // A picked rotation travels two ways: as `department_clinic` (what the queue
+    // A picked row travels two ways: as `department_clinic` (what the queue
     // shows and the notification reads) and as `rotation_id` (what approval
     // actually places). The id is the one that counts — the string is only the
-    // fallback for a typed department or a catalogue entry deleted in between.
-    const picked =
-      requestType === 'HOSPITAL' && form.rotationId !== null
-        ? (catalogue.data ?? []).find((entry) => String(entry.id) === form.rotationId) ?? null
-        : null;
-    const departmentClinic = picked
-      ? picked.department.trim() || picked.full_name.trim()
-      : form.departmentClinic.trim();
+    // fallback for a typed name or a catalogue entry deleted in between.
+    //
+    // A clinic picked from the standard / programme list carries no rotation id:
+    // it is a clinic name, and the coordinator pairs the resident by that name.
+    // Only a Rotations Catalogue entry brings its id along.
+    let departmentClinic = form.departmentClinic.trim();
+    let rotationId: number | undefined;
+
+    if (requestType === 'HOSPITAL') {
+      const picked =
+        form.rotationId !== null
+          ? (catalogue.data ?? []).find((entry) => String(entry.id) === form.rotationId) ?? null
+          : null;
+      if (picked) {
+        departmentClinic = picked.department.trim() || picked.full_name.trim();
+        rotationId = Number(picked.id);
+      }
+    } else if (!clinicManual) {
+      const pickedClinic = clinicOptions.find((option) => option.value === form.clinicValue) ?? null;
+      if (pickedClinic) {
+        departmentClinic = pickedClinic.clinicName;
+        rotationId = pickedClinic.rotationId ?? undefined;
+      }
+    }
     // `DateField` normalises on blur, so in practice these already read
     // `YYYY-MM-DD`. Normalising again here means a pasted `18/10` still submits
     // correctly when the field never lost focus — e.g. the button is tapped
@@ -221,7 +268,9 @@ export default function RotationsScreen() {
       setFormError(
         requestType === 'HOSPITAL'
           ? 'Choose the department you want to join.'
-          : 'Enter the clinic you want to join.',
+          : clinicManual
+            ? 'Enter the clinic you want to join.'
+            : 'Choose the clinic you want to join.',
       );
       return;
     }
@@ -255,7 +304,7 @@ export default function RotationsScreen() {
         program_id: programId,
         request_type: requestType,
         department_clinic: departmentClinic,
-        rotation_id: picked ? Number(picked.id) : undefined,
+        rotation_id: rotationId,
         start_date: startDate,
         end_date: endDate,
         reason,
@@ -542,14 +591,66 @@ export default function RotationsScreen() {
           ) : null}
 
           {requestType === 'CLINIC' ? (
-            <TextField
-              label="Clinic"
-              required
-              value={form.departmentClinic}
-              onChangeText={(value) => setForm((current) => ({ ...current, departmentClinic: value }))}
-              placeholder="e.g. Antenatal Care Clinic"
-              hint="The clinic you want to be paired with."
-            />
+            <>
+              {clinicListIncomplete ? (
+                <View style={styles.catalogueFallback}>
+                  <Banner
+                    tone="warning"
+                    title="Clinic list may be incomplete"
+                    message="The standard primary-care clinics are always listed, but the programme's clinic and rotation catalogue could not be loaded. You can still type the clinic instead."
+                  />
+                  <Button
+                    label="Retry the list"
+                    variant="outline"
+                    onPress={() => {
+                      clinicTypes.refresh();
+                      catalogue.refresh();
+                    }}
+                    accessibilityHint="Reloads the programme's clinic list"
+                  />
+                </View>
+              ) : null}
+
+              {clinicManual ? (
+                <>
+                  <TextField
+                    label="Clinic"
+                    required
+                    value={form.departmentClinic}
+                    onChangeText={(value) => setForm((current) => ({ ...current, departmentClinic: value }))}
+                    placeholder="e.g. Well Women Clinic"
+                    hint="The exact clinic name — your coordinator matches it when approving."
+                  />
+                  <Button
+                    label="Back to the clinic list"
+                    variant="ghost"
+                    fullWidth={false}
+                    onPress={() => setClinicManual(false)}
+                    accessibilityHint="Returns to the list of catalogued clinics"
+                  />
+                </>
+              ) : (
+                <>
+                  <SheetSelectField
+                    label="Clinic"
+                    required
+                    searchable
+                    value={form.clinicValue}
+                    onChange={(value) => setForm((current) => ({ ...current, clinicValue: value }))}
+                    options={clinicOptions}
+                    placeholder="Choose a clinic"
+                    hint="Type to filter by clinic name, abbreviation or specialty."
+                  />
+                  <Button
+                    label="My clinic is not listed — type it instead"
+                    variant="ghost"
+                    fullWidth={false}
+                    onPress={() => setClinicManual(true)}
+                    accessibilityHint="Opens a text field for a clinic that is not in the list"
+                  />
+                </>
+              )}
+            </>
           ) : null}
 
           <DateField
@@ -583,7 +684,11 @@ export default function RotationsScreen() {
               multiline
               value={form.customReason}
               onChangeText={(value) => setForm((current) => ({ ...current, customReason: value }))}
-              placeholder="Please specify your reason for requesting this rotation..."
+              placeholder={
+                requestType === 'CLINIC'
+                  ? 'Please specify your reason for requesting this clinic rotation...'
+                  : 'Please specify your reason for requesting this rotation...'
+              }
               hint="One or two lines is plenty — it is what your coordinator reads first."
             />
           ) : null}

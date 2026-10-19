@@ -107,11 +107,22 @@ class RotationRequestController {
         program_id,
         request_type = 'HOSPITAL',
         department_clinic,
+        // The canonical column is `department_clinic`, and that is what the app
+        // sends. The two aliases are accepted because the domain model names the
+        // field after the request type: `clinic_name` for a clinic request,
+        // `department_name` for a hospital one. All three land in the one column.
+        clinic_name,
+        department_name,
         rotation_id,
         start_date,
         end_date,
         reason,
       } = req.body ?? {};
+
+      const departmentClinic =
+        [department_clinic, clinic_name, department_name].find(
+          (value) => typeof value === 'string' && value.trim() !== '',
+        ) ?? null;
 
       const problems = [];
       if (!Number.isInteger(Number(resident_id)) || Number(resident_id) <= 0) {
@@ -120,7 +131,7 @@ class RotationRequestController {
       if (!VALID_TYPES.includes(String(request_type).toUpperCase())) {
         problems.push('Request type must be HOSPITAL or CLINIC.');
       }
-      if (typeof department_clinic !== 'string' || department_clinic.trim() === '') {
+      if (departmentClinic === null) {
         problems.push('A department or clinic name is required.');
       }
       const rotationId = Number(rotation_id);
@@ -161,7 +172,7 @@ class RotationRequestController {
           Number(resident_id),
           Number(program_id) || 0,
           String(request_type).toUpperCase(),
-          department_clinic.trim().slice(0, 255),
+          departmentClinic.trim().slice(0, 255),
           rotationIdValue,
           start,
           end,

@@ -178,6 +178,12 @@ app.use('/api/v1/roster', rosterImportRoutes);
 app.use('/api/v1/rotations/import', rotationImportRoutes);
 app.use('/api/v1/requests/rotation', rotationRequestRoutes);
 
+// The same request queue under the path the API contract names in prose
+// (`/rotations/requests`). Declared after the `/rotations` router above, so the
+// real rotation routes always answer first and this alias only sees a path none
+// of them claim.
+app.use('/api/v1/rotations/requests', rotationRequestRoutes);
+
 // Schedule exports (styled .xlsx from the shared report model).
 const exportRoutes = require('./routes/exportRoutes');
 app.use('/api/v1/exports', exportRoutes);

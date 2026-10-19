@@ -10,6 +10,9 @@
  * They are data rather than inline config because the label, the explanation
  * and the option id must stay in step with the payload they produce, and
  * because the coordinator's queue has to be able to filter on the id.
+ *
+ * There is one set per request type — a block rotation and a clinic session are
+ * different asks, and the coordinator filters on the exact stored string.
  */
 
 /** The option that is not an option: it opens a text field instead. */
@@ -63,9 +66,58 @@ export const REASON_OPTIONS: readonly ReasonOption[] = [
   },
 ] as const;
 
+/**
+ * The reasons offered for a **clinic** request.
+ *
+ * A clinic request is a different ask from a hospital rotation: the resident is
+ * filling a longitudinal / primary-care requirement, not covering a block, so
+ * "Out-of-Program / External Attachment" is not a clinic reason and
+ * "Personal / Scheduling Alignment" is. The two lists are kept apart rather than
+ * merged because the coordinator filters the queue on the exact string — mixing
+ * them would make one filter chip mean two different things.
+ */
+export const CLINIC_REASON_OPTIONS: readonly ReasonOption[] = [
+  {
+    value: 'Mandatory Core Clinic Requirement',
+    label: 'Mandatory Core Clinic Requirement',
+    hint: 'Fulfilling the required ACGME / institutional clinic block.',
+  },
+  {
+    value: 'Elective / Subspecialty Focus',
+    label: 'Elective / Subspecialty Focus',
+    hint: 'Deepening skills in a specialised outpatient clinic.',
+  },
+  {
+    value: 'Remediation / Off-Cycle Catchup',
+    label: 'Remediation / Off-Cycle Catchup',
+    hint: 'Completing required clinical shift hours.',
+  },
+  {
+    value: 'Research / Scholarly Activity',
+    label: 'Research / Scholarly Activity',
+    hint: 'Dedicated research block or clinical project.',
+  },
+  {
+    value: 'Personal / Scheduling Alignment',
+    label: 'Personal / Scheduling Alignment',
+    hint: 'Shift alignment or personal circumstances.',
+  },
+] as const;
+
+/**
+ * The presets for a request type.
+ *
+ * Exported as a function so the screen, the hint and any future queue filter
+ * all read one switch instead of each remembering which list applies where.
+ */
+export function reasonOptionsFor(requestType: 'HOSPITAL' | 'CLINIC'): readonly ReasonOption[] {
+  return requestType === 'CLINIC' ? CLINIC_REASON_OPTIONS : REASON_OPTIONS;
+}
+
 /** Every option a resident can pick, including the one that asks them to type. */
 export const ALL_REASON_VALUES: readonly string[] = [
   ...REASON_OPTIONS.map((option) => option.value),
+  ...CLINIC_REASON_OPTIONS.map((option) => option.value),
   OTHER_REASON,
 ] as const;
 
