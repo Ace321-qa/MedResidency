@@ -6,6 +6,7 @@ const {
   parseCcc,
 } = require('../utils/excel/grid');
 const { academicYearMatchValues } = require('../utils/academicYear');
+const { rotationMatchKey, rotationLooseKey } = require('../utils/rotationMatch');
 const { MAX_ABBREVIATION_LENGTH, MAX_NAME_LENGTH } = require('../utils/excel/catalogue');
 const {
   MASTER_GRID_START,
@@ -73,28 +74,6 @@ function runsOf(entries) {
  * should still return a readable payload.
  */
 const MAX_WARNINGS = 50;
-
-/**
- * The key a rotation name or abbreviation matches on: lower-cased, with
- * punctuation collapsed to single spaces, so `Medicine Inpatient`,
- * `medicine  inpatient` and `MEDICINE-INPATIENT` are all one rotation.
- */
-function rotationMatchKey(value) {
-  return String(value ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-/**
- * The looser key behind the contains-fallback: no spaces either, so `PHC Clinic`
- * and `PHCCLINIC` line up. Only used after the exact key has missed.
- */
-function rotationLooseKey(value) {
-  return String(value ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '');
-}
 
 async function resolveProgram(conn, requestedId) {
   const programId = Number(requestedId) || null;

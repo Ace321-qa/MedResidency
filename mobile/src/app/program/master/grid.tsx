@@ -1,7 +1,7 @@
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { CalendarX, Download, Plus } from 'lucide-react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 
 import {
   AppHeader,
@@ -163,6 +163,27 @@ export default function MasterGridScreen() {
   );
 
   const rotations = useApiResource(() => fetchRotations(programId), [programId]);
+
+  /**
+   * Re-read the grid whenever the screen is focused again.
+   *
+   * A rotation request is approved on the Approvals tab, which writes a rota row
+   * this screen has already fetched; without a refetch the newly-created
+   * assignment stays invisible until a manual pull-to-refresh. The first focus
+   * is the mount, which `useApiResource` already loads, so it is skipped — only
+   * a *return* to the screen refetches.
+   */
+  const refreshGrid = grid.refresh;
+  const hasFocusedOnce = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (!hasFocusedOnce.current) {
+        hasFocusedOnce.current = true;
+        return;
+      }
+      refreshGrid();
+    }, [refreshGrid]),
+  );
 
   const { blocksByNumber, residents, cellFor } = useMemo(() => {
     const blockMap = new Map<number, GridBlock>();

@@ -85,9 +85,15 @@ function check(label, fn) {
   }
 }
 
-/** Statements actually issued, so "writes nothing" means no INSERT, not no query. */
+/**
+ * Assignment rows actually inserted.
+ *
+ * The service also writes a notification row on success, so a bare "any INSERT"
+ * filter would count two and read the notification's parameters. Every caller of
+ * this helper is asking about the assignment, so it filters to that table.
+ */
 function inserts() {
-  return queryLog.filter((entry) => /^\s*INSERT/i.test(entry.sql));
+  return queryLog.filter((entry) => /^\s*INSERT INTO resident_rotation_assignments/i.test(entry.sql));
 }
 
 /**

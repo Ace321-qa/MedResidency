@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const NotificationService = require('../services/notificationService');
+const RotationApprovalService = require('../services/rotationApprovalService');
 
 /**
  * Rotation requests — a resident asking to be moved onto a hospital rotation
@@ -13,9 +14,15 @@ const NotificationService = require('../services/notificationService');
  * pre-existing Hostinger database.
  *
  * Statuses are deliberately a closed set so the queue can filter on them:
- * PENDING → APPROVED | REJECTED. Approving does not itself create a rotation
- * assignment; that stays a coordinator action on the rota, because silently
- * writing a schedule row from a resident's request would bypass block dates.
+ * PENDING → APPROVED | REJECTED.
+ *
+ * Approving **places the resident on the rota**. An earlier revision stopped at
+ * the status flip, which left the queue saying APPROVED while the Master
+ * Rotation Grid still showed the resident unassigned — the queue and the rota
+ * disagreeing about the same request. Approval now resolves the block and the
+ * rotation and upserts the `resident_rotation_assignments` row the grid reads,
+ * in the same transaction as the status change: either both land or neither
+ * does, so the queue and the grid can never disagree again.
  */
 
 const TABLE_SQL = `
@@ -184,21 +191,44 @@ class RotationRequestController {
         return badRequest(res, ['A rejection reason is required.']);
       }
 
-      const [result] = await db.query(
-        `UPDATE rotation_requests
-            SET status = ?, decision_reason = ?, decided_at = NOW()
-          WHERE request_id = ?`,
-        [status, typeof decisionReason === 'string' ? decisionReason.trim() : null, requestId],
-      );
+      // The decision and the assignment it implies are one unit: an APPROVED
+      // request with no rota row is the bug this endpoint exists to prevent, so
+      // they commit together or not at all.
+      let decided = null;
+      let assignment = null;
+      const conn = await db.getConnection();
+      try {
+        await conn.beginTransaction();
 
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ success: false, error: 'Request not found.' });
+        const [result] = await conn.query(
+          `UPDATE rotation_requests
+              SET status = ?, decision_reason = ?, decided_at = NOW()
+            WHERE request_id = ?`,
+          [status, typeof decisionReason === 'string' ? decisionReason.trim() : null, requestId],
+        );
+
+        if (result.affectedRows === 0) {
+          await conn.rollback();
+          return res.status(404).json({ success: false, error: 'Request not found.' });
+        }
+
+        const rows = await RotationRequestController.#readOne(requestId, conn);
+        decided = rows[0] ?? null;
+
+        if (decided && status === 'APPROVED') {
+          assignment = await RotationApprovalService.syncApprovedRequest(conn, decided);
+        }
+
+        await conn.commit();
+      } catch (error) {
+        await conn.rollback().catch(() => {});
+        throw error;
+      } finally {
+        conn.release();
       }
 
-      const rows = await RotationRequestController.#readOne(requestId);
-      const decided = rows[0] ?? null;
-
-      // Alert the requesting resident of the decision.
+      // Alert the requesting resident of the decision, once the write is durable.
+      // Best-effort: a notification problem must not undo an approval.
       if (decided) {
         await NotificationService.notifyResidentSafe(decided.resident_id, {
           type: 'ROTATION_APPROVAL',
@@ -214,14 +244,26 @@ class RotationRequestController {
         });
       }
 
-      return res.json({ success: true, data: { request: decided } });
+      return res.json({ success: true, data: { request: decided, assignment } });
     } catch (error) {
+      // The approval service raises a 400/409 with a sentence the coordinator
+      // can act on (no block calendar, no programme, the request is malformed),
+      // so it is surfaced rather than flattened into a 500.
+      if (typeof error.statusCode === 'number') {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
+      if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
+        return res.status(409).json({
+          success: false,
+          error: 'The request references a resident, rotation or block that no longer exists.',
+        });
+      }
       return res.status(500).json({ success: false, error: error.message });
     }
   }
 
-  static async #readOne(requestId) {
-    const [rows] = await db.query(
+  static async #readOne(requestId, conn = db) {
+    const [rows] = await conn.query(
       `SELECT
          r.request_id,
          r.resident_id,
