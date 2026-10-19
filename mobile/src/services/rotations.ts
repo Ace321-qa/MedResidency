@@ -8,6 +8,7 @@ import type {
   CohortGridCell,
   CreateAssignmentPayload,
   CreateBlockPayload,
+  GenerateBlocksResult,
   RotationAssignment, RotationAssignmentDetail,
   RotationBlock,
   RotationDefinition,
@@ -19,6 +20,23 @@ export async function fetchRotationBlocks(programId: number): Promise<RotationBl
   const path = `/rotations/blocks${queryString({ program_id: programId })}`;
   const response = await request<ApiListResponse<RotationBlock>>(path);
   return response.data ?? [];
+}
+
+/**
+ * `POST /rotations/blocks/generate` — complete the active academic year to its
+ * thirteen four-week blocks.
+ *
+ * Idempotent: a full year returns `created: []` and the server writes nothing.
+ * The block list calls it as it opens, so a year that was only partly typed in
+ * (production stopped at Block 7) still shows the whole calendar. Existing
+ * blocks are never edited — they may carry assignments.
+ */
+export async function generateAcademicBlocks(programId: number): Promise<GenerateBlocksResult> {
+  const response = await request<ApiResponse<GenerateBlocksResult>>('/rotations/blocks/generate', {
+    method: 'POST',
+    data: { program_id: programId },
+  });
+  return response.data;
 }
 
 export async function fetchRotations(programId: number): Promise<RotationDefinition[]> {

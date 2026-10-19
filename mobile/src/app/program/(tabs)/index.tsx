@@ -21,6 +21,7 @@ import { fetchResidentList } from '../../../services/residents';
 import { fetchRotationBlocks } from '../../../services/rotations';
 import { spacing } from '../../../theme';
 import { formatDateRange, humanizeToken, todayCalendarDate } from '../../../utils/format';
+import { blockTitle } from '../../../utils/blockLabels';
 import { residentFullName, residentSubtitle } from '../../../utils/residents';
 import { EMPTY_ARRAY } from '../../../utils/empty';
 import type { ResidentListItem, RotationBlock } from '../../../types/api';
@@ -114,7 +115,7 @@ export default function ProgramOverviewScreen() {
               {upcoming.map((block, index) => (
                 <ListRow
                   key={block.block_id}
-                  title={`${block.block_name} · ${block.academic_year}`}
+                  title={blockTitle(block)}
                   subtitle={
                     block.week_start_day
                       ? `Week starting ${humanizeToken(block.week_start_day)}`

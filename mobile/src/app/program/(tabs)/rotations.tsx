@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { ChevronDown, ChevronUp, Library } from 'lucide-react-native';
 import { router } from 'expo-router';
 
 import {
   AppHeader,
+  Banner,
   Button,
   Card,
   ChoiceGroup,
@@ -19,8 +20,9 @@ import {
   Text,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
-import { fetchRotationBlocks, fetchRotations } from '../../../services/rotations';
+import { fetchRotationBlocks, fetchRotations, generateAcademicBlocks } from '../../../services/rotations';
 import { colors, spacing, type Tone } from '../../../theme';
+import { blockTitle } from '../../../utils/blockLabels';
 import { formatDateRange, formatWeeks, humanizeToken, todayCalendarDate } from '../../../utils/format';
 import {
   blockPhase,
@@ -75,6 +77,41 @@ export default function ProgramRotationsScreen() {
   const blocks = useApiResource(() => fetchRotationBlocks(programId), [programId]);
   const rotations = useApiResource(() => fetchRotations(programId), [programId]);
 
+  const [calendarNotice, setCalendarNotice] = useState<string | null>(null);
+  const completedCalendar = useRef(false);
+  const refreshBlocks = blocks.refresh;
+
+  /**
+   * Complete the academic year to its thirteen blocks.
+   *
+   * The Master Rotation Grid has always drawn thirteen columns, but the block
+   * table only held what had been typed in by hand (production stopped at Block
+   * 7), so Blocks 8-13 could not be assigned at all. The API fills only the
+   * missing numbers and never edits an existing block, so this is safe to run on
+   * every open; the ref keeps it to one request per visit, and a complete year
+   * writes nothing.
+   */
+  useEffect(() => {
+    if (completedCalendar.current || programId <= 0 || blocks.status !== 'ready') return;
+    completedCalendar.current = true;
+    generateAcademicBlocks(programId)
+      .then((result) => {
+        if (result.created.length === 0) return;
+        const first = result.created[0].block_number;
+        const last = result.created[result.created.length - 1].block_number;
+        setCalendarNotice(
+          `Added ${result.created.length} block${
+            result.created.length === 1 ? '' : 's'
+          } (Block ${first}–${last}) to complete ${result.academic_year}.`,
+        );
+        refreshBlocks();
+      })
+      .catch(() => {
+        // The screen still lists the blocks on record; failing to complete the
+        // calendar must not stop a coordinator from reading it.
+      });
+  }, [blocks.status, programId, refreshBlocks]);
+
   const needle = query.trim().toLowerCase();
   const today = todayCalendarDate();
   const searching = needle.length > 0;
@@ -82,9 +119,7 @@ export default function ProgramRotationsScreen() {
   const matchedBlocks = useMemo(
     () =>
       (blocks.data ?? [])
-        .filter((block) =>
-          needle ? `${block.block_name} ${block.academic_year}`.toLowerCase().includes(needle) : true,
-        )
+        .filter((block) => (needle ? blockTitle(block).toLowerCase().includes(needle) : true))
         .sort((a, b) => (blockStartDay(a) ?? '').localeCompare(blockStartDay(b) ?? '')),
     [blocks.data, needle],
   );
@@ -120,7 +155,7 @@ export default function ProgramRotationsScreen() {
     return (
       <ListRow
         key={block.block_id}
-        title={`${block.block_name} · ${block.academic_year}`}
+        title={blockTitle(block)}
         subtitle={
           block.week_start_day
             ? `Week starts ${humanizeToken(block.week_start_day)}`
@@ -162,9 +197,19 @@ export default function ProgramRotationsScreen() {
           accessibilityLabel={view === 'BLOCKS' ? 'Search blocks' : 'Search rotations'}
           value={query}
           onChangeText={setQuery}
-          placeholder={view === 'BLOCKS' ? 'Block name or year' : 'Rotation or department'}
+          placeholder={view === 'BLOCKS' ? 'Block number or year' : 'Rotation or department'}
         />
       </View>
+
+      {view === 'BLOCKS' && calendarNotice ? (
+        <Banner
+          tone="info"
+          title="Academic calendar completed"
+          message={calendarNotice}
+          onDismiss={() => setCalendarNotice(null)}
+          style={styles.calendarNotice}
+        />
+      ) : null}
 
       {view === 'BLOCKS' ? (
         <>
@@ -180,7 +225,7 @@ export default function ProgramRotationsScreen() {
                 title={searching ? 'No matching blocks' : 'No blocks'}
                 message={
                   searching
-                    ? `Nothing matches “${query.trim()}”. Try a different block name or year.`
+                    ? `Nothing matches “${query.trim()}”. Try a different block number or year.`
                     : 'No academic blocks are recorded for this programme.'
                 }
               />
@@ -243,7 +288,7 @@ export default function ProgramRotationsScreen() {
                     style={highlightedIsCurrent ? styles.currentCard : styles.upcomingCard}
                   >
                     <ListRow
-                      title={`${highlighted.block_name} · ${highlighted.academic_year}`}
+                      title={blockTitle(highlighted)}
                       titleAccessory={
                         <StatusBadge
                           label={highlightedIsCurrent ? 'Current' : 'Upcoming'}
@@ -395,6 +440,9 @@ export default function ProgramRotationsScreen() {
 const styles = StyleSheet.create({
   search: {
     marginVertical: spacing.md,
+  },
+  calendarNotice: {
+    marginBottom: spacing.md,
   },
   addButton: {
     marginTop: spacing.md,

@@ -25,6 +25,7 @@ import {
 } from '../../../services/rotations';
 import { spacing } from '../../../theme';
 import { getAcademicYears } from '../../../utils/academicYear';
+import { blockTitle } from '../../../utils/blockLabels';
 import { endDateForDuration, isCalendarDate, resolveBlockWindow } from '../../../utils/dateCalc';
 import type { RotationBlock } from '../../../types/api';
 
@@ -291,7 +292,7 @@ function EditBlockForm({
     <Screen bottomGutter={spacing.xxl}>
       <AppHeader
         title="Edit academic block"
-        subtitle={`Block ${block.block_number} · ${block.block_name}`}
+        subtitle={blockTitle(block)}
         onBack={goBack}
       />
 

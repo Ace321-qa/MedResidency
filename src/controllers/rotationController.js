@@ -78,6 +78,49 @@ class RotationController {
     }
   }
 
+  /**
+   * `POST /rotations/blocks/generate` — complete an academic year to thirteen
+   * blocks.
+   *
+   * Idempotent, so the block list can call it on open without asking: a complete
+   * year writes nothing and returns `created: []`. `academic_year` is optional
+   * and defaults to the year containing today.
+   */
+  static async generateBlocks(req, res) {
+    try {
+      const programId = Number(req.body?.program_id ?? req.query?.program_id);
+      if (!Number.isInteger(programId) || programId <= 0) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+
+      const result = await RotationService.ensureAcademicBlocks(
+        programId,
+        req.body?.academic_year ?? req.query?.academic_year ?? null,
+      );
+      const message =
+        result.created.length === 0
+          ? `${result.academic_year} already has its full block calendar.`
+          : `${result.created.length} block${result.created.length === 1 ? '' : 's'} created for ${result.academic_year}.`;
+
+      return res.status(result.created.length > 0 ? 201 : 200).json({
+        success: true,
+        message,
+        data: {
+          academic_year: result.academic_year,
+          duration_weeks: result.duration_weeks,
+          created: result.created,
+          skipped: result.skipped,
+        },
+      });
+    } catch (error) {
+      console.error('Error in generateBlocks controller:', error.message);
+      if (typeof error.statusCode === 'number') {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
+      return respondWithError(res, error, 'Could not generate the academic calendar.');
+    }
+  }
+
   static async createBlock(req, res) {
     try {
       const { program_id, academic_year, block_number, block_name, start_date } = req.body;

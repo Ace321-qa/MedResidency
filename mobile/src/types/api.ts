@@ -710,6 +710,20 @@ export interface CreateBlockPayload {
 }
 
 /**
+ * `POST /rotations/blocks/generate` — complete an academic year's calendar.
+ *
+ * Idempotent: running it on a complete year returns `created: []`. `skipped`
+ * lists a block number the server refused to guess dates for because the gap
+ * was too small — never silently overlapped.
+ */
+export interface GenerateBlocksResult {
+  academic_year: string;
+  duration_weeks: number;
+  created: Pick<RotationBlock, 'block_id' | 'block_number' | 'block_name' | 'start_date' | 'end_date'>[];
+  skipped: number[];
+}
+
+/**
  * `POST /residents/onboard` — the coordinator's registration form.
  *
  * Nested to match the three inserts the API performs in one transaction:

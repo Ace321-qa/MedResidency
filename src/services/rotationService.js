@@ -1,13 +1,29 @@
 // Step 1: Import our Hostinger MySQL connection pool
 const db = require('../config/db');
 const NotificationService = require('./notificationService');
-const { academicYearMatchValues } = require('../utils/academicYear');
 const {
+  academicYearForDate,
+  academicYearMatchValues,
+  normalizeAcademicYear,
+} = require('../utils/academicYear');
+const {
+  DAY_NAMES,
+  addDays,
   describeWindow,
   diffDays,
   resolveBlockWindow,
   weekEndDay,
 } = require('../utils/blockDates');
+
+/**
+ * How many blocks a standard academic year holds: 13 × 4 weeks = 52 weeks.
+ *
+ * The Master Rotation Grid has always drawn thirteen columns from the calendar
+ * (`mobile/src/utils/masterGridCalendar.ts`), so the block table is the thing
+ * that disagreed with it — production stopped at Block 7 because each block was
+ * added by hand.
+ */
+const STANDARD_BLOCKS_PER_YEAR = 13;
 
 /**
  * Scalar subquery yielding one display identifier per resident.
@@ -123,7 +139,7 @@ class RotationService {
    */
   static async getBlockCalendarRules(programId) {
     const query = `
-      SELECT id AS program_id, week_start_day, default_block_duration_weeks
+      SELECT id AS program_id, week_start_day, default_block_duration_weeks, academic_year_start_month
       FROM programs
       WHERE id = ?
     `;
@@ -225,6 +241,125 @@ class RotationService {
       end_date: window.end_date,
       duration_weeks: window.duration_weeks,
     };
+  }
+
+  /**
+   * The first day a block can start on when the year has no blocks at all.
+   *
+   * The programme says which month its academic year opens in (July for the
+   * Family Medicine programme) and which weekday a block starts on (Sunday).
+   * The anchor is the first occurrence of that weekday in the opening month, so
+   * July 2026 opens on Sunday 05 July rather than on the 1st.
+   */
+  static academicYearAnchor(year, rules) {
+    const startYear = Number(String(year).slice(0, 4));
+    const month = Number(rules?.academic_year_start_month) || 7;
+    const anchor = `${startYear}-${String(month).padStart(2, '0')}-01`;
+    const target = DAY_NAMES.findIndex(
+      (day) => day.toUpperCase() === String(rules?.week_start_day ?? '').trim().toUpperCase(),
+    );
+    if (target < 0) return anchor;
+    const current = new Date(`${anchor}T00:00:00Z`).getUTCDay();
+    return addDays(anchor, (target - current + 7) % 7);
+  }
+
+  /**
+   * Complete an academic year to its standard thirteen blocks.
+   *
+   * The block list used to stop wherever typing stopped — production had seven
+   * blocks for 2026-2027 while the Master Rotation Grid drew thirteen columns,
+   * so assignments could not be made for Blocks 8-13 at all. This fills only the
+   * **missing** numbers and never edits a block that already exists, because an
+   * existing block may carry assignments and a coordinator's deliberate dates.
+   *
+   * Placement is sequential and non-overlapping:
+   *
+   *  - a trailing block (the usual case) starts the day after its predecessor
+   *    ends, so the calendar has no gap;
+   *  - a hole in the middle is placed backwards from the block that follows it,
+   *    and is skipped — and reported — when there is not enough room, because
+   *    guessing dates that overlap a real block is worse than leaving the gap
+   *    visible.
+   *
+   * Idempotent: with thirteen blocks present it writes nothing. New rows are
+   * named `Block N`, the official label, rather than inheriting a rotation name.
+   *
+   * @param {number} programId
+   * @param {string|null} [academicYear] - Defaults to the year containing today.
+   * @returns {Promise<{academic_year:string, created:object[], skipped:number[],
+   *   duration_weeks:number}>}
+   */
+  static async ensureAcademicBlocks(programId, academicYear = null) {
+    const rules = await this.getBlockCalendarRules(programId);
+    if (!rules) {
+      const error = new Error('That programme does not exist.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const year = normalizeAcademicYear(academicYear) || academicYearForDate(new Date());
+    const durationWeeks = Number(rules.default_block_duration_weeks) || 4;
+    const blockDays = durationWeeks * 7;
+
+    const yearValues = academicYearMatchValues(year);
+    const [rows] = await db.query(
+      `SELECT id, block_number,
+              DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
+              DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date
+         FROM rotation_blocks
+        WHERE program_id = ? AND academic_year IN (${yearValues.map(() => '?').join(', ')})`,
+      [programId, ...yearValues],
+    );
+
+    const existing = new Map(rows.map((row) => [Number(row.block_number), row]));
+    const created = [];
+    const skipped = [];
+
+    for (let blockNumber = 1; blockNumber <= STANDARD_BLOCKS_PER_YEAR; blockNumber += 1) {
+      if (existing.has(blockNumber)) continue;
+
+      const previous = existing.get(blockNumber - 1) ?? null;
+      const next = [...existing.values()]
+        .filter((row) => Number(row.block_number) > blockNumber)
+        .sort((a, b) => Number(a.block_number) - Number(b.block_number))[0] ?? null;
+
+      let start = previous
+        ? addDays(previous.end_date, 1)
+        : this.academicYearAnchor(year, rules);
+      let end = addDays(start, blockDays - 1);
+
+      // A hole before an existing block: place it backwards from that block so
+      // it cannot overlap it. Skip when the window would run into its
+      // predecessor.
+      if (next && end >= next.start_date) {
+        end = addDays(next.start_date, -1);
+        start = addDays(end, -(blockDays - 1));
+        if (previous && start <= previous.end_date) {
+          skipped.push(blockNumber);
+          continue;
+        }
+      }
+
+      const block = await this.createBlock({
+        program_id: programId,
+        academic_year: year,
+        block_number: blockNumber,
+        // The official label. A block heading is never a rotation name.
+        block_name: `Block ${blockNumber}`,
+        start_date: start,
+        duration_weeks: durationWeeks,
+      });
+
+      existing.set(blockNumber, {
+        id: block.block_id,
+        block_number: blockNumber,
+        start_date: block.start_date,
+        end_date: block.end_date,
+      });
+      created.push(block);
+    }
+
+    return { academic_year: year, created, skipped, duration_weeks: durationWeeks };
   }
 
   static async getRotationsByProgram(programId) {

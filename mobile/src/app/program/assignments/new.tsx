@@ -15,6 +15,7 @@ import {
 } from '../../../components';
 import { spacing } from '../../../theme';
 import { getAcademicYears, sameAcademicYear } from '../../../utils/academicYear';
+import { blockTitle } from '../../../utils/blockLabels';
 import { isCalendarDate, resolveBlockWindow } from '../../../utils/dateCalc';
 import { goBack } from '../../../navigation/back';
 
@@ -180,7 +181,7 @@ export default function NewAssignmentScreen() {
           }
           options={blocksForYear.map((b) => ({
             value: String(b.block_id),
-            label: `${b.block_name} (Block ${b.block_number})`,
+            label: blockTitle(b),
           }))}
           error={blockIdError}
           required

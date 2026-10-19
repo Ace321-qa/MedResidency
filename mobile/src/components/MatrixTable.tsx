@@ -229,6 +229,8 @@ export function MatrixTable({
                   {columnGroups!.map((group) => (
                     <View
                       key={group.key}
+                      accessibilityRole="header"
+                      accessibilityLabel={`${group.label} column group`}
                       style={[
                         styles.groupCell,
                         {
@@ -283,7 +285,12 @@ export function MatrixTable({
                       {headerContent}
                     </Pressable>
                   ) : (
-                    <View key={column.key} style={headerCellStyle}>
+                    <View
+                      key={column.key}
+                      accessibilityRole="header"
+                      accessibilityLabel={`${column.title} column header`}
+                      style={headerCellStyle}
+                    >
                       {headerContent}
                     </View>
                   );

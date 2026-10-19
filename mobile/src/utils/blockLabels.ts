@@ -12,12 +12,20 @@
  * So every screen that prefixes or tags a rotation with its block goes through
  * here: the number when there is one, the stored name only when there is no
  * number to read, and nothing at all when there is neither. A title that cannot
- * name its block shows the rotation alone rather than guessing.
+ * name its block shows the rotation alone rather than guessing. Block headings
+ * use `blockTitle`, for exactly the same reason.
  */
+
+import { normalizeAcademicYear } from './academicYear';
 
 export interface BlockRef {
   block_number?: number | null;
   block_name?: string | null;
+}
+
+/** A block plus the year its card heading carries. */
+export interface BlockTitleRef extends BlockRef {
+  academic_year?: string | null;
 }
 
 /** A block name is only trustworthy when it actually looks like one. */
@@ -42,6 +50,21 @@ export function blockLabel(block: BlockRef | null | undefined): string | null {
   const name = typeof block?.block_name === 'string' ? block.block_name.trim() : '';
   const digits = BLOCK_NAME_PATTERN.exec(name);
   return digits ? `Block ${digits[1]}` : null;
+}
+
+/**
+ * `Block 5 · 2026-2027` — the heading a block card is allowed to have.
+ *
+ * The year is normalised for display because the column holds both "2026-2027"
+ * and "2026/2027" for the same academic year. The label itself still comes from
+ * `blockLabel`, so a coordinator-typed rotation category can never become a
+ * card title; a block with neither a number nor a block-shaped name is labelled
+ * "Unnamed block" rather than borrowing text from the rotation it contains.
+ */
+export function blockTitle(block: BlockTitleRef | null | undefined): string {
+  const label = blockLabel(block) ?? 'Unnamed block';
+  const year = normalizeAcademicYear(block?.academic_year);
+  return year ? `${label} · ${year}` : label;
 }
 
 /**

@@ -12,6 +12,9 @@ router.get('/export/master', RotationExportController.exportMaster);
 // Block Routes
 router.get('/blocks', RotationController.getBlocks);
 router.get('/blocks/dates', RotationController.getBlockDates);
+// The literal `/blocks/generate` is declared before the parameterless POST so
+// it can never be mistaken for a block payload.
+router.post('/blocks/generate', RotationController.generateBlocks);
 router.post('/blocks', RotationController.createBlock);
 router.put('/blocks/:block_id', RotationController.updateBlock);
 router.delete('/blocks/:block_id', RotationController.deleteBlock);
