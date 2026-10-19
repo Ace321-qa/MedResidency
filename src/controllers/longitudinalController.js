@@ -6,7 +6,21 @@ const { buildCccTemplateBuffer, parseCccMatrixFile } = require('../utils/excel/c
 const SupervisorService = require('../services/supervisorService');
 const { generateFacultyTemplate, parseFacultyFile } = require('../utils/excel/faculty');
 const { generateCccMatrixTemplate, buildDynamicTemplate } = require('../utils/excel/ccc');
-const { normalizeName, bestMatch, nameDistance } = require('./cccMatrixController');
+const { normalizeName, bestMatch } = require('./cccMatrixController');
+
+/**
+ * Resolve a name from a filled workbook against the programme's roster or
+ * faculty map: an exact normalized hit first, then the closest known key
+ * within the fuzzy tolerance. The same person is spelled several ways across
+ * the two sides — `Ahmad A Smith` on record, `Ahmad Smith` in the sheet — and
+ * a rota written against the wrong person is worse than no import at all.
+ */
+function lookupFuzzy(map, name) {
+  const norm = normalizeName(name);
+  if (norm && map.has(norm)) return map.get(norm);
+  const key = bestMatch(name, [...map.keys()]);
+  return key ? map.get(key) : null;
+}
 
 class LongitudinalController {
   static async getClinicTypes(req, res) {
@@ -760,12 +774,7 @@ const added = [];
         let r1 = null, r2 = null;
         if (resNames[0]) {
           const n = resNames[0];
-          const norm = normalizeName(n);
-          let m = residentMap.get(norm) || (norm ? residentMap.get(norm) : null);
-          if (!m) {
-            const key = [...residentMap.keys()].find(k => nameDistance(k,n)<0.4);
-            if (key) m = residentMap.get(key);
-          }
+          const m = lookupFuzzy(residentMap, n);
           if (!m) {
             issues.push({ row: row.row, field: 'Resident 1', message: `Resident '${n}' not found in active program roster` });
             ok = false;
@@ -773,12 +782,7 @@ const added = [];
         }
         if (resNames[1]) {
           const n = resNames[1];
-          const norm = normalizeName(n);
-          let m = residentMap.get(norm) || null;
-          if (!m) {
-            const key = [...residentMap.keys()].find(k => nameDistance(k,n)<0.4);
-            if (key) m = residentMap.get(key);
-          }
+          const m = lookupFuzzy(residentMap, n);
           if (!m) {
             issues.push({ row: row.row, field: 'Resident 2', message: `Resident '${n}' not found in active program roster` });
             ok = false;
@@ -787,12 +791,7 @@ const added = [];
         const facultyCell = row.faculty || null;
         let sf = null;
         if (facultyCell) {
-          const norm = normalizeName(facultyCell);
-          let m = facultyMap.get(norm) || null;
-          if (!m) {
-            const key = [...facultyMap.keys()].find(k => nameDistance(k,norm||facultyCell)<0.4);
-            if (key) m = facultyMap.get(key);
-          }
+          const m = lookupFuzzy(facultyMap, facultyCell);
           if (!m) {
             issues.push({ row: row.row, field: 'Supervising Faculty', message: `Faculty '${facultyCell}' not found in faculty list` });
             ok = false;
@@ -800,12 +799,7 @@ const added = [];
         }
         let fic = null;
         if (row.inCharge) {
-          const norm = normalizeName(row.inCharge);
-          let m = facultyMap.get(norm) || null;
-          if (!m) {
-            const key = [...facultyMap.keys()].find(k => nameDistance(k,norm||row.inCharge)<0.4);
-            if (key) m = facultyMap.get(key);
-          }
+          const m = lookupFuzzy(facultyMap, row.inCharge);
           if (!m) {
             issues.push({ row: row.row, field: 'Faculty In-charge', message: `Faculty '${row.inCharge}' not found in faculty list` });
             ok = false;
@@ -857,7 +851,10 @@ const added = [];
         cycleId = res.insertId;
       }
 
-      await LongitudinalService.ensureClinicColumns(programId);
+      // The clinic columns are read once for the whole import; a sheet whose
+      // title names a column the programme does not have yet appends it and
+      // refreshes the cached list rather than re-reading per row.
+      let matrixColumns = await LongitudinalService.getMatrixColumns(programId);
 
       let inserted = 0;
       const sessions = [];
@@ -881,9 +878,8 @@ const added = [];
           if (m2) clinicNum = Number(m2[1]);
         }
         if (!clinicNum) clinicNum = 1;
-        const cols2 = await LongitudinalService.getMatrixColumns(programId);
-        if (!cols2.find((x) => Number(x.clinic_number) === Number(clinicNum))) {
-          await LongitudinalService.addClinicColumn(programId, clinicNum, c.clinicTitle);
+        if (!matrixColumns.find((x) => Number(x.clinic_number) === Number(clinicNum))) {
+          matrixColumns = await LongitudinalService.addClinicColumn(programId);
         }
 
         const [slot] = await conn.query('SELECT id FROM primary_care_clinic_slots WHERE daily_header_id = ? AND clinic_number = ?', [headerId, clinicNum]);

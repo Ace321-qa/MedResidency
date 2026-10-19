@@ -22,8 +22,18 @@
  *
  * Three layouts reach `parseCccMatrixFile`, detected from the header row:
  *
- *   1. `matrix` — the template's own grid.
- *   2. `roster` — the template's own roster sheet.
+ *   1. `matrix` — the template's own grid, or any sheet that runs `Clinic 1`,
+ *      `Clinic 2`, … horizontally across its columns.
+ *   2. `roster` — the template's own roster sheet *and* the operational grid
+ *      export, which spells the same fields differently: `Clinic` /
+ *      `Clinic Slot` / `Clinic Position` / `Clinic Name` for the slot;
+ *      `Resident(s) & PGY Level` or the split `Resident 1 Name` /
+ *      `Resident 1 PGY` / `Resident 2 Name (Optional)` columns for the
+ *      residents; `Supervising Faculty` / `Faculty Preceptor` for the
+ *      supervisor; and `Faculty In-Charge` / `In-Charge Faculty` / `Daily
+ *      Lead` for the session lead. Header matching is alias-driven
+ *      (`ROSTER_ALIASES`), so a valid alias is never rejected as a missing
+ *      column.
  *   3. `legacy` — the long format older exports used (`Day / Time`,
  *      `Session / Context`, `Clinic Column / Name`, `Resident 1 Name`, …).
  *
@@ -103,6 +113,47 @@ const LEGACY_ALIASES = {
   supervisingFaculty: ['supervising faculty', 'faculty', 'supervisor'],
   facultyInCharge: ['faculty in-charge (session lead)', 'faculty in-charge', 'in-charge', 'session lead', 'in charge'],
 };
+
+/**
+ * Operational roster header aliases. A header cell is matched against each
+ * list in order, so the first spelling a sheet uses wins: the template's own
+ * `Clinic Slot` / `Resident(s) & PGY Level`, the operational grid export's
+ * `Clinic` / `Resident 1 Name` / `Resident 1 PGY`, and looser hand-filled
+ * variants all normalise to the same fields. Nothing here is ever reported as
+ * a "missing column" while a valid alias is present.
+ */
+const ROSTER_ALIASES = {
+  daySession: [
+    'day / time & session',
+    'day/time & session',
+    'day / time',
+    'day/time',
+    'day & session',
+    'day and session',
+    'day',
+  ],
+  clinicIdentifier: ['clinic slot', 'clinic position', 'clinic name', 'clinic column / name', 'clinic column/name', 'clinic column', 'clinic'],
+  resident1: ['resident(s) & pgy level', 'resident 1 name', 'resident 1', 'resident1 name', 'resident1', 'resident name'],
+  resident1Pgy: ['resident 1 pgy', 'resident1 pgy', 'resident 1 pgy level', 'pgy 1'],
+  resident2: ['resident 2 name (optional)', 'resident 2 name', 'resident2 name', 'resident 2', 'resident2'],
+  resident2Pgy: ['resident 2 pgy', 'resident2 pgy', 'resident 2 pgy level', 'pgy 2'],
+  sessionContext: ['session / context', 'session/context', 'session', 'context'],
+  supervisingFaculty: ['supervising faculty', 'faculty preceptor', 'preceptor', 'faculty', 'supervisor'],
+  inChargeFaculty: [
+    'faculty in-charge (session lead)',
+    'faculty in-charge',
+    'in-charge faculty',
+    'daily lead',
+    'faculty in charge',
+    'session lead',
+    'in-charge',
+    'in charge',
+  ],
+};
+
+/** The combined residents column, singled out so split columns can be detected. */
+const ROSTER_RESIDENTS_COMBINED = ROSTER_ALIASES.resident1[0];
+const ROSTER_RESIDENT1_SPLIT = ROSTER_ALIASES.resident1.slice(1);
 
 const LEGACY_HEADERS = [
   'Day / Time',
@@ -529,7 +580,7 @@ function parseClinicCell(text) {
 /** `Dr. A & Dr. B / PGY-2` -> the residents and the level. */
 function parseRosterResidentsCell(text) {
   const value = cellText(text);
-  if (!value || /^unassigned$/i.test(value) || /^no one away$/i.test(value)) {
+  if (!value || /^unassigned$/i.test(value) || /^no one away$/i.test(value) || /^[-—–]+$/.test(value)) {
     return { residents: [], pgy: null };
   }
 
@@ -557,6 +608,19 @@ function parseFacultyCell(text) {
   if (/^none$/i.test(value)) return null;
   if (/^—+$/.test(value) || /^-$/.test(value)) return null;
   return value;
+}
+
+/**
+ * A split-column resident name cell that names nobody -> null. The grid
+ * export writes `—` (or `-`, `Unassigned`, `N/A`) in the empty half of a
+ * partially filled row, and an empty slot must skip rather than reject.
+ */
+function cleanResidentName(text) {
+  const name = cellText(text);
+  if (!name) return null;
+  if (/^[-—–]+$/.test(name)) return null;
+  if (/^(unassigned|no one away|none|n\/a|vacant)$/i.test(name)) return null;
+  return name;
 }
 
 /** `Faculty In-charge: Dr. X` -> `Dr. X`, or null when nobody is named. */
@@ -749,22 +813,35 @@ function parseCccMatrixFile(buffer, options = {}) {
     rows: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, raw: false, blankrows: true }),
   }));
 
-  // --- find the header row and which of the three layouts it announces -----
+  // --- find the header row and which layout it announces --------------------
+  // Detection is shape-driven and alias-aware: the same sheet may call the
+  // clinic column `Clinic`, `Clinic Slot`, `Clinic Position` or `Clinic Name`,
+  // and the residents `Resident(s) & PGY Level` or split `Resident 1 Name` /
+  // `Resident 1 PGY` columns. What distinguishes the layouts is the shape of
+  // the row — a horizontal run of `Clinic N` headers is the matrix grid; a
+  // clinic column beside a resident column is one row per clinic slot — and a
+  // valid alias is never reported as a missing column.
   let headerRowIndex = -1;
   let format = null;
   for (let i = 0; i < Math.min(gridRows.length, 20); i++) {
     const row = gridRows[i] ?? [];
     const lowered = row.map(lower);
+
+    // Matrix grid mode: the template's own headers...
     if (lowered.includes(CCC_MATRIX_DAY_HEADER.toLowerCase()) && lowered.includes(CCC_MATRIX_IN_CHARGE_HEADER.toLowerCase())) {
       headerRowIndex = i;
       format = 'matrix';
       break;
     }
-    if (lowered.includes(CCC_ROSTER_DAY_HEADER.toLowerCase())) {
+    // ...or any sheet that runs `Clinic 1`, `Clinic 2`, … across its columns.
+    const numberedClinicHeaders = row.filter((cell) => /^clinic\s*\d+$/i.test(cellText(cell))).length;
+    if (numberedClinicHeaders >= 2) {
       headerRowIndex = i;
-      format = 'roster';
+      format = 'matrix';
       break;
     }
+
+    // The long-format legacy export keeps its own, stricter validation.
     const legacy = {
       dayTime: headerIndex(row, LEGACY_ALIASES.dayTime),
       clinicColumn: headerIndex(row, LEGACY_ALIASES.clinicColumn),
@@ -775,11 +852,21 @@ function parseCccMatrixFile(buffer, options = {}) {
       format = 'legacy';
       break;
     }
+
+    // Operational roster mode: a clinic column beside a resident column, in
+    // either the template's spelling or the grid export's.
+    const clinicAt = headerIndex(row, ROSTER_ALIASES.clinicIdentifier);
+    const residentAt = headerIndex(row, ROSTER_ALIASES.resident1);
+    if (clinicAt >= 0 && residentAt >= 0) {
+      headerRowIndex = i;
+      format = 'roster';
+      break;
+    }
   }
 
   if (headerRowIndex < 0 || !format) {
     throw new Error(
-      `Missing required columns: expected the CCC header row (${CCC_MATRIX_DAY_HEADER}, ${CCC_ROSTER_DAY_HEADER} or the legacy Day / Time layout).`,
+      `Missing required columns: expected a header row carrying a clinic column (${CCC_ROSTER_CLINIC_HEADER}, Clinic, Clinic Position or Clinic Name), a resident column (${CCC_ROSTER_RESIDENTS_HEADER} or Resident 1 Name), or the matrix grid (${CCC_MATRIX_DAY_HEADER} with Clinic 1 … Clinic N).`,
     );
   }
 
@@ -792,8 +879,14 @@ function parseCccMatrixFile(buffer, options = {}) {
   let dataRowCount = 0;
 
   if (format === 'matrix') {
-    const dayAt = headers.findIndex((header) => lower(header) === CCC_MATRIX_DAY_HEADER.toLowerCase());
-    const inChargeAt = headers.findIndex((header) => lower(header) === CCC_MATRIX_IN_CHARGE_HEADER.toLowerCase());
+    const dayAt = Math.max(
+      headers.findIndex((header) => lower(header) === CCC_MATRIX_DAY_HEADER.toLowerCase()),
+      headerIndex(headers, ROSTER_ALIASES.daySession),
+    );
+    const inChargeAt = Math.max(
+      headers.findIndex((header) => lower(header) === CCC_MATRIX_IN_CHARGE_HEADER.toLowerCase()),
+      headerIndex(headers, ROSTER_ALIASES.inChargeFaculty),
+    );
     const clinicColumns = [];
     for (let i = 0; i < headers.length; i++) {
       if (i === dayAt || i === inChargeAt) continue;
@@ -859,16 +952,35 @@ function parseCccMatrixFile(buffer, options = {}) {
       }
     }
   } else if (format === 'roster') {
-    const dayAt = headers.findIndex((header) => lower(header) === CCC_ROSTER_DAY_HEADER.toLowerCase());
-    const clinicAt = headers.findIndex((header) => lower(header) === CCC_ROSTER_CLINIC_HEADER.toLowerCase());
-    const residentsAt = headers.findIndex((header) => lower(header) === CCC_ROSTER_RESIDENTS_HEADER.toLowerCase());
-    const facultyAt = headers.findIndex((header) => lower(header) === CCC_ROSTER_FACULTY_HEADER.toLowerCase());
+    const dayAt = headerIndex(headers, ROSTER_ALIASES.daySession);
+    const clinicAt = headerIndex(headers, ROSTER_ALIASES.clinicIdentifier);
+    const combinedAt = headerIndex(headers, [ROSTER_RESIDENTS_COMBINED]);
+    const splitAt = headerIndex(headers, ROSTER_RESIDENT1_SPLIT);
+    const residentsAt = combinedAt >= 0 ? combinedAt : splitAt;
+    const resident1PgyAt = headerIndex(headers, ROSTER_ALIASES.resident1Pgy);
+    const resident2At = headerIndex(headers, ROSTER_ALIASES.resident2);
+    const facultyAt = headerIndex(headers, ROSTER_ALIASES.supervisingFaculty);
+    const inChargeAt = headerIndex(headers, ROSTER_ALIASES.inChargeFaculty);
+    const sessionAt = headerIndex(headers, ROSTER_ALIASES.sessionContext);
 
-    if (dayAt < 0 || clinicAt < 0 || residentsAt < 0 || facultyAt < 0) {
+    // Detection only fires when the clinic and resident columns both resolve
+    // through an alias, so this guard is defensive: the complaint names the
+    // canonical headers rather than whichever spelling the sheet used. The day
+    // and faculty columns are *not* required here — a missing day surfaces as
+    // a per-row error, never as a blanket rejection of a file whose clinic and
+    // resident columns are present.
+    const missing = [];
+    if (clinicAt < 0) missing.push(CCC_ROSTER_CLINIC_HEADER);
+    if (residentsAt < 0) missing.push(CCC_ROSTER_RESIDENTS_HEADER);
+    if (missing.length > 0) {
       throw new Error(
-        `Missing required column${[dayAt, clinicAt, residentsAt, facultyAt].filter((x) => x < 0).length === 1 ? '' : 's'}: ${CCC_ROSTER_HEADERS.filter((_, index) => [dayAt, clinicAt, residentsAt, facultyAt][index] < 0).join(', ')}`,
+        `Missing required column${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`,
       );
     }
+
+    const dayField = dayAt >= 0 ? headers[dayAt] : CCC_ROSTER_DAY_HEADER;
+    const clinicField = headers[clinicAt] || CCC_ROSTER_CLINIC_HEADER;
+    const residentsField = headers[residentsAt] || CCC_ROSTER_RESIDENTS_HEADER;
 
     for (let i = headerRowIndex + 1; i < gridRows.length; i++) {
       const source = gridRows[i] ?? [];
@@ -876,31 +988,55 @@ function parseCccMatrixFile(buffer, options = {}) {
       dataRowCount += 1;
       const rowNumber = i + 1;
 
-      const parsed = parseDayCell(source[dayAt]);
+      const parsed = parseDayCell(dayAt >= 0 ? source[dayAt] : null);
       if (!parsed.dayOfWeek) {
-        errors.push({ row: rowNumber, field: CCC_ROSTER_DAY_HEADER, message: 'does not name a day of the week' });
+        errors.push({ row: rowNumber, field: dayField, message: 'does not name a day of the week' });
         continue;
       }
       if (!parsed.shift) {
-        errors.push({ row: rowNumber, field: CCC_ROSTER_DAY_HEADER, message: 'does not include a shift time range' });
+        errors.push({ row: rowNumber, field: dayField, message: 'does not include a shift time range' });
         continue;
       }
 
       const title = cellText(source[clinicAt]);
       if (!title) {
-        errors.push({ row: rowNumber, field: CCC_ROSTER_CLINIC_HEADER, message: 'is required' });
+        errors.push({ row: rowNumber, field: clinicField, message: 'is required' });
         continue;
       }
       const resolved = resolveTitle(title);
       if (resolved.isLeaves) continue;
       if (resolved.unresolvedTitle) unresolvedTitles.add(resolved.unresolvedTitle);
 
-      const residentsCell = parseRosterResidentsCell(source[residentsAt]);
-      const faculty = parseFacultyCell(source[facultyAt]);
-      const pgy = residentsCell.pgy || parsed.pgy;
-      if (residentsCell.residents.length === 0 && !faculty) continue;
-      if (residentsCell.residents.length > 0 && !pgy) {
-        errors.push({ row: rowNumber, field: CCC_ROSTER_RESIDENTS_HEADER, message: 'does not include a PGY level' });
+      // The residents live either in one combined `A & B / PGY-2` cell or in
+      // the grid export's split name / PGY columns. Both read into the same
+      // row shape; the split form also checks that Resident 1 and Resident 2
+      // are not the same person.
+      let residents;
+      let pgy;
+      if (combinedAt >= 0) {
+        const residentsCell = parseRosterResidentsCell(source[combinedAt]);
+        residents = residentsCell.residents;
+        pgy = residentsCell.pgy;
+      } else {
+        const resident1 = cleanResidentName(source[splitAt]);
+        const resident2 = resident2At >= 0 ? cleanResidentName(source[resident2At]) : null;
+        if (resident1 && resident2 && resident1.toLowerCase() === resident2.toLowerCase()) {
+          errors.push({ row: rowNumber, message: 'Resident 1 and Resident 2 cannot be the same' });
+          continue;
+        }
+        residents = [resident1, resident2].filter(Boolean);
+        pgy = resident1PgyAt >= 0 ? cellText(source[resident1PgyAt]) || null : null;
+      }
+      if (!pgy) pgy = sessionAt >= 0 ? cellText(source[sessionAt]) || null : null;
+      if (!pgy) pgy = parsed.pgy;
+
+      const faculty = facultyAt >= 0 ? parseFacultyCell(source[facultyAt]) : null;
+      const inCharge =
+        (inChargeAt >= 0 ? parseInChargeCell(source[inChargeAt]) : null) || parsed.inCharge;
+
+      if (residents.length === 0 && !faculty) continue;
+      if (residents.length > 0 && !pgy) {
+        errors.push({ row: rowNumber, field: residentsField, message: 'does not include a PGY level' });
         continue;
       }
 
@@ -914,9 +1050,9 @@ function parseCccMatrixFile(buffer, options = {}) {
         clinicTitle: title,
         clinicNumber: resolved.clinicNumber ?? null,
         unresolvedTitle: resolved.unresolvedTitle ?? null,
-        residents: residentsCell.residents,
+        residents,
         faculty,
-        inCharge: parsed.inCharge,
+        inCharge,
       });
     }
   } else {

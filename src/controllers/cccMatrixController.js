@@ -33,20 +33,12 @@ function nameDistance(a, b) {
   return 1 - (matches / base);
 }
 
-function bestMatch(map, keyCandidates) {
-  let best = null, bestScore = Infinity;
-  for (const [key, val] of map) {
-    for (const c of keyCandidates) {
-      const d = nameDistance(c, key);
-      if (d < bestScore) { bestScore = d; best = val; }
-      if (bestScore === 0) break;
-    }
-    if (bestScore === 0) break;
-  }
-  if (bestScore < 0.4) return best; // allow small differences
-  return null;
-}
-
+/**
+ * The closest candidate to `query` whose token distance is within tolerance,
+ * or null. (An earlier `bestMatch(map, candidates)` overload of this name was
+ * shadowed by this declaration — it never ran — so it is gone rather than kept
+ * as a trap for the next caller.)
+ */
 function bestMatch(query, candidates) {
   let best = null;
   let bestScore = Infinity;

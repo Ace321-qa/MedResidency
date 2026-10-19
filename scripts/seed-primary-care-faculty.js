@@ -68,6 +68,59 @@ const FACULTY = [
     faculty_appointment: 'Core Faculty',
     administrative_role: 'None',
   },
+  // The preceptor surnames a generic continuity-clinic workbook is filled
+  // with (`Dr. Miller`, `Dr. Smith`, …). Without a matching surname on record
+  // every such row is rejected as an unknown faculty member, so an uploaded
+  // mock schedule cannot import cleanly.
+  {
+    first_name: 'Laura',
+    last_name: 'Miller',
+    clinical_title: 'Consultant',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'None',
+  },
+  {
+    first_name: 'Omar',
+    last_name: 'Davis',
+    clinical_title: 'Consultant',
+    faculty_appointment: 'Teaching Faculty',
+    administrative_role: 'General Educator',
+  },
+  {
+    first_name: 'Rania',
+    last_name: 'Taylor',
+    clinical_title: 'Specialist',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'None',
+  },
+  {
+    first_name: 'Yusuf',
+    last_name: 'Anderson',
+    clinical_title: 'Consultant',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'None',
+  },
+  {
+    first_name: 'Daniel',
+    last_name: 'Smith',
+    clinical_title: 'Senior Consultant',
+    faculty_appointment: 'Core Faculty',
+    administrative_role: 'Continuity Clinic Lead',
+  },
+  {
+    first_name: 'Mariam',
+    last_name: 'Johnson',
+    clinical_title: 'Consultant',
+    faculty_appointment: 'Adjunct / Visiting Faculty',
+    administrative_role: 'None',
+  },
+  {
+    first_name: 'Karim',
+    last_name: 'Williams',
+    clinical_title: 'Specialist',
+    faculty_appointment: 'Teaching Faculty',
+    administrative_role: 'None',
+  },
 ];
 
 (async () => {
