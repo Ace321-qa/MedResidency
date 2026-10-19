@@ -92,6 +92,102 @@ export function toComparableDate(value: string | null | undefined): string | nul
   return date ? toCalendarDate(date) : null;
 }
 
+/**
+ * `Y/M/D` numbers to a validated `YYYY-MM-DD`, or null.
+ *
+ * Range checks the parts, then lets a constructed `Date` round-trip them: a
+ * value whose local parts survive the trip is a real calendar day, which is how
+ * 31 February and a 29 February in a common year are refused instead of rolling
+ * into the next month.
+ */
+function isoFromParts(year: number, month: number, day: number): string | null {
+  if (month < 1 || month > 12 || day < 1) return null;
+
+  const candidate = new Date(year, month - 1, day);
+  if (
+    candidate.getFullYear() !== year ||
+    candidate.getMonth() !== month - 1 ||
+    candidate.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return toCalendarDate(candidate);
+}
+
+/**
+ * Normalise a date the user typed or pasted into `YYYY-MM-DD`, inferring the
+ * year when only the day and month were given.
+ *
+ * The API's DATE columns only ever accept `YYYY-MM-DD`, and the calendar picker
+ * always produces that shape. Typing, though, is not a picker: "18/10" is how a
+ * resident writes 18 October, and making them type the year for a date they
+ * worked this year is friction with no upside. Accepted shapes:
+ *
+ *  - day-month with a `/`, `-` or `.` separator: `18/10`, `18-10`, `18.10`;
+ *  - month-first, when the day cannot come first: `10/18`, `10-18`;
+ *  - the same with an explicit year: `18/10/2026`, `18/10/26`.
+ *
+ * Disambiguation runs in this order:
+ *  1. first part above 12 (`18/10`) -> first is the day, second the month;
+ *  2. second part above 12 (`10/18`) -> first is the month, second the day;
+ *  3. both 12 or under (`05/06`) -> day first, the reading the rest of the app
+ *     and the `YYYY-MM-DD` API use.
+ *
+ * The year is the system clock's and is never rolled forward: `18/10` entered
+ * on 19 Oct 2026 is 18 Oct 2026, not 2027. A two-digit year is read as 20xx.
+ * Impossible days (`31/02`) are rejected rather than rolled into March.
+ *
+ * Only numeric forms are understood. The engine's own `Date` string parser is
+ * deliberately never consulted: `new Date('10/')` is October 2001 in V8 and
+ * `new Date('2026-10')` is 1 October 2026, so a half-typed value would come
+ * back as a confident, wrong date instead of the error the field can show. The
+ * one shape accepted beyond the shorthand above is the canonical
+ * `YYYY-MM-DD` — or the same with `/` or `.` separators — which passes through
+ * unchanged, so re-normalising an untouched value is a no-op.
+ *
+ * @returns `YYYY-MM-DD`, or null when the input is not a real calendar date.
+ */
+export function normalizeToISODate(input: string | null | undefined): string | null {
+  const trimmed = (input ?? '').trim();
+  if (trimmed === '') return null;
+
+  const shorthand = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2}|\d{4}))?$/.exec(trimmed);
+
+  if (!shorthand) {
+    const canonical = /^(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})$/.exec(trimmed);
+    return canonical ? isoFromParts(Number(canonical[1]), Number(canonical[2]), Number(canonical[3])) : null;
+  }
+
+  const first = Number(shorthand[1]);
+  const second = Number(shorthand[2]);
+  const yearPart = shorthand[3];
+
+  let day: number;
+  let month: number;
+  if (first > 12 && second <= 12) {
+    day = first;
+    month = second;
+  } else if (second > 12 && first <= 12) {
+    month = first;
+    day = second;
+  } else if (first <= 12 && second <= 12) {
+    day = first;
+    month = second;
+  } else {
+    // Both parts over 12: not a day-month pair in any order.
+    return null;
+  }
+
+  const year = yearPart
+    ? yearPart.length === 2
+      ? 2000 + Number(yearPart)
+      : Number(yearPart)
+    : new Date().getFullYear();
+
+  return isoFromParts(year, month, day);
+}
+
 /** Today as `YYYY-MM-DD` in the device's timezone. */
 export function todayCalendarDate(): string {
   return toCalendarDate(new Date());

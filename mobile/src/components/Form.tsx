@@ -12,6 +12,7 @@ import {
 import { CalendarDays, Check, ChevronDown, Clock } from 'lucide-react-native';
 
 import { colors, dimensions, radius, spacing } from '../theme';
+import { normalizeToISODate } from '../utils/format';
 import { Button } from './Button';
 import { CalendarPicker } from './CalendarPicker';
 // Imported from the modules directly rather than from `./index`: the barrel
@@ -90,6 +91,14 @@ interface TextFieldProps {
   onSelectionChange?: (event: {
     nativeEvent: { selection: { start: number; end: number } };
   }) => void;
+  /**
+   * Called once focus has left the control.
+   *
+   * `DateField` uses it to normalise a half-typed date into `YYYY-MM-DD` when
+   * the user moves on, which is a moment they have finished the value rather
+   * than one that interrupts them mid-keystroke.
+   */
+  onBlur?: () => void;
 }
 
 export function TextField({
@@ -107,6 +116,7 @@ export function TextField({
   trailing,
   selection,
   onSelectionChange,
+  onBlur,
 }: TextFieldProps) {
   const [focused, setFocused] = useState(false);
 
@@ -137,7 +147,10 @@ export function TextField({
             accessibilityHint={hint}
             accessibilityState={{ disabled: !editable }}
             onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
+            onBlur={() => {
+              setFocused(false);
+              onBlur?.();
+            }}
             underlineColorAndroid="transparent"
             selection={selection}
             onSelectionChange={onSelectionChange}
@@ -456,7 +469,27 @@ export function DateField({
   ...textFieldProps
 }: DateFieldProps) {
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const { label, value, onChangeText } = textFieldProps;
+  const { label, value, onChangeText, onBlur } = textFieldProps;
+
+  /**
+   * Fill in what the typist left out when they leave the field.
+   *
+   * A picker cannot emit anything but `YYYY-MM-DD`, so the normalisation only
+   * ever fires for a *typed* value — exactly the case that needs it. Leaving
+   * the field is the moment the value is finished, so rewriting `18/10` to
+   * `2026-10-18` then is helpful rather than disruptive; doing it on every
+   * keystroke would fight the user as they type. Routing the result back
+   * through `onChangeText` (rather than only decorating what is displayed) is
+   * what lets the owning form's validation see a valid date and clear its
+   * error.
+   */
+  function handleBlur() {
+    onBlur?.();
+    const normalized = normalizeToISODate(value);
+    if (normalized !== null && normalized !== value) {
+      onChangeText(normalized);
+    }
+  }
 
   return (
     <>
@@ -464,6 +497,7 @@ export function DateField({
         {...textFieldProps}
         autoCapitalize="none"
         keyboardType="numbers-and-punctuation"
+        onBlur={handleBlur}
         trailing={
           <Pressable
             onPress={() => setCalendarOpen(true)}

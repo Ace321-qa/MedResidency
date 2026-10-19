@@ -26,7 +26,7 @@ import { fetchResidentSchedule } from '../../../services/rotations';
 import { createRotationRequest } from '../../../services/rotationRequests';
 import { useInAppNotifications } from '../../../services/inAppNotifications';
 import { spacing } from '../../../theme';
-import { formatDateRange, formatShortDate, formatWeeks } from '../../../utils/format';
+import { formatDateRange, formatShortDate, formatWeeks, normalizeToISODate } from '../../../utils/format';
 import { groupScheduleByBlock, type RotationPhase } from '../../../utils/insights';
 import type { RotationRequestType } from '../../../types/api';
 
@@ -114,8 +114,13 @@ export default function RotationsScreen() {
     if (!requestType) return;
 
     const departmentClinic = form.departmentClinic.trim();
-    const startDate = form.startDate.trim();
-    const endDate = form.endDate.trim();
+    // `DateField` normalises on blur, so in practice these already read
+    // `YYYY-MM-DD`. Normalising again here means a pasted `18/10` still submits
+    // correctly when the field never lost focus — e.g. the button is tapped
+    // straight after typing — and keeps the error message about the *unreadable*
+    // input rather than the readable-but-shorthand kind.
+    const startDate = normalizeToISODate(form.startDate) ?? form.startDate.trim();
+    const endDate = normalizeToISODate(form.endDate) ?? form.endDate.trim();
 
     if (departmentClinic === '') {
       setFormError(
@@ -124,7 +129,7 @@ export default function RotationsScreen() {
       return;
     }
     if (!looksLikeDate(startDate) || !looksLikeDate(endDate)) {
-      setFormError(`Dates must be in ${EMPTY_DATE} format — use the calendar button if you prefer.`);
+      setFormError(`Dates must be in ${EMPTY_DATE} format — a DD/MM shorthand works too.`);
       return;
     }
     if (endDate < startDate) {
