@@ -327,15 +327,25 @@ class RotationService {
   }
 
   static async getScheduleByResident(residentId) {
+    // `rb.block_number` is what every screen labels a rotation with: it is the
+    // block's own metadata, whereas `rb.block_name` is coordinator-typed free
+    // text and has held a rotation category — production has block 5 named
+    // "Pediatrics", which is how a resident's dashboard once read "Pediatrics:
+    // Internal Medicine Inpatient Wards".
+    //
+    // The dates are DATE_FORMATed to `YYYY-MM-DD` rather than left for mysql2 to
+    // materialise as a UTC instant: the client parses a bare date as local
+    // midnight, so the window cannot shift a day on a device in another tz.
     const query = `
       SELECT
         rra.id AS assignment_id,
         CONCAT(r.first_name, ' ', r.last_name) AS resident_name,
+        rb.block_number,
         rb.block_name,
         rot.rotation_name,
         rot.department_name,
-        rra.start_date,
-        rra.end_date,
+        DATE_FORMAT(rra.start_date, '%Y-%m-%d') AS start_date,
+        DATE_FORMAT(rra.end_date, '%Y-%m-%d') AS end_date,
         rra.assigned_weeks,
         rra.assignment_type,
         rra.notes

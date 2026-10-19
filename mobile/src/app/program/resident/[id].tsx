@@ -29,6 +29,7 @@ import { fetchReleaseLetters } from '../../../services/letters';
 import { fetchResident } from '../../../services/residents';
 import { fetchResidentSchedule } from '../../../services/rotations';
 import { spacing } from '../../../theme';
+import { rotationTitle } from '../../../utils/blockLabels';
 import { formatDate, formatDateRange, formatHours, humanizeToken } from '../../../utils/format';
 import { summarizeDutyHours, summarizeSchedule } from '../../../utils/insights';
 import { letterDestinationName, letterStatusTone } from '../../../utils/letterStatus';
@@ -163,7 +164,7 @@ export default function ResidentRecordScreen() {
             <SkeletonList rows={2} />
           ) : rotations.current ? (
             <Card>
-              <Text variant="h3">{rotations.current.rotation_name}</Text>
+              <Text variant="h3">{rotationTitle(rotations.current, rotations.current.rotation_name)}</Text>
               <Text variant="bodySmall" tone="secondary">
                 {formatDateRange(rotations.current.start_date, rotations.current.end_date)} ·{' '}
                 {rotations.current.department_name ?? 'Department not assigned'}

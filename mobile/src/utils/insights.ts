@@ -1,4 +1,5 @@
 import type { AttendanceLog, LeaveRequest, RotationAssignment } from '../types/api';
+import { blockLabel } from './blockLabels';
 import {
   formatDateRange,
   formatShortDate,
@@ -74,6 +75,10 @@ export function summarizeSchedule(assignments: RotationAssignment[]): ScheduleSu
 }
 
 export interface ScheduleBlock {
+  /**
+   * The label this group is shown under — derived from `block_number`, never
+   * from the typed `block_name` (see `utils/blockLabels.ts`).
+   */
   blockName: string;
   phase: RotationPhase;
   assignments: RotationAssignment[];
@@ -81,20 +86,27 @@ export interface ScheduleBlock {
   dateRange: string;
 }
 
-/** Groups a resident's assignments by academic block, preserving API order. */
+/**
+ * Groups a resident's assignments by academic block, preserving API order.
+ *
+ * The group key is the derived label rather than the raw `block_name`, so two
+ * blocks that a coordinator named alike stay apart and a block named after a
+ * rotation category ("Pediatrics") never becomes a column heading.
+ */
 export function groupScheduleByBlock(assignments: RotationAssignment[]): ScheduleBlock[] {
   const today = toCalendarDate(new Date());
   const blocks = new Map<string, ScheduleBlock>();
 
   for (const assignment of assignments) {
-    const existing = blocks.get(assignment.block_name);
+    const key = blockLabel(assignment) ?? assignment.block_name;
+    const existing = blocks.get(key);
     if (existing) {
       existing.assignments.push(assignment);
       continue;
     }
 
-    blocks.set(assignment.block_name, {
-      blockName: assignment.block_name,
+    blocks.set(key, {
+      blockName: key,
       phase: rotationPhase(assignment, today),
       assignments: [assignment],
       dateRange: formatDateRange(assignment.start_date, assignment.end_date),

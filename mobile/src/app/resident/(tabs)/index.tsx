@@ -38,6 +38,7 @@ import { fetchResidentSchedule } from '../../../services/rotations';
 import { fetchUnreadNotificationCount } from '../../../services/notifications';
 import { spacing } from '../../../theme';
 import { formatHours, formatDateRange, formatShortDate, toCalendarDate } from '../../../utils/format';
+import { blockLabel, rotationTitle } from '../../../utils/blockLabels';
 import {
   describeRotation,
   summarizeDutyHours,
@@ -214,7 +215,7 @@ export default function TodayScreen() {
                 </Text>
                 {rotations.current ? (
                   <Text variant="h3">
-                    {rotations.current.block_name}: {rotations.current.rotation_name}
+                    {rotationTitle(rotations.current, rotations.current.rotation_name)}
                   </Text>
                 ) : (
                   <Text variant="h3">
@@ -236,13 +237,24 @@ export default function TodayScreen() {
                     }
                     tone="info"
                   />
-                  <StatusBadge label={rotations.current.block_name} tone="neutral" />
+                  {/* The target department when the rotation carries one, the block
+                      tag otherwise — never the typed `block_name`, which for this
+                      resident's Block 5 is the stale category "Pediatrics". */}
+                  <StatusBadge
+                    label={
+                      rotations.current.department_name?.trim() ||
+                      blockLabel(rotations.current) ||
+                      'Unassigned'
+                    }
+                    tone="neutral"
+                  />
                 </View>
               </>
             ) : rotations.next ? (
               <Text variant="bodySmall" tone="secondary" style={styles.gapTop}>
-                {formatDateRange(rotations.next.start_date, rotations.next.end_date)} ·{' '}
-                {rotations.next.block_name}
+                {`${formatDateRange(rotations.next.start_date, rotations.next.end_date)} · ${
+                  blockLabel(rotations.next) ?? 'Block not set'
+                }`}
               </Text>
             ) : (
               <EmptyState

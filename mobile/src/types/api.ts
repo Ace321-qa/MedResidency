@@ -288,6 +288,13 @@ export type AssignmentType = 'FULL_BLOCK' | 'PARTIAL_BLOCK';
 export interface RotationAssignment {
   assignment_id: number;
   resident_name: string;
+  /**
+   * The block's sequence number — the safe thing to label a rotation with.
+   * `block_name` beside it is coordinator-typed free text and has held a
+   * rotation category ("Pediatrics"), so screens read `block_number` first and
+   * only fall back to the name when there is no number.
+   */
+  block_number: number | null;
   block_name: string;
   rotation_name: string;
   department_name: string | null;
