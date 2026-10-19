@@ -238,8 +238,27 @@ function windowBounds(block, start, end) {
  * Inpatient Wards" row on the approval path while the importer catalogued a
  * brand-new "Internal Medicine", which is exactly the drift `rotationMatch.js`
  * exists to prevent.
+ *
+ * A request that came from the catalogue pick-list carries the chosen rotation's
+ * own `rotation_id`, and that wins outright: the resident picked a row and the
+ * coordinator approving it should place them on *that* row, not on whatever the
+ * department string happens to match. The id is re-checked against the programme
+ * and must still be active — a rotation retired between the request and the
+ * approval falls through to the name match rather than being resurrected.
  */
-async function resolveRotation(conn, programId, departmentClinic) {
+async function resolveRotation(conn, programId, departmentClinic, rotationId) {
+  const wantedId = Number(rotationId);
+  if (Number.isInteger(wantedId) && wantedId > 0) {
+    const [byIdRows] = await conn.query(
+      `SELECT id, rotation_code, rotation_name, department_name
+         FROM rotations
+        WHERE id = ? AND program_id = ? AND is_active = 1
+        LIMIT 1`,
+      [wantedId, programId],
+    );
+    if (byIdRows[0]) return { ...byIdRows[0], catalogued: false };
+  }
+
   const name = String(departmentClinic ?? '').trim().slice(0, MAX_NAME_LENGTH);
   if (!name) {
     throw reject(400, 'The request names no rotation, so there is nothing to place on the rota.');
@@ -322,7 +341,8 @@ class RotationApprovalService {
    * @param {import('mysql2/promise').PoolConnection} conn An open connection;
    *   the caller owns the transaction.
    * @param {object} request The `rotation_requests` row (needs `resident_id`,
-   *   `program_id`, `department_clinic`, `start_date`, `end_date`).
+   *   `program_id`, `department_clinic`, `start_date`, `end_date`, and optionally
+   *   `rotation_id` when the resident picked a catalogue entry).
    * @returns {Promise<object>}
    */
   static async syncApprovedRequest(conn, request) {
@@ -364,7 +384,7 @@ class RotationApprovalService {
     const coversWholeBlock = assignStart === bounds.start && assignEnd === bounds.end;
     const assignmentType = coversWholeBlock ? 'FULL_BLOCK' : 'PARTIAL_BLOCK';
 
-    const rotation = await resolveRotation(conn, programId, request.department_clinic);
+    const rotation = await resolveRotation(conn, programId, request.department_clinic, request.rotation_id);
 
     const [existing] = await conn.query(
       `SELECT id FROM resident_rotation_assignments

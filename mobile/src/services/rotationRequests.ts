@@ -14,6 +14,13 @@ export interface CreateRotationRequestBody {
   program_id: number;
   request_type: RotationRequestType;
   department_clinic: string;
+  /**
+   * The catalogue rotation the resident picked, when they picked one from the
+   * pick-list. Nullable so a resident can still type a free-text department
+   * the catalogue has not catalogued yet, or fall back to manual entry when
+   * the catalogue could not be fetched.
+   */
+  rotation_id?: number | null;
   start_date: string;
   end_date: string;
   reason?: string;

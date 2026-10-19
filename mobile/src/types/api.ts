@@ -479,6 +479,12 @@ export interface RotationRequest {
   request_type: RotationRequestType;
   /** Department name for a hospital request, clinic name for a clinic one. */
   department_clinic: string;
+  /**
+   * The catalogue rotation behind the request, when the resident picked one
+   * from the list rather than typing a department. Nullable, because a typed
+   * department has no row to point at yet — approval matches it by name then.
+   */
+  rotation_id: number | null;
   start_date: CalendarDateString;
   end_date: CalendarDateString;
   reason: string | null;

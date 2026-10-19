@@ -32,6 +32,7 @@ const TABLE_SQL = `
     program_id INT NOT NULL,
     request_type VARCHAR(16) NOT NULL DEFAULT 'HOSPITAL',
     department_clinic VARCHAR(255) NOT NULL,
+    rotation_id INT NULL,
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
     reason TEXT,
@@ -40,24 +41,44 @@ const TABLE_SQL = `
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     decided_at TIMESTAMP NULL DEFAULT NULL,
     INDEX idx_rotation_requests_program (program_id, status),
-    INDEX idx_rotation_requests_resident (resident_id)
+    INDEX idx_rotation_requests_resident (resident_id),
+    INDEX idx_rotation_requests_rotation (rotation_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `;
 
 const VALID_TYPES = ['HOSPITAL', 'CLINIC'];
 const VALID_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'];
+/** Long enough for a paragraph of context, short enough for a queue column. */
+const MAX_REASON_LENGTH = 500;
 
 /** Memoised DDL — every handler awaits this before touching the table. */
 let tableReady = null;
 function ensureTable() {
   if (!tableReady) {
-    tableReady = db
-      .query(TABLE_SQL)
-      .then(() => true)
-      .catch((error) => {
-        tableReady = null;
-        throw error;
-      });
+    tableReady = (async () => {
+      await db.query(TABLE_SQL);
+
+      // A table created by an earlier revision has no `rotation_id`, and
+      // `CREATE TABLE IF NOT EXISTS` silently skips it — which would leave the
+      // catalogue pick-list writing a column that does not exist. The repo ships
+      // no schema migrations, so the column is added here, once per process,
+      // against a pre-existing Hostinger database.
+      const [columns] = await db.query(
+        `SHOW COLUMNS FROM rotation_requests LIKE 'rotation_id'`,
+      );
+      if (columns.length === 0) {
+        await db.query(
+          'ALTER TABLE rotation_requests ADD COLUMN rotation_id INT NULL AFTER department_clinic',
+        );
+        await db.query(
+          'CREATE INDEX idx_rotation_requests_rotation ON rotation_requests (rotation_id)',
+        );
+      }
+      return true;
+    })().catch((error) => {
+      tableReady = null;
+      throw error;
+    });
   }
   return tableReady;
 }
@@ -86,6 +107,7 @@ class RotationRequestController {
         program_id,
         request_type = 'HOSPITAL',
         department_clinic,
+        rotation_id,
         start_date,
         end_date,
         reason,
@@ -101,23 +123,46 @@ class RotationRequestController {
       if (typeof department_clinic !== 'string' || department_clinic.trim() === '') {
         problems.push('A department or clinic name is required.');
       }
+      const rotationId = Number(rotation_id);
+      if (rotation_id !== undefined && rotation_id !== null && (!Number.isInteger(rotationId) || rotationId <= 0)) {
+        problems.push('Rotation must be a valid catalogue selection.');
+      }
 
       const start = toIsoDate(start_date);
       const end = toIsoDate(end_date);
       if (!start) problems.push('Start date must be in YYYY-MM-DD format.');
       if (!end) problems.push('End date must be in YYYY-MM-DD format.');
       if (start && end && end < start) problems.push('End date cannot be before the start date.');
+      if (typeof reason === 'string' && reason.trim().length > MAX_REASON_LENGTH) {
+        problems.push(`Reason must be ${MAX_REASON_LENGTH} characters or fewer.`);
+      }
       if (problems.length > 0) return badRequest(res, problems);
+
+      // A pick-list selection is a foreign key in everything but name: refuse a
+      // rotation from another programme rather than store an id that can never
+      // resolve when the coordinator approves the request.
+      let rotationIdValue = null;
+      if (Number.isInteger(rotationId) && rotationId > 0) {
+        const [rotationRows] = await db.query(
+          'SELECT id FROM rotations WHERE id = ? AND program_id = ?',
+          [rotationId, Number(program_id) || 0],
+        );
+        if (rotationRows.length === 0) {
+          return badRequest(res, ["That rotation is not in this programme's catalogue."]);
+        }
+        rotationIdValue = rotationId;
+      }
 
       const [result] = await db.query(
         `INSERT INTO rotation_requests
-           (resident_id, program_id, request_type, department_clinic, start_date, end_date, reason, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+           (resident_id, program_id, request_type, department_clinic, rotation_id, start_date, end_date, reason, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
         [
           Number(resident_id),
           Number(program_id) || 0,
           String(request_type).toUpperCase(),
           department_clinic.trim().slice(0, 255),
+          rotationIdValue,
           start,
           end,
           typeof reason === 'string' && reason.trim() !== '' ? reason.trim() : null,
@@ -156,7 +201,10 @@ class RotationRequestController {
 
       const [rows] = await db.query(
         `SELECT r.request_id, r.resident_id, r.program_id, r.request_type, r.department_clinic,
-                r.start_date, r.end_date, r.reason, r.status, r.decision_reason,
+                r.rotation_id,
+                DATE_FORMAT(r.start_date, '%Y-%m-%d') AS start_date,
+                DATE_FORMAT(r.end_date, '%Y-%m-%d') AS end_date,
+                r.reason, r.status, r.decision_reason,
                 r.created_at, r.decided_at,
                 CONCAT(res.first_name, ' ', res.last_name) AS resident_name
            FROM rotation_requests r
@@ -270,6 +318,7 @@ class RotationRequestController {
          r.program_id,
          r.request_type,
          r.department_clinic,
+         r.rotation_id,
          DATE_FORMAT(r.start_date, '%Y-%m-%d') AS start_date,
          DATE_FORMAT(r.end_date, '%Y-%m-%d') AS end_date,
          r.reason,

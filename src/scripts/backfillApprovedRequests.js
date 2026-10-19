@@ -33,6 +33,7 @@ const APPROVED_SQL = `
     program_id,
     request_type,
     department_clinic,
+    rotation_id,
     DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
     DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
     status

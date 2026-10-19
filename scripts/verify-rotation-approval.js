@@ -83,6 +83,18 @@ function makeConn(state = {}) {
         if (/^SELECT rotation_code/i.test(text)) {
           return [(state.rotations ?? []).map((row) => ({ rotation_code: row.rotation_code })), []];
         }
+        // The pick-list path looks a rotation up by id; honour the id so a test
+        // can prove `rotation_id` beats the department string it arrived with.
+        if (/WHERE id = \?/i.test(text)) {
+          const [id, programId] = params;
+          const match = (state.rotations ?? []).find(
+            (row) =>
+              row.id === id &&
+              (programId === undefined || row.program_id === programId) &&
+              (row.is_active ?? 1) === 1,
+          );
+          return [match ? [match] : [], []];
+        }
         return [state.rotations ?? [], []];
       }
 
@@ -278,6 +290,66 @@ async function main() {
       assert.strictEqual(result.rotation_name, 'Internal Medicine Inpatient Wards');
       assert.strictEqual(result.catalogued_rotation, false);
       assert.strictEqual(conn.writes.filter((w) => w.op === 'insertRotation').length, 0);
+    });
+  }
+
+  console.log('\n-- a request that came from the pick-list keeps the rotation it chose --');
+  {
+    const emergency = {
+      id: 2,
+      program_id: 1,
+      is_active: 1,
+      rotation_code: 'EMERG-MED',
+      rotation_name: 'Adult Emergency Medicine',
+      department_name: 'Emergency Medicine',
+    };
+    const wards = {
+      id: 5,
+      program_id: 1,
+      is_active: 1,
+      rotation_code: 'IM-WARDS',
+      rotation_name: 'Internal Medicine Inpatient Wards',
+      department_name: 'Internal Medicine',
+    };
+    const conn = makeConn(fixture({ rotations: [emergency, wards] }));
+    const result = await RotationApprovalService.syncApprovedRequest(
+      conn,
+      request({ rotation_id: 2, department_clinic: 'Internal Medicine' }),
+    );
+    check('the stored id wins over a department string that names another rotation', () => {
+      assert.strictEqual(result.rotation_id, 2);
+      assert.strictEqual(result.rotation_name, 'Adult Emergency Medicine');
+      assert.strictEqual(result.catalogued_rotation, false);
+      assert.strictEqual(conn.writes.filter((w) => w.op === 'insertRotation').length, 0);
+    });
+  }
+
+  console.log('\n-- a picked rotation that has since been retired falls back to the name --');
+  {
+    const retired = {
+      id: 9,
+      program_id: 1,
+      is_active: 0,
+      rotation_code: 'RHEUM',
+      rotation_name: 'Rheumatology',
+      department_name: 'Rheumatology',
+    };
+    const wards = {
+      id: 5,
+      program_id: 1,
+      is_active: 1,
+      rotation_code: 'IM-WARDS',
+      rotation_name: 'Internal Medicine Inpatient Wards',
+      department_name: 'Internal Medicine',
+    };
+    const conn = makeConn(fixture({ rotations: [retired, wards] }));
+    const result = await RotationApprovalService.syncApprovedRequest(
+      conn,
+      request({ rotation_id: 9, department_clinic: 'Internal Medicine' }),
+    );
+    check('approves onto the active row the department string resolves to', () => {
+      assert.strictEqual(result.rotation_id, 5);
+      assert.strictEqual(result.rotation_name, 'Internal Medicine Inpatient Wards');
     });
   }
 

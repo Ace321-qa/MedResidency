@@ -14,7 +14,9 @@ import {
   MatrixTable,
   Screen,
   SectionHeader,
+  SelectField,
   Sheet,
+  SheetSelectField,
   SkeletonList,
   StatusBadge,
   Text,
@@ -23,12 +25,19 @@ import {
 import { useApiResource, useSession } from '../../../hooks';
 import { fetchResidentLongitudinalAssignments } from '../../../services/longitudinal';
 import { fetchResidentSchedule } from '../../../services/rotations';
+import { fetchRotationCatalogue } from '../../../services/rotationCatalogue';
 import { createRotationRequest } from '../../../services/rotationRequests';
 import { useInAppNotifications } from '../../../services/inAppNotifications';
+import {
+  OTHER_REASON,
+  OTHER_REASON_LABEL,
+  REASON_OPTIONS,
+  buildReason,
+} from '../../../constants/reasons';
 import { spacing } from '../../../theme';
 import { formatDateRange, formatShortDate, formatWeeks, normalizeToISODate } from '../../../utils/format';
 import { groupScheduleByBlock, type RotationPhase } from '../../../utils/insights';
-import type { RotationRequestType } from '../../../types/api';
+import type { RotationCatalogueEntry, RotationRequestType } from '../../../types/api';
 
 /**
  * Rotations — the resident's schedule, grouped by academic block.
@@ -68,13 +77,40 @@ const PHASE_TONE: Record<RotationPhase, 'info' | 'success' | 'neutral'> = {
 const EMPTY_DATE = 'YYYY-MM-DD';
 
 interface RequestForm {
+  /** The catalogue row picked from the department list, as a string id. */
+  rotationId: string | null;
+  /**
+   * Free text — the clinic field, and the department field when the catalogue
+   * has nothing to offer and the resident has to type.
+   */
   departmentClinic: string;
   startDate: string;
   endDate: string;
-  reason: string;
+  /** The preset the resident tapped, `OTHER_REASON`, or `''` for "not answered". */
+  reasonValue: string;
+  /** Free text, read only when `reasonValue` is `OTHER_REASON`. */
+  customReason: string;
 }
 
-const EMPTY_FORM: RequestForm = { departmentClinic: '', startDate: '', endDate: '', reason: '' };
+const EMPTY_FORM: RequestForm = {
+  rotationId: null,
+  departmentClinic: '',
+  startDate: '',
+  endDate: '',
+  reasonValue: '',
+  customReason: '',
+};
+
+/**
+ * The label the department list shows: name, abbreviation, hospital department.
+ *
+ * All three sit on one line because all three are things a resident searches by —
+ * "IM", "wards", "internal medicine" — and `SheetSelectField` filters on the label.
+ */
+function catalogueLabel(entry: RotationCatalogueEntry): string {
+  const name = entry.abbreviation ? `${entry.full_name} (${entry.abbreviation})` : entry.full_name;
+  return entry.department ? `${name} — ${entry.department}` : name;
+}
 
 function looksLikeDate(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
@@ -88,6 +124,31 @@ export default function RotationsScreen() {
 
   const schedule = useApiResource(() => fetchResidentSchedule(residentId), [residentId]);
   const clinics = useApiResource(() => fetchResidentLongitudinalAssignments(residentId), [residentId]);
+  /**
+   * The Rotations Catalogue, fetched for the request form rather than for the
+   * coordinator's editor. A resident picking "Internal Medicine Inpatient Wards
+   * (IM-WARDS)" stores that row's id on the request, which is what lets the
+   * approval place them on the exact rotation instead of on whatever the typed
+   * department string happens to match.
+   */
+  const catalogue = useApiResource(() => fetchRotationCatalogue(programId), [programId]);
+
+  /** Active rotations only — a retired row is not something to ask for. */
+  const catalogueOptions = useMemo(
+    () =>
+      (catalogue.data ?? [])
+        .filter((entry) => entry.is_active === 1)
+        .map((entry) => ({ value: String(entry.id), label: catalogueLabel(entry) })),
+    [catalogue.data],
+  );
+
+  const reasonOptions = useMemo(
+    () => [
+      ...REASON_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
+      { value: OTHER_REASON, label: OTHER_REASON_LABEL },
+    ],
+    [],
+  );
 
   const blocks = useMemo(() => groupScheduleByBlock(schedule.data ?? []), [schedule.data]);
   const [showGrid, setShowGrid] = useState(false);
@@ -96,12 +157,36 @@ export default function RotationsScreen() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  /** The hint under the reason group: what the chosen option means, once chosen. */
+  const reasonHint = useMemo(() => {
+    if (form.reasonValue === OTHER_REASON) return 'Opens a field for your own words.';
+    const picked = REASON_OPTIONS.find((option) => option.value === form.reasonValue);
+    return picked ? picked.hint : 'Optional, but it is what the coordinator reads first.';
+  }, [form.reasonValue]);
+
+  /**
+   * Which department control this request gets.
+   *
+   * A hospital request picks from the catalogue when the catalogue answers;
+   * while it is loading, and when it comes back empty or errors, the resident
+   * falls back to typing rather than being blocked by a screen they cannot fix.
+   * A clinic request never had a catalogue to pick from.
+   */
+  const showCataloguePicker = requestType === 'HOSPITAL' && catalogueOptions.length > 0;
+  const showLoadingPicker = requestType === 'HOSPITAL' && catalogue.isLoading && catalogueOptions.length === 0;
+  const showManualDepartment = requestType === 'HOSPITAL' && !catalogue.isLoading && catalogueOptions.length === 0;
+
   const residentName = session?.residentName ?? 'Your schedule';
 
   function openRequest(type: RotationRequestType) {
     setForm(EMPTY_FORM);
     setFormError(null);
     setRequestType(type);
+    // The pick-list is fetched when the screen mounts, but the catalogue is the
+    // kind of thing a coordinator edits while residents are looking at it, so
+    // re-read it as the form opens. The previous list stays on screen until the
+    // fresh one lands, so a slow or offline reload never blanks the field.
+    catalogue.refresh();
   }
 
   function closeRequest() {
@@ -113,7 +198,17 @@ export default function RotationsScreen() {
   async function submitRequest() {
     if (!requestType) return;
 
-    const departmentClinic = form.departmentClinic.trim();
+    // A picked rotation travels two ways: as `department_clinic` (what the queue
+    // shows and the notification reads) and as `rotation_id` (what approval
+    // actually places). The id is the one that counts — the string is only the
+    // fallback for a typed department or a catalogue entry deleted in between.
+    const picked =
+      requestType === 'HOSPITAL' && form.rotationId !== null
+        ? (catalogue.data ?? []).find((entry) => String(entry.id) === form.rotationId) ?? null
+        : null;
+    const departmentClinic = picked
+      ? picked.department.trim() || picked.full_name.trim()
+      : form.departmentClinic.trim();
     // `DateField` normalises on blur, so in practice these already read
     // `YYYY-MM-DD`. Normalising again here means a pasted `18/10` still submits
     // correctly when the field never lost focus — e.g. the button is tapped
@@ -124,7 +219,9 @@ export default function RotationsScreen() {
 
     if (departmentClinic === '') {
       setFormError(
-        requestType === 'HOSPITAL' ? 'Enter the department you want to join.' : 'Enter the clinic you want to join.',
+        requestType === 'HOSPITAL'
+          ? 'Choose the department you want to join.'
+          : 'Enter the clinic you want to join.',
       );
       return;
     }
@@ -137,6 +234,18 @@ export default function RotationsScreen() {
       return;
     }
 
+    const reason = buildReason(form.reasonValue, form.customReason);
+    if (form.reasonValue === OTHER_REASON && !reason) {
+      setFormError('Please specify your reason below — "Other" needs your own words.');
+      return;
+    }
+    // The server caps the reason at 500 characters; saying so here keeps the
+    // resident from losing a paste to a 400 they cannot act on.
+    if (reason && reason.length > 500) {
+      setFormError(`Keep your reason to 500 characters — this one is ${reason.length}.`);
+      return;
+    }
+
     setSubmitting(true);
     setFormError(null);
 
@@ -146,9 +255,10 @@ export default function RotationsScreen() {
         program_id: programId,
         request_type: requestType,
         department_clinic: departmentClinic,
+        rotation_id: picked ? Number(picked.id) : undefined,
         start_date: startDate,
         end_date: endDate,
-        reason: form.reason.trim() || undefined,
+        reason,
       });
 
       notify({
@@ -377,18 +487,70 @@ export default function RotationsScreen() {
         <View style={styles.form}>
           {formError ? <Banner tone="danger" title="Check the request" message={formError} /> : null}
 
-          <TextField
-            label={requestType === 'CLINIC' ? 'Clinic' : 'Department'}
-            required
-            value={form.departmentClinic}
-            onChangeText={(value) => setForm((current) => ({ ...current, departmentClinic: value }))}
-            placeholder={requestType === 'CLINIC' ? 'e.g. Antenatal Care Clinic' : 'e.g. Emergency Medicine'}
-            hint={
-              requestType === 'CLINIC'
-                ? 'The clinic you want to be paired with.'
-                : 'The department or service you want to rotate through.'
-            }
-          />
+          {showCataloguePicker ? (
+            <SheetSelectField
+              label="Department"
+              required
+              searchable
+              value={form.rotationId}
+              onChange={(value) => setForm((current) => ({ ...current, rotationId: value }))}
+              options={catalogueOptions}
+              placeholder="Choose a department"
+              hint="Type to filter by rotation name, abbreviation or hospital department."
+            />
+          ) : null}
+
+          {showLoadingPicker ? (
+            <SheetSelectField
+              label="Department"
+              required
+              disabled
+              value={null}
+              onChange={(value) => setForm((current) => ({ ...current, rotationId: value }))}
+              options={[]}
+              placeholder="Loading the Rotations Catalogue…"
+              hint="The list of rotations your programme offers."
+            />
+          ) : null}
+
+          {showManualDepartment ? (
+            <View style={styles.catalogueFallback}>
+              <Banner
+                tone={catalogue.error ? 'warning' : 'info'}
+                title={catalogue.error ? 'Catalogue unavailable' : 'No rotations catalogued yet'}
+                message={
+                  catalogue.error
+                    ? 'The list of rotations could not be loaded, so type the department yourself — it is still matched when your coordinator approves.'
+                    : 'Your programme has no rotations listed yet, so type the department yourself — it will be catalogued when your coordinator approves.'
+                }
+              />
+              <Button
+                label="Retry the list"
+                variant="outline"
+                onPress={catalogue.refresh}
+                accessibilityHint="Reloads the Rotations Catalogue"
+              />
+              <TextField
+                label="Department"
+                required
+                value={form.departmentClinic}
+                onChangeText={(value) => setForm((current) => ({ ...current, departmentClinic: value }))}
+                placeholder="e.g. Emergency Medicine"
+                hint="The department or service you want to rotate through."
+              />
+            </View>
+          ) : null}
+
+          {requestType === 'CLINIC' ? (
+            <TextField
+              label="Clinic"
+              required
+              value={form.departmentClinic}
+              onChangeText={(value) => setForm((current) => ({ ...current, departmentClinic: value }))}
+              placeholder="e.g. Antenatal Care Clinic"
+              hint="The clinic you want to be paired with."
+            />
+          ) : null}
 
           <DateField
             label="Start date"
@@ -406,14 +568,25 @@ export default function RotationsScreen() {
             placeholder={EMPTY_DATE}
           />
 
-          <TextField
-            label="Reason"
-            value={form.reason}
-            onChangeText={(value) => setForm((current) => ({ ...current, reason: value }))}
-            placeholder="Why this rotation would help your training"
-            hint="Optional, but it is what the coordinator reads first."
-            multiline
+          <SelectField
+            label="Reason for request"
+            value={form.reasonValue === '' ? null : form.reasonValue}
+            onChange={(value) => setForm((current) => ({ ...current, reasonValue: value }))}
+            options={reasonOptions}
+            hint={reasonHint}
           />
+
+          {form.reasonValue === OTHER_REASON ? (
+            <TextField
+              label="Your reason"
+              required
+              multiline
+              value={form.customReason}
+              onChangeText={(value) => setForm((current) => ({ ...current, customReason: value }))}
+              placeholder="Please specify your reason for requesting this rotation..."
+              hint="One or two lines is plenty — it is what your coordinator reads first."
+            />
+          ) : null}
         </View>
       </Sheet>
     </Screen>
@@ -443,5 +616,9 @@ const styles = StyleSheet.create({
   },
   form: {
     gap: spacing.md,
+  },
+  /** The catalogue's absence: notice, retry, then the field it stands in for. */
+  catalogueFallback: {
+    gap: spacing.sm,
   },
 });
