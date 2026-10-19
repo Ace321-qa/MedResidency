@@ -22,11 +22,15 @@ export interface CreateRotationRequestBody {
 export async function createRotationRequest(
   payload: CreateRotationRequestBody,
 ): Promise<RotationRequest> {
-  const response = await request<ApiResponse<{ request: RotationRequest }>>('/requests/rotation', {
-    method: 'POST',
-    data: payload,
-  });
-  return response.data.request;
+  const response = await request<ApiResponse<{ request: RotationRequest }> | { request: RotationRequest } | RotationRequest>(
+    '/requests/rotation',
+    {
+      method: 'POST',
+      data: payload,
+    },
+  );
+  const body = response as any;
+  return body?.data?.request ?? body?.request ?? body;
 }
 
 export async function fetchRotationRequests(params: {
@@ -34,17 +38,22 @@ export async function fetchRotationRequests(params: {
   resident_id?: number;
   status?: RotationRequestStatus;
 }): Promise<RotationRequest[]> {
-  const response = await request<ApiResponse<RotationRequest[]>>('/requests/rotation', { params });
-  return response.data ?? [];
+  const response = await request<ApiResponse<RotationRequest[]> | { data: RotationRequest[] } | RotationRequest[]>(
+    '/requests/rotation',
+    { params },
+  );
+  const body = response as any;
+  return body?.data ?? body ?? [];
 }
 
 export async function updateRotationRequest(
   requestId: number,
   payload: { status: 'APPROVED' | 'REJECTED'; decision_reason?: string },
 ): Promise<RotationRequest> {
-  const response = await request<ApiResponse<{ request: RotationRequest }>>(
+  const response = await request<ApiResponse<{ request: RotationRequest }> | { request: RotationRequest } | RotationRequest>(
     `/requests/rotation/${requestId}`,
     { method: 'PATCH', data: payload },
   );
-  return response.data.request;
+  const body = response as any;
+  return body?.data?.request ?? body?.request ?? body;
 }

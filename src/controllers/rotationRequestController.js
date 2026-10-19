@@ -118,7 +118,7 @@ class RotationRequestController {
       );
 
       const rows = await RotationRequestController.#readOne(result.insertId);
-      return res.json({ success: true, request: rows[0] ?? null });
+      return res.status(201).json({ success: true, data: { request: rows[0] ?? null } });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
@@ -214,7 +214,7 @@ class RotationRequestController {
         });
       }
 
-      return res.json({ success: true, request: decided });
+      return res.json({ success: true, data: { request: decided } });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
