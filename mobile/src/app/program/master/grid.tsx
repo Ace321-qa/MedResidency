@@ -23,7 +23,6 @@ import {
   StatusBadge,
   Text,
   TextField,
-  type MatrixColumnDef,
   type MatrixRowDef,
   type SelectOption,
 } from '../../../components';
@@ -52,7 +51,7 @@ import {
   MASTER_GRID_START,
   type GridStart,
 } from '../../../utils/masterGridCalendar';
-import { buildMasterGridColumns } from '../../../utils/masterGridColumns';
+import { buildMasterGridBlockColumns, blockColumnKey, buildMasterGridColumns } from '../../../utils/masterGridColumns';
 import { sortResidentsByPgy } from '../../../utils/residentOrder';
 
 type ViewMode = 'block' | 'weekly';
@@ -77,7 +76,8 @@ const BLOCK_NUMBERS = Array.from({ length: 13 }, (_, index) => index + 1);
 interface GridBlock {
   block_id: number;
   block_number: number;
-  block_name: string;
+  // `block_name` is deliberately not carried: it is coordinator-typed free text
+  // and must never reach a column header (see `buildMasterGridBlockColumns`).
   startDateIso: string | null;
   endDateIso: string | null;
 }
@@ -174,7 +174,6 @@ export default function MasterGridScreen() {
         blockMap.set(row.block_number, {
           block_id: row.block_id,
           block_number: row.block_number,
-          block_name: row.block_name,
           startDateIso: row.block_start_date_iso,
           endDateIso: row.block_end_date_iso,
         });
@@ -222,20 +221,17 @@ export default function MasterGridScreen() {
     [startDate],
   );
 
-  const columnsBlock = useMemo<MatrixColumnDef[]>(
-    () =>
-      BLOCK_NUMBERS.map((blockNumber) => {
-        const block = blocksByNumber.get(blockNumber);
-        const window = blockWindow(blockNumber, startDate);
-        const windowLabel = window ? describeWindow(window.start, window.end) : 'No dates recorded';
-        return {
-          key: block ? `block-${block.block_id}` : `block-missing-${blockNumber}`,
-          title: block?.block_name || `Block ${blockNumber}`,
-          subtitle: windowLabel,
-          width: 160,
-        };
-      }),
-    [blocksByNumber, startDate],
+  // Block number → `rotation_blocks.block_id` for the academic year on screen.
+  // Only the columns' keys come from this; the headers are drawn from the grid
+  // calendar itself (see `buildMasterGridBlockColumns`).
+  const blockIdsByNumber = useMemo(
+    () => new Map<number, number | undefined>(Array.from(blocksByNumber, ([number, block]) => [number, block.block_id])),
+    [blocksByNumber],
+  );
+
+  const columnsBlock = useMemo(
+    () => buildMasterGridBlockColumns(blockIdsByNumber, startDate),
+    [blockIdsByNumber, startDate],
   );
 
   const rowsBlock = useMemo<MatrixRowDef[]>(
@@ -247,7 +243,7 @@ export default function MasterGridScreen() {
 
         for (const blockNumber of BLOCK_NUMBERS) {
           const block = blocksByNumber.get(blockNumber);
-          const columnKey = block ? `block-${block.block_id}` : `block-missing-${blockNumber}`;
+          const columnKey = blockColumnKey(blockNumber, block?.block_id);
           cells[columnKey] = blockCellNode(
             resident.resident_id,
             cellFor(resident.resident_id, block?.block_id ?? 0),

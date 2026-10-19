@@ -1,6 +1,12 @@
 import type { MatrixColumnDef, ColumnGroup } from '../components/MatrixTable';
-import { describeWindow } from './dateCalc';
-import { allWeeks, blockWindow, formatShortRange, MASTER_GRID_START, type GridStart } from './masterGridCalendar';
+import {
+  allWeeks,
+  BLOCK_COUNT,
+  formatShortRange,
+  MASTER_GRID_START,
+  type GridStart,
+} from './masterGridCalendar';
+import { masterBlockHeading } from './masterGridHeadings';
 
 export interface MasterGridBlockDefinition {
   blockNumber: number;
@@ -42,8 +48,8 @@ export function buildMasterGridColumns(gridStart: GridStart = MASTER_GRID_START)
 
   allWeeks(gridStart).forEach((week, index) => {
     if (week.weekInBlock === 1) {
-      const window = blockWindow(week.blockNumber, gridStart);
-      const label = window ? `Block ${week.blockNumber} · ${describeWindow(window.start, window.end)}` : `Block ${week.blockNumber}`;
+      const heading = masterBlockHeading(week.blockNumber, gridStart);
+      const label = heading ? `${heading.title} · ${heading.subtitle}` : `Block ${week.blockNumber}`;
       blocks.push({
         blockNumber: week.blockNumber,
         title: label,
@@ -68,4 +74,50 @@ export function buildMasterGridColumns(gridStart: GridStart = MASTER_GRID_START)
   });
 
   return { columns, groups, blocks };
+}
+
+const BLOCK_COLUMN_WIDTH = 160;
+
+/**
+ * The key a block column and the cells under it share.
+ *
+ * The header and the cells must agree on a column's identity: a key that only
+ * one side knows about paints a heading over blank cells, so both are minted
+ * from this one function.
+ */
+export function blockColumnKey(blockNumber: number, blockId?: number | null): string {
+  return blockId ? `block-${blockId}` : `block-missing-${blockNumber}`;
+}
+
+/**
+ * The Block view's column set: 13 columns, one per block, no weekly sub-columns.
+ *
+ * Tier 1 is the block's *position* — `Block 5` — and tier 2 is its predetermined
+ * window (`Sun 18 Oct - Sat 14 Nov 2026`). The title is deliberately built from
+ * the block number and never from `rotation_blocks.block_name`: that column is
+ * coordinator-typed free text and has held a rotation name ("Pediatrics"), which
+ * is how a rotation ended up rendered as a column header. A rotation belongs to
+ * a resident's cell; a header only names the calendar slot it sits in. This
+ * mirrors the Weekly builder above and the exported report, which have always
+ * derived their headings from the grid calendar alone.
+ *
+ * `blockIdsByNumber` is used for the column *key* only (so cells can be
+ * addressed); no database name reaches either tier.
+ */
+export function buildMasterGridBlockColumns(
+  blockIdsByNumber: ReadonlyMap<number, number | undefined>,
+  gridStart: GridStart = MASTER_GRID_START,
+): MatrixColumnDef[] {
+  const columns: MatrixColumnDef[] = [];
+  for (let blockNumber = 1; blockNumber <= BLOCK_COUNT; blockNumber += 1) {
+    const heading = masterBlockHeading(blockNumber, gridStart);
+    if (!heading) continue;
+    columns.push({
+      key: blockColumnKey(blockNumber, blockIdsByNumber.get(blockNumber)),
+      title: heading.title,
+      subtitle: heading.subtitle,
+      width: BLOCK_COLUMN_WIDTH,
+    });
+  }
+  return columns;
 }
