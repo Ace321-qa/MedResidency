@@ -98,7 +98,10 @@ export function groupScheduleByBlock(assignments: RotationAssignment[]): Schedul
   const blocks = new Map<string, ScheduleBlock>();
 
   for (const assignment of assignments) {
-    const key = blockLabel(assignment) ?? assignment.block_name;
+    const label = blockLabel(assignment);
+    // Grouped by the label when there is one; a block that cannot be labelled
+    // keeps its own group via the raw name (as a key only — never as a heading).
+    const key = label ?? `raw:${assignment.block_name}`;
     const existing = blocks.get(key);
     if (existing) {
       existing.assignments.push(assignment);
@@ -106,7 +109,7 @@ export function groupScheduleByBlock(assignments: RotationAssignment[]): Schedul
     }
 
     blocks.set(key, {
-      blockName: key,
+      blockName: label ?? 'Unassigned block',
       phase: rotationPhase(assignment, today),
       assignments: [assignment],
       dateRange: formatDateRange(assignment.start_date, assignment.end_date),

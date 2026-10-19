@@ -20,19 +20,28 @@ export interface BlockRef {
   block_name?: string | null;
 }
 
+/** A block name is only trustworthy when it actually looks like one. */
+const BLOCK_NAME_PATTERN = /^block\s*(\d+)$/i;
+
 /**
  * `Block 5` — or `Block 6` for a block stored as "BLOCK 6", since the number
- * normalises a name that was typed in any casing, and the raw name only when
- * the assignment carries no block number.
+ * normalises a name typed in any casing.
  *
- * @returns `null` when the assignment names no block at all.
+ * @returns `null` when the assignment carries no block number *and* no
+ * block-shaped name. Refusing a name like "Pediatrics" is the point: a payload
+ * from an older server (or any other write path that loses `block_number`) must
+ * degrade to the rotation name alone, never resurrect the stale category as a
+ * title prefix. A genuine custom block name ("Orientation Week") is dropped for
+ * the same reason — the title shows the rotation, which is never wrong, whereas
+ * guessing from free text was exactly the bug.
  */
 export function blockLabel(block: BlockRef | null | undefined): string | null {
   const number = Number(block?.block_number);
   if (Number.isInteger(number) && number > 0) return `Block ${number}`;
 
   const name = typeof block?.block_name === 'string' ? block.block_name.trim() : '';
-  return name === '' ? null : name;
+  const digits = BLOCK_NAME_PATTERN.exec(name);
+  return digits ? `Block ${digits[1]}` : null;
 }
 
 /**
