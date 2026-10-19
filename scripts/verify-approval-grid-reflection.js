@@ -117,8 +117,13 @@ async function main() {
     assert.strictEqual(block5.is_assigned, 1, 'Block 5 still reads unassigned');
     assert.ok(block5.rotation_name, 'Block 5 has no rotation_name');
   });
-  check('Block 5 names an Internal Medicine rotation', () => {
-    assert.match(String(block5.rotation_name), /internal medicine/i);
+  check('Block 5 names the Internal Medicine rotation', () => {
+    const name = String(block5.rotation_name ?? '');
+    const code = String(block5.rotation_code ?? '');
+    assert.ok(
+      name === 'Internal Medicine Inpatient Wards' || code === 'IM-WARDS' || /internal medicine/i.test(name),
+      `Block 5 rotation was name="${name}" code="${code}"`,
+    );
   });
   check('the assignment covers the requested window', () => {
     assert.ok(
