@@ -108,6 +108,64 @@ class LongitudinalController {
     }
   }
 
+  /**
+   * `GET /longitudinal/specialized-clinics`
+   *
+   * The specialized clinics a programme created by cloning the standard CCC
+   * grid. Each row carries the cycle of the grid it owns, so the CCC view can
+   * list the clinics and open any one of them without a second request.
+   */
+  static async getSpecializedClinics(req, res) {
+    try {
+      const { program_id, include_inactive } = req.query;
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
+      }
+      const data = await LongitudinalService.getSpecializedClinics(program_id, {
+        includeInactive: include_inactive === '1' || include_inactive === 'true',
+      });
+      return res.status(200).json({ success: true, count: data.length, data });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * `POST /longitudinal/specialized-clinics/clone`
+   *
+   * Create a specialized clinic by cloning the standard Continuity Care Clinics
+   * grid: register the clinic, then copy the template's day headers, clinic
+   * columns and slot layout into a matrix of its own. The copy is structural —
+   * residents, supervisors and the backup pool are deliberately left empty so a
+   * coordinator staffs the new clinic deliberately.
+   *
+   * 201 with the new clinic and its cycle; 400 on a bad payload, 409 when the
+   * name is already in use or the template has no days to clone.
+   */
+  static async cloneSpecializedClinic(req, res) {
+    try {
+      const { program_id, custom_name } = req.body || {};
+      if (!program_id) {
+        return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
+      }
+      if (!custom_name || !String(custom_name).trim()) {
+        return res.status(400).json({ success: false, error: 'Missing required field: custom_name' });
+      }
+      const result = await LongitudinalService.cloneSpecializedClinic(req.body);
+      return res.status(201).json({
+        success: true,
+        message: `Created ${result.clinic.clinic_name}. Its grid copied ${result.cloned.headers} day(s), ${result.cloned.columns} clinic column(s) and ${result.cloned.slots} slot(s) from the CCC template.`,
+        data: result,
+      });
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ success: false, error: error.message });
+      }
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async getResidentLongitudinalAssignments(req, res) {
     try {
       const { resident_id } = req.params;
@@ -246,11 +304,14 @@ class LongitudinalController {
 
   static async getCycleSchedule(req, res) {
     try {
-      const { program_id, cycle_id } = req.query;
+      const { program_id, cycle_id, clinic_type_id } = req.query;
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      const data = await LongitudinalService.getCycleSchedule(program_id, { cycleId: cycle_id });
+      const data = await LongitudinalService.getCycleSchedule(program_id, {
+        cycleId: cycle_id,
+        clinicTypeId: clinic_type_id,
+      });
       return res.status(200).json({ success: true, data });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
@@ -321,11 +382,11 @@ class LongitudinalController {
    */
   static async getCycles(req, res) {
     try {
-      const { program_id } = req.query;
+      const { program_id, clinic_type_id } = req.query;
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      const data = await LongitudinalService.getCycles(program_id);
+      const data = await LongitudinalService.getCycles(program_id, clinic_type_id);
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
@@ -385,11 +446,11 @@ class LongitudinalController {
    */
   static async getMatrixColumns(req, res) {
     try {
-      const { program_id } = req.query;
+      const { program_id, clinic_type_id } = req.query;
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      const data = await LongitudinalService.getMatrixColumns(program_id);
+      const data = await LongitudinalService.getMatrixColumns(program_id, clinic_type_id);
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
       if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
@@ -400,11 +461,11 @@ class LongitudinalController {
   /** `POST /longitudinal/cycle-schedule/columns` — append a clinic column. */
   static async addClinicColumn(req, res) {
     try {
-      const { program_id } = req.body || {};
+      const { program_id, clinic_type_id } = req.body || {};
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
       }
-      const data = await LongitudinalService.addClinicColumn(program_id);
+      const data = await LongitudinalService.addClinicColumn(program_id, clinic_type_id);
       return res.status(201).json({ success: true, count: data.length, data });
     } catch (error) {
       if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
@@ -415,11 +476,16 @@ class LongitudinalController {
   /** `PUT /longitudinal/cycle-schedule/columns/:clinic_number` — rename a column. */
   static async renameClinicColumn(req, res) {
     try {
-      const { program_id, label } = req.body || {};
+      const { program_id, label, clinic_type_id } = req.body || {};
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing required field: program_id' });
       }
-      const data = await LongitudinalService.renameClinicColumn(program_id, req.params.clinic_number, label ?? '');
+      const data = await LongitudinalService.renameClinicColumn(
+        program_id,
+        req.params.clinic_number,
+        label ?? '',
+        clinic_type_id
+      );
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
       if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
@@ -430,11 +496,15 @@ class LongitudinalController {
   /** `DELETE /longitudinal/cycle-schedule/columns/:clinic_number` — remove a column. */
   static async deleteClinicColumn(req, res) {
     try {
-      const { program_id } = req.query;
+      const { program_id, clinic_type_id } = req.query;
       if (!program_id) {
         return res.status(400).json({ success: false, error: 'Missing query parameter: program_id' });
       }
-      const data = await LongitudinalService.deleteClinicColumn(program_id, req.params.clinic_number);
+      const data = await LongitudinalService.deleteClinicColumn(
+        program_id,
+        req.params.clinic_number,
+        clinic_type_id
+      );
       return res.status(200).json({ success: true, count: data.length, data });
     } catch (error) {
       if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message });
@@ -720,10 +790,17 @@ const added = [];
     if (!Number.isInteger(programId) || programId <= 0) {
       return res.status(400).json({ success: false, error: 'program_id is required to import the matrix.' });
     }
+    // Which grid the sheet belongs to: the standard CCC matrix by default, or a
+    // specialized clinic's own grid when the caller is editing one. Resolving the
+    // cycle without this would land a clinic's import on whichever cycle the
+    // programme wrote last.
+    const importClinicTypeId = Number((req.body ?? {}).clinic_type_id) > 0
+      ? Number(req.body.clinic_type_id)
+      : 0;
 
     let parsed;
     try {
-      const columns = await LongitudinalService.getMatrixColumns(programId);
+      const columns = await LongitudinalService.getMatrixColumns(programId, importClinicTypeId);
       parsed = parseCccMatrixFile(req.file.buffer, { columns });
     } catch (error) {
       return res.status(400).json({ success: false, issues: [{ message: error.message }] });
@@ -834,27 +911,27 @@ const added = [];
         const cn = meta.cycleNumber ? (String(meta.cycleNumber).toLowerCase().startsWith('cycle') ? String(meta.cycleNumber) : `Cycle ${meta.cycleNumber}`) : null;
         const sd = meta.weekStartCalendarDate || meta.startDate || null;
         if (cn && sd) {
-          const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND cycle_number = ? AND start_date = ?', [programId, cn, sd]);
+          const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? AND cycle_number = ? AND start_date = ?', [programId, importClinicTypeId, cn, sd]);
           if (rows[0]) cycleId = rows[0].id;
         }
         if (!cycleId && cn) {
-          const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND cycle_number = ? ORDER BY id DESC LIMIT 1', [programId, cn]);
+          const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? AND cycle_number = ? ORDER BY id DESC LIMIT 1', [programId, importClinicTypeId, cn]);
           if (rows[0]) cycleId = rows[0].id;
         }
       }
       if (!cycleId) {
-        const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+        const [rows] = await conn.query('SELECT id FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? ORDER BY id DESC LIMIT 1', [programId, importClinicTypeId]);
         if (rows[0]) cycleId = rows[0].id;
       }
       if (!cycleId) {
-        const [res] = await conn.query('INSERT INTO primary_care_cycles (program_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, CURDATE())', [programId, 'Cycle 1', 'Week 1']);
+        const [res] = await conn.query('INSERT INTO primary_care_cycles (program_id, clinic_type_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?, CURDATE())', [programId, importClinicTypeId, 'Cycle 1', 'Week 1']);
         cycleId = res.insertId;
       }
 
       // The clinic columns are read once for the whole import; a sheet whose
       // title names a column the programme does not have yet appends it and
       // refreshes the cached list rather than re-reading per row.
-      let matrixColumns = await LongitudinalService.getMatrixColumns(programId);
+      let matrixColumns = await LongitudinalService.getMatrixColumns(programId, importClinicTypeId);
 
       let inserted = 0;
       const sessions = [];
@@ -879,7 +956,7 @@ const added = [];
         }
         if (!clinicNum) clinicNum = 1;
         if (!matrixColumns.find((x) => Number(x.clinic_number) === Number(clinicNum))) {
-          matrixColumns = await LongitudinalService.addClinicColumn(programId);
+          matrixColumns = await LongitudinalService.addClinicColumn(programId, importClinicTypeId);
         }
 
         const [slot] = await conn.query('SELECT id FROM primary_care_clinic_slots WHERE daily_header_id = ? AND clinic_number = ?', [headerId, clinicNum]);

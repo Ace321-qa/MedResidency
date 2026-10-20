@@ -30,6 +30,7 @@ export {
   type LetterTemplateEditorSheetProps,
 } from './LetterTemplateEditorSheet';
 export { ProgramEditorSheet, type ProgramEditorSheetProps } from './ProgramEditorSheet';
+export { CreateSpecializedClinicSheet } from './CreateSpecializedClinicSheet';
 export { Sheet } from './Sheet';
 export { EmptyState, ErrorState, LoadingState, SkeletonList } from './StateView';
 export { ExportMenu } from './ExportMenu';

@@ -17,6 +17,9 @@ import type {
   PrimaryCareAbsenceInput,
   PrimaryCareMatrixColumn,
   RandomizeSupervisorsResult,
+  SpecializedClinic,
+  CloneSpecializedClinicPayload,
+  CloneSpecializedClinicResult,
 } from '../types/api';
 
 export async function fetchClinicTypes(
@@ -171,9 +174,11 @@ export async function rotateSupervisor(assignmentId: number, payload: any): Prom
 export async function fetchCycleSchedule(
   programId: number,
   cycleId?: number,
+  clinicTypeId?: number,
 ): Promise<PrimaryCareCycleSchedule> {
   const params: Record<string, string | number> = { program_id: programId };
   if (cycleId) params.cycle_id = cycleId;
+  if (clinicTypeId) params.clinic_type_id = clinicTypeId;
   const path = `/longitudinal/cycle-schedule${queryString(params)}`;
   const response = await request<ApiResponse<PrimaryCareCycleSchedule>>(path);
   return response.data;
@@ -183,9 +188,17 @@ export async function fetchCycleSchedule(
  * The programme's CCC cycles, oldest first, for the week navigator's cycle list
  * and academic-year filter. The server derives no year column, so the client
  * groups these rows by the year that falls out of each `start_date`.
+ *
+ * `clinicTypeId` selects one grid: `0`/omitted is the standard CCC matrix, and a
+ * clinic id is that specialized clinic's own cycles.
  */
-export async function fetchCycles(programId: number): Promise<PrimaryCareCycleSummary[]> {
-  const path = `/longitudinal/cycles${queryString({ program_id: programId })}`;
+export async function fetchCycles(
+  programId: number,
+  clinicTypeId?: number,
+): Promise<PrimaryCareCycleSummary[]> {
+  const params: Record<string, string | number> = { program_id: programId };
+  if (clinicTypeId) params.clinic_type_id = clinicTypeId;
+  const path = `/longitudinal/cycles${queryString(params)}`;
   const response = await request<ApiListResponse<PrimaryCareCycleSummary>>(path);
   return response.data ?? [];
 }
@@ -355,8 +368,13 @@ export async function updateBackupFaculty(payload: {
  * The grid is built from these plus the Leaves column. Also embedded in every
  * `fetchCycleSchedule` response.
  */
-export async function fetchMatrixColumns(programId: number): Promise<PrimaryCareMatrixColumn[]> {
-  const path = `/longitudinal/cycle-schedule/columns${queryString({ program_id: programId })}`;
+export async function fetchMatrixColumns(
+  programId: number,
+  clinicTypeId?: number,
+): Promise<PrimaryCareMatrixColumn[]> {
+  const params: Record<string, string | number> = { program_id: programId };
+  if (clinicTypeId) params.clinic_type_id = clinicTypeId;
+  const path = `/longitudinal/cycle-schedule/columns${queryString(params)}`;
   const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(path);
   return response.data ?? [];
 }
@@ -366,10 +384,13 @@ export async function fetchMatrixColumns(programId: number): Promise<PrimaryCare
  * the end of the grid (`Clinic N+1`). The caller should refresh the schedule so
  * the new column's slot rows are materialised.
  */
-export async function addClinicColumn(programId: number): Promise<PrimaryCareMatrixColumn[]> {
+export async function addClinicColumn(
+  programId: number,
+  clinicTypeId?: number,
+): Promise<PrimaryCareMatrixColumn[]> {
   const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(
     '/longitudinal/cycle-schedule/columns',
-    { method: 'POST', data: { program_id: programId } },
+    { method: 'POST', data: { program_id: programId, clinic_type_id: clinicTypeId ?? 0 } },
   );
   return response.data ?? [];
 }
@@ -382,11 +403,12 @@ export async function renameClinicColumn(
   programId: number,
   clinicNumber: number,
   label: string,
+  clinicTypeId?: number,
 ): Promise<PrimaryCareMatrixColumn[]> {
   const path = `/longitudinal/cycle-schedule/columns/${clinicNumber}`;
   const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(path, {
     method: 'PUT',
-    data: { program_id: programId, label },
+    data: { program_id: programId, label, clinic_type_id: clinicTypeId ?? 0 },
   });
   return response.data ?? [];
 }
@@ -398,12 +420,46 @@ export async function renameClinicColumn(
 export async function deleteClinicColumn(
   programId: number,
   clinicNumber: number,
+  clinicTypeId?: number,
 ): Promise<PrimaryCareMatrixColumn[]> {
   const path = `/longitudinal/cycle-schedule/columns/${clinicNumber}${queryString({
     program_id: programId,
+    clinic_type_id: clinicTypeId ?? 0,
   })}`;
   const response = await request<ApiListResponse<PrimaryCareMatrixColumn>>(path, { method: 'DELETE' });
   return response.data ?? [];
+}
+
+/**
+ * `GET /longitudinal/specialized-clinics` — the clinics a coordinator created by
+ * cloning the standard CCC grid, each with the cycle of the grid it owns.
+ */
+export async function fetchSpecializedClinics(
+  programId: number,
+  options: { includeInactive?: boolean } = {},
+): Promise<SpecializedClinic[]> {
+  const params: Record<string, string | number> = { program_id: programId };
+  if (options.includeInactive) params.include_inactive = '1';
+  const path = `/longitudinal/specialized-clinics${queryString(params)}`;
+  const response = await request<ApiListResponse<SpecializedClinic>>(path);
+  return response.data ?? [];
+}
+
+/**
+ * `POST /longitudinal/specialized-clinics/clone` — create a specialized clinic by
+ * copying the standard CCC grid: its day headers (shift times and PGY levels),
+ * its numbered clinic columns and one slot per column. Residents, supervisors and
+ * the backup pool are deliberately not copied, so the new grid starts unstaffed
+ * and is ready for the coordinator to populate.
+ */
+export async function cloneSpecializedClinic(
+  payload: CloneSpecializedClinicPayload,
+): Promise<CloneSpecializedClinicResult> {
+  const response = await request<ApiResponse<CloneSpecializedClinicResult>>(
+    '/longitudinal/specialized-clinics/clone',
+    { method: 'POST', data: payload },
+  );
+  return response.data;
 }
 
 export async function fetchCycleAbsences(

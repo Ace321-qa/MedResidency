@@ -7,6 +7,8 @@ router.get('/clinic-types', LongitudinalController.getClinicTypes);
 router.post('/clinic-types', LongitudinalController.createClinicType);
 router.put('/clinic-types/:id', LongitudinalController.updateClinicType);
 router.delete('/clinic-types/:id', LongitudinalController.deleteClinicType);
+router.get('/specialized-clinics', LongitudinalController.getSpecializedClinics);
+router.post('/specialized-clinics/clone', LongitudinalController.cloneSpecializedClinic);
 router.get('/assignments', LongitudinalController.getAllLongitudinalAssignments);
 router.get('/assignments/resident/:resident_id', LongitudinalController.getResidentLongitudinalAssignments);
 router.get('/faculty-supervisors', LongitudinalController.getFacultySupervisors);

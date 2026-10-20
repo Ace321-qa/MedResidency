@@ -786,6 +786,15 @@ export interface LongitudinalClinicType {
   end_time: string | null;
   requires_release_letter: number;
   is_active: number;
+  /**
+   * 1 when the clinic was created by cloning the standard CCC grid, in which
+   * case it owns a full matrix of its own (`primary_care_cycles.clinic_type_id`).
+   */
+  is_template_clone?: number | null;
+  /** The template a clone was copied from, e.g. `CCC`. */
+  source_template_code?: string | null;
+  /** The name the coordinator typed when cloning. */
+  custom_clinic_name?: string | null;
 }
 
 export interface LongitudinalAssignment {
@@ -970,6 +979,11 @@ export interface RotationAssignmentDetail {
 export interface PrimaryCareCycle {
   id: number;
   program_id: number;
+  /**
+   * Which clinic's grid this cycle belongs to. `0` is the programme's own
+   * standard CCC matrix; a clinic id selects a cloned specialized clinic's grid.
+   */
+  clinic_type_id?: number;
   cycle_number: string;
   week_number: string;
   /** Plain `YYYY-MM-DD`, normalised server-side. */
@@ -1081,6 +1095,50 @@ export interface RandomizeSupervisorsResult {
   rationale?: string | null;
   rotation_months?: number;
   reason?: string;
+}
+
+/**
+ * A specialized clinic created by cloning the standard CCC grid.
+ *
+ * It is an ordinary clinic catalog row (`LongitudinalClinicType`) marked
+ * `is_template_clone = 1`, plus the cycle of the matrix it owns — which is what
+ * lets the CCC view list it beside the standard grid and open its own.
+ */
+export interface SpecializedClinic extends LongitudinalClinicType {
+  is_template_clone: number;
+  source_template_code: string | null;
+  custom_clinic_name: string | null;
+  /** The cycle whose headers and slots are this clinic's grid. */
+  cycle_id: number | null;
+  cycle_number: string | null;
+  week_number?: string | null;
+  /** Plain `YYYY-MM-DD`, or null when the clinic has no cycle yet. */
+  start_date: string | null;
+}
+
+/** The payload for `POST /longitudinal/specialized-clinics/clone`. */
+export interface CloneSpecializedClinicPayload {
+  program_id: number;
+  custom_name: string;
+  /** Defaults server-side to a code derived from the name. */
+  clinic_code?: string;
+  /** The grid template to copy; only `CCC` is supported today. */
+  source_template?: string;
+  /** Subset of the template's days to clone; omit for every day. */
+  days?: string[];
+  /** Uniform shift start (`HH:MM`), overriding the template's per-day shifts. */
+  start_time?: string;
+  /** Uniform shift end (`HH:MM`). */
+  end_time?: string;
+  /** One PGY level for every cloned day, overriding the template's. */
+  pgy_level?: string;
+}
+
+/** What the clone engine copied, so the UI can say exactly what the new grid holds. */
+export interface CloneSpecializedClinicResult {
+  clinic: SpecializedClinic;
+  cycle: PrimaryCareCycle;
+  cloned: { columns: number; headers: number; slots: number };
 }
 
 /** Mirrors the `type` enum on `notifications`. */

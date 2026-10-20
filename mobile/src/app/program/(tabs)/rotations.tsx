@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { ChevronDown, ChevronUp, Library } from 'lucide-react-native';
+import { ChevronDown, ChevronUp, Library, Plus } from 'lucide-react-native';
 import { router } from 'expo-router';
 
 import {
@@ -9,6 +9,7 @@ import {
   Button,
   Card,
   ChoiceGroup,
+  CreateSpecializedClinicSheet,
   EmptyState,
   ErrorState,
   ListRow,
@@ -80,6 +81,19 @@ export default function ProgramRotationsScreen() {
   const [calendarNotice, setCalendarNotice] = useState<string | null>(null);
   const completedCalendar = useRef(false);
   const refreshBlocks = blocks.refresh;
+
+  /**
+   * The "Create Specialized Clinic" sheet. Re-keyed on every open so its form
+   * starts blank and its template preview is re-read — the seeding contract the
+   * sheet documents.
+   */
+  const [clinicSheetOpen, setClinicSheetOpen] = useState(false);
+  const [clinicSheetSeq, setClinicSheetSeq] = useState(0);
+
+  function openClinicSheet() {
+    setClinicSheetSeq((seq) => seq + 1);
+    setClinicSheetOpen(true);
+  }
 
   /**
    * Complete the academic year to its thirteen blocks.
@@ -373,6 +387,13 @@ export default function ProgramRotationsScreen() {
                 onPress={() => router.push('/program/rotations/catalogue')}
                 style={styles.addButton}
               />
+              <Button
+                label="Create Specialized Clinic"
+                variant="outline"
+                icon={Plus}
+                onPress={openClinicSheet}
+                style={styles.addButton}
+              />
             </>
           ) : null}
         </>
@@ -433,6 +454,20 @@ export default function ProgramRotationsScreen() {
           ) : null}
         </>
       )}
+
+      {clinicSheetOpen ? (
+        <CreateSpecializedClinicSheet
+          key={clinicSheetSeq}
+          visible
+          programId={programId}
+          onClose={() => setClinicSheetOpen(false)}
+          onCreated={(result) => {
+            // The new clinic's grid is its own matrix, so open it there rather
+            // than leaving the coordinator to find it.
+            router.push(`/program/longitudinal/matrix?clinic=${result.clinic.id}` as any);
+          }}
+        />
+      ) : null}
     </Screen>
   );
 }

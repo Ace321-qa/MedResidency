@@ -139,6 +139,41 @@ function sortDailyHeaders(headers, startDate) {
 const DEFAULT_CLINIC_COLUMN_COUNT = 10;
 const MAX_CLINIC_COLUMN_COUNT = 99;
 
+/**
+ * The clinic scope of a CCC grid.
+ *
+ * `0` is the programme's own, standard Continuity Care Clinics matrix — the one
+ * every programme is born with and the one all rows written before clinics could
+ * be cloned belong to. Any other value is the id of a specialized clinic in
+ * `longitudinal_clinic_types`, which owns a grid cloned from the standard one.
+ * A real id rather than `NULL` is deliberate: the clinic columns key on
+ * `(program_id, clinic_type_id, clinic_number)`, and a `NULL` in a MySQL unique
+ * key never compares equal, so `NULL` would let the same clinic column be
+ * inserted twice.
+ */
+const STANDARD_CLINIC_TYPE_ID = 0;
+
+/** The `source_template_code` a clone records when it copied the standard CCC grid. */
+const CCC_TEMPLATE_CODE = 'CCC';
+
+/** Coerce any caller-supplied clinic scope to a whole non-negative id. */
+function normalizeClinicTypeId(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : STANDARD_CLINIC_TYPE_ID;
+}
+
+/**
+ * The day a cloned clinic's own `default_day_of_week` records.
+ *
+ * The clinic catalog stores the enum spelling (`SUNDAY`), while a cycle's day
+ * headers store the calendar spelling (`Sunday`); this is the one place the two
+ * are bridged.
+ */
+function clinicDayEnum(dayOfWeek) {
+  const day = canonicalDayName(dayOfWeek);
+  return day ? day.toUpperCase() : null;
+}
+
 /** The leave reasons the Leaves column can record: the `leave_type` enum set. */
 const ABSENCE_LEAVE_TYPES = [
   'ANNUAL_LEAVE',
@@ -314,14 +349,69 @@ class LongitudinalService {
       CREATE TABLE IF NOT EXISTS primary_care_clinic_columns (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         program_id BIGINT UNSIGNED NOT NULL,
+        clinic_type_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
         clinic_number INT NOT NULL,
         label VARCHAR(120) NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        UNIQUE KEY uq_primary_care_clinic_columns_program_number (program_id, clinic_number)
+        UNIQUE KEY uq_primary_care_clinic_columns_scope (program_id, clinic_type_id, clinic_number)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+
+    // A grid may be scoped to a clinic, so the clinic columns gain the scope and
+    // their unique key grows with it: two clinics may each own a "Clinic 3".
+    const [columnScope] = await db.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'primary_care_clinic_columns'
+          AND COLUMN_NAME = 'clinic_type_id'`
+    );
+    if (columnScope.length === 0) {
+      await db.query(
+        'ALTER TABLE primary_care_clinic_columns ADD COLUMN clinic_type_id BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER program_id'
+      );
+    }
+    const [legacyColumnKey] = await db.query(
+      `SELECT 1 FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'primary_care_clinic_columns'
+          AND INDEX_NAME = 'uq_primary_care_clinic_columns_program_number'
+        LIMIT 1`
+    );
+    if (legacyColumnKey.length > 0) {
+      await db.query(
+        'ALTER TABLE primary_care_clinic_columns DROP INDEX uq_primary_care_clinic_columns_program_number'
+      );
+    }
+    await this.ensureIndex(
+      'primary_care_clinic_columns',
+      'uq_primary_care_clinic_columns_scope',
+      '(program_id, clinic_type_id, clinic_number)',
+      { unique: true }
+    );
+
+    // Specialized clinics: a clinic a coordinator created by cloning the standard
+    // CCC matrix is marked as a clone and records which template it came from, so
+    // the CCC view can list it as its own grid and the catalog can tell a clone
+    // from a hand-registered clinic.
+    const cloneColumns = [
+      ['is_template_clone', 'TINYINT(1) NOT NULL DEFAULT 0'],
+      ['source_template_code', 'VARCHAR(50) NULL'],
+      ['custom_clinic_name', 'VARCHAR(191) NULL'],
+    ];
+    for (const [column, definition] of cloneColumns) {
+      const [existing] = await db.query(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'longitudinal_clinic_types'
+            AND COLUMN_NAME = ?`,
+        [column]
+      );
+      if (existing.length === 0) {
+        await db.query(`ALTER TABLE longitudinal_clinic_types ADD COLUMN ${column} ${definition}`);
+      }
+    }
 
     // The CCC cycle now owns its rotation window: `rotation_window_months`
     // (4 weeks per month), the derived `total_weeks` and the inclusive
@@ -331,6 +421,10 @@ class LongitudinalService {
       ['rotation_window_months', 'INT NULL'],
       ['total_weeks', 'INT NULL'],
       ['end_date', 'DATE NULL'],
+      // Which clinic's grid this cycle belongs to. `0` is the programme's own
+      // standard CCC matrix; existing rows take that default, so nothing written
+      // before specialized clinics existed moves.
+      ['clinic_type_id', 'BIGINT UNSIGNED NOT NULL DEFAULT 0'],
     ];
     for (const [column, definition] of cycleColumns) {
       const [existingColumn] = await db.query(
@@ -344,14 +438,43 @@ class LongitudinalService {
         await db.query(`ALTER TABLE primary_care_cycles ADD COLUMN ${column} ${definition}`);
       }
     }
+    await this.ensureIndex(
+      'primary_care_cycles',
+      'idx_primary_care_cycles_program_clinic',
+      '(program_id, clinic_type_id)'
+    );
 
     this._schemaReady = true;
+  }
+
+  /**
+   * Create an index once, the way `ensureSchema` adds a column — by asking the
+   * catalog first rather than re-running DDL that would fail on the second boot.
+   *
+   * @param {string} table
+   * @param {string} indexName
+   * @param {string} definition - `(col, col, ...)`
+   * @param {{unique?: boolean}} [options]
+   */
+  static async ensureIndex(table, indexName, definition, { unique = false } = {}) {
+    const [rows] = await db.query(
+      `SELECT 1 FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND INDEX_NAME = ?
+        LIMIT 1`,
+      [table, indexName]
+    );
+    if (rows.length === 0) {
+      await db.query(`ALTER TABLE ${table} ADD ${unique ? 'UNIQUE ' : ''}INDEX ${indexName} ${definition}`);
+    }
   }
 
   static async getClinicTypes(programId, { includeInactive = false } = {}) {
     await this.ensureSchema();
     let query = `
-      SELECT id, program_id, clinic_code, clinic_name, display_order, default_day_of_week, start_time, end_time, requires_release_letter, is_active
+      SELECT id, program_id, clinic_code, clinic_name, display_order, default_day_of_week, start_time, end_time, requires_release_letter, is_active,
+             is_template_clone, source_template_code, custom_clinic_name
       FROM longitudinal_clinic_types
       WHERE program_id = ?
     `;
@@ -487,6 +610,313 @@ class LongitudinalService {
       [clinicTypeId, programId]
     );
     return rows[0] || null;
+  }
+
+  /**
+   * The specialized clinics a programme created by cloning, each with the cycle
+   * of the grid it owns.
+   *
+   * These are the ordinary clinic catalogs (`longitudinal_clinic_types`) marked
+   * `is_template_clone = 1`, so a resident assignment or a supervisor pairing
+   * points at the same kind of row as any other clinic; what makes them
+   * specialized is that they own a full CCC grid of their own rather than
+   * sharing the programme's standard one.
+   *
+   * @param {number} programId
+   * @param {{includeInactive?: boolean}} [options]
+   */
+  static async getSpecializedClinics(programId, { includeInactive = false } = {}) {
+    await this.ensureSchema();
+    let query = `
+      SELECT t.id, t.program_id, t.clinic_code, t.clinic_name, t.custom_clinic_name,
+             t.display_order, t.default_day_of_week, t.start_time, t.end_time,
+             t.requires_release_letter, t.is_active, t.is_template_clone, t.source_template_code,
+             c.id AS cycle_id, c.cycle_number, c.week_number, c.start_date
+        FROM longitudinal_clinic_types t
+        LEFT JOIN primary_care_cycles c
+          ON c.program_id = t.program_id AND c.clinic_type_id = t.id
+       WHERE t.program_id = ? AND t.is_template_clone = 1
+    `;
+    const params = [programId];
+    if (!includeInactive) query += ' AND t.is_active = 1';
+    // Newest cycle first, so a clinic that somehow owns two keeps the latest.
+    query += ' ORDER BY (t.display_order IS NULL) ASC, t.display_order ASC, t.id ASC, c.id DESC';
+    const [rows] = await db.query(query, params);
+
+    const byClinic = new Map();
+    for (const row of rows) {
+      if (byClinic.has(row.id)) continue;
+      byClinic.set(row.id, {
+        ...row,
+        is_template_clone: Number(row.is_template_clone) || 0,
+        start_date: row.start_date ? toCalendarDate(row.start_date) : null,
+      });
+    }
+    return [...byClinic.values()];
+  }
+
+  /**
+   * Create a specialized clinic by cloning the standard CCC grid.
+   *
+   * The clone is a template copy, not a link: it registers a clinic in
+   * `longitudinal_clinic_types`, then writes **its own** cycle, day headers and
+   * clinic columns so the new clinic runs a complete, independently editable
+   * matrix from the first read. The template is the programme's own standard CCC
+   * grid (`clinic_type_id = 0`), materialised on demand — so a programme that has
+   * never opened its CCC view still clones the canonical five days and ten
+   * columns rather than an empty shell.
+   *
+   * What is copied: the day of week, shift range and PGY level of every header,
+   * the numbered clinic columns with their labels, and one slot row per column.
+   * What is **not** copied: residents, supervising faculty and the backup pool.
+   * A clone that carried the CCC rota across would put the same person in two
+   * clinics at once; staffing the new clinic is the coordinator's decision, and
+   * the grid is ready to take it.
+   *
+   * All writes are one transaction, so a failure leaves no half-built clinic
+   * behind.
+   *
+   * @param {object} data
+   * @param {number} data.program_id
+   * @param {string} data.custom_name - The clinic's name, e.g. "Sports Medicine Clinic".
+   * @param {string} [data.clinic_code] - Defaults to a code derived from the name.
+   * @param {string} [data.source_template='CCC'] - The grid template to copy.
+   * @param {string[]} [data.days] - Subset of the template's days to clone.
+   * @param {string} [data.start_time] - Uniform shift start, overriding the template's.
+   * @param {string} [data.end_time] - Uniform shift end, overriding the template's.
+   * @param {string} [data.pgy_level] - One PGY level for every day, overriding the template's.
+   * @param {number} [data.requires_release_letter]
+   * @returns {Promise<{clinic: object, cycle: object, cloned: {columns: number, headers: number, slots: number}}>}
+   */
+  static async cloneSpecializedClinic(data = {}) {
+    await this.ensureSchema();
+    const programId = Number(data.program_id);
+    if (!Number.isInteger(programId) || programId <= 0) {
+      const error = new Error('program_id is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const customName = String(data.custom_name ?? data.custom_clinic_name ?? '').trim();
+    if (!customName) {
+      const error = new Error('A clinic name is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (customName.length > 191) {
+      const error = new Error('A clinic name must be 191 characters or fewer.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const requestedCode = String(data.clinic_code ?? '').trim();
+    if (requestedCode.length > 50) {
+      const error = new Error('A clinic code must be 50 characters or fewer.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const sourceTemplate =
+      String(data.source_template ?? data.source_template_code ?? CCC_TEMPLATE_CODE).trim().toUpperCase() ||
+      CCC_TEMPLATE_CODE;
+    if (sourceTemplate !== CCC_TEMPLATE_CODE) {
+      const error = new Error(
+        `Unknown template source "${sourceTemplate}". Only "${CCC_TEMPLATE_CODE}" (the standard Continuity Care Clinics grid) can be cloned.`
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+    const requestedStart = data.start_date ? String(data.start_date).trim() : null;
+    if (requestedStart && !/^\d{4}-\d{2}-\d{2}$/.test(requestedStart)) {
+      const error = new Error('start_date must be a calendar date, e.g. 2026-07-05.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const days = Array.isArray(data.days) && data.days.length > 0
+      ? [...new Set(data.days.map((day) => canonicalDayName(day)).filter(Boolean))]
+      : null;
+    const startTime = data.start_time ? String(data.start_time).slice(0, 5) : null;
+    const endTime = data.end_time ? String(data.end_time).slice(0, 5) : null;
+    const pgyLevel = data.pgy_level ? String(data.pgy_level).trim().slice(0, 50) : null;
+    const requiresReleaseLetter = data.requires_release_letter ? 1 : 0;
+
+    // Two clinics answering to the same name would make the chip pool ambiguous,
+    // and a double-tap on Create would build two grids — so a name already on
+    // record is refused rather than silently cloned twice.
+    const [nameMatches] = await db.query(
+      'SELECT id, clinic_code FROM longitudinal_clinic_types WHERE program_id = ? AND clinic_name = ? LIMIT 1',
+      [programId, customName]
+    );
+    if (nameMatches.length > 0) {
+      const error = new Error(
+        `A clinic called "${customName}" already exists for this programme (${nameMatches[0].clinic_code}). Choose a different name, or open that clinic's grid instead.`
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const template = await this.getCycleSchedule(programId, { clinicTypeId: STANDARD_CLINIC_TYPE_ID });
+    const sourceHeaders = Array.isArray(template.dailyHeaders) ? template.dailyHeaders : [];
+    if (sourceHeaders.length === 0) {
+      const error = new Error(
+        'The CCC template has no clinic days to clone. Open the Continuity Care Clinics matrix and add a day first.'
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    const targetHeaders = days
+      ? sourceHeaders.filter((header) => days.includes(canonicalDayName(header.day_of_week)))
+      : sourceHeaders;
+    if (targetHeaders.length === 0) {
+      const error = new Error('None of the requested days run in the CCC template.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const templateColumns = Array.isArray(template.columns) && template.columns.length > 0
+      ? template.columns
+      : Array.from({ length: DEFAULT_CLINIC_COLUMN_COUNT }, (_, index) => ({
+          clinic_number: index + 1,
+          label: null,
+        }));
+    const slotCount = Math.max(
+      DEFAULT_CLINIC_COLUMN_COUNT,
+      ...templateColumns.map((column) => Number(column.clinic_number) || 0)
+    );
+
+    // A caller-supplied code is the identifier the coordinator typed (e.g.
+    // "SPORTS-CLINIC"), so it is honoured rather than re-derived; `deriveClinicCode`
+    // only fills in when none was given.
+    const code = await this.ensureUniqueClinicCode(
+      programId,
+      requestedCode ? requestedCode.toUpperCase() : deriveClinicCode(customName)
+    );
+
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      const [maxRows] = await connection.query(
+        'SELECT COALESCE(MAX(display_order), 0) AS max_order FROM longitudinal_clinic_types WHERE program_id = ?',
+        [programId]
+      );
+      const displayOrder = (Number(maxRows[0]?.max_order) || 0) + 1;
+      const [clinicResult] = await connection.query(
+        `INSERT INTO longitudinal_clinic_types
+           (program_id, clinic_code, clinic_name, custom_clinic_name, display_order,
+            default_day_of_week, start_time, end_time, requires_release_letter, is_active,
+            is_template_clone, source_template_code)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)`,
+        [
+          programId,
+          code,
+          customName,
+          customName,
+          displayOrder,
+          clinicDayEnum(targetHeaders[0].day_of_week),
+          startTime,
+          endTime,
+          requiresReleaseLetter,
+          sourceTemplate,
+        ]
+      );
+      const clinicId = clinicResult.insertId;
+
+      // The clone's own columns. The row at `clinic_number = 0` is the sentinel
+      // that tells `ensureClinicColumns` this grid is already materialised — the
+      // same once-only rule the standard grid uses, so a cloned grid is never
+      // handed the default ten on top of the ones copied in.
+      const columnRows = [[programId, clinicId, 0, null]];
+      for (const column of templateColumns) {
+        const number = Number(column.clinic_number);
+        if (!Number.isInteger(number) || number < 1) continue;
+        columnRows.push([programId, clinicId, number, column.label ?? null]);
+      }
+      await connection.query(
+        'INSERT INTO primary_care_clinic_columns (program_id, clinic_type_id, clinic_number, label) VALUES ?',
+        [columnRows]
+      );
+
+      // The cycle mirrors the template's week, so the new clinic runs alongside
+      // the CCC grid it was cloned from rather than starting from a bare date.
+      const sourceCycle = template.cycle || {};
+      const [cycleResult] = await connection.query(
+        `INSERT INTO primary_care_cycles
+           (program_id, clinic_type_id, cycle_number, week_number, start_date,
+            rotation_window_months, total_weeks, end_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          programId,
+          clinicId,
+          data.cycle_number || sourceCycle.cycle_number || 'Cycle 1',
+          data.week_number || sourceCycle.week_number || 'Week 1',
+          requestedStart || sourceCycle.start_date,
+          sourceCycle.rotation_window_months ?? null,
+          sourceCycle.total_weeks ?? null,
+          sourceCycle.end_date ?? null,
+        ]
+      );
+      const cycleId = cycleResult.insertId;
+
+      const slotsByHeader = new Map();
+      for (const slot of template.slots || []) {
+        const key = Number(slot.daily_header_id);
+        if (!slotsByHeader.has(key)) slotsByHeader.set(key, []);
+        slotsByHeader.get(key).push(Number(slot.clinic_number));
+      }
+
+      let clonedSlots = 0;
+      for (const header of targetHeaders) {
+        const shiftTime = startTime && endTime
+          ? `${startTime} - ${endTime}`
+          : (header.shift_time ?? null);
+        const [headerResult] = await connection.query(
+          'INSERT INTO primary_care_daily_headers (cycle_id, day_of_week, shift_time, pgy_level) VALUES (?, ?, ?, ?)',
+          [cycleId, canonicalDayName(header.day_of_week), shiftTime, pgyLevel || header.pgy_level || null]
+        );
+        const headerId = headerResult.insertId;
+        const copied = (slotsByHeader.get(Number(header.id)) || [])
+          .filter((number) => Number.isInteger(number) && number > 0);
+        const slotNumbers = copied.length > 0
+          ? copied
+          : Array.from({ length: slotCount }, (_, index) => index + 1);
+        if (slotNumbers.length > 0) {
+          await connection.query(
+            'INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number) VALUES ?',
+            [slotNumbers.map((number) => [headerId, number])]
+          );
+          clonedSlots += slotNumbers.length;
+        }
+      }
+
+      await connection.commit();
+
+      const [clinicRows] = await db.query('SELECT * FROM longitudinal_clinic_types WHERE id = ?', [clinicId]);
+      const [cycleRows] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ?', [cycleId]);
+      const cycleRow = cycleRows[0];
+      const startDate = toCalendarDate(cycleRow.start_date);
+
+      return {
+        clinic: {
+          ...clinicRows[0],
+          is_template_clone: 1,
+          source_template_code: sourceTemplate,
+          custom_clinic_name: customName,
+        },
+        cycle: {
+          ...cycleRow,
+          start_date: startDate,
+          academic_year: academicYearForDate(startDate),
+        },
+        cloned: {
+          columns: columnRows.length - 1,
+          headers: targetHeaders.length,
+          slots: clonedSlots,
+        },
+      };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   /**
@@ -1066,11 +1496,14 @@ class LongitudinalService {
    * these start dates rather than a stored value.
    *
    * @param {number} programId
+   * @param {number|string} [clinicTypeId] - `0` (the default) is the programme's
+   *   standard CCC matrix; a clinic id selects that specialized clinic's grid.
    */
-  static async getCycles(programId) {
+  static async getCycles(programId, clinicTypeId = STANDARD_CLINIC_TYPE_ID) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
     const [rows] = await db.query(
-      'SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY start_date ASC, id ASC',
-      [programId]
+      'SELECT * FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? ORDER BY start_date ASC, id ASC',
+      [programId, clinic]
     );
     return rows.map((row) => {
       const startDate = toCalendarDate(row.start_date);
@@ -1101,53 +1534,57 @@ class LongitudinalService {
    * column never moves its slot data and adding or deleting one never shifts the
    * others.
    */
-  static async getMatrixColumns(programId) {
-    await this.ensureClinicColumns(programId);
+  static async getMatrixColumns(programId, clinicTypeId = STANDARD_CLINIC_TYPE_ID) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
+    await this.ensureClinicColumns(programId, clinic);
     const [rows] = await db.query(
       `SELECT clinic_number, label FROM primary_care_clinic_columns
-        WHERE program_id = ? AND clinic_number > 0
+        WHERE program_id = ? AND clinic_type_id = ? AND clinic_number > 0
         ORDER BY clinic_number ASC`,
-      [programId]
+      [programId, clinic]
     );
     return rows;
   }
 
   /**
-   * Materialise the default `Clinic 1..N` columns once per programme.
+   * Materialise the default `Clinic 1..N` columns once per grid.
    *
    * Guarded by a sentinel row at `clinic_number = 0`, so the defaults are created
    * exactly once — deleting one later stays deleted rather than being resurrected
-   * on the next read.
+   * on the next read. Each clinic scope has its own sentinel, so a cloned clinic
+   * whose columns were copied in full is never given the standard ten on top.
    */
-  static async ensureClinicColumns(programId) {
+  static async ensureClinicColumns(programId, clinicTypeId = STANDARD_CLINIC_TYPE_ID) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
     const [flag] = await db.query(
-      'SELECT 1 FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_number = 0 LIMIT 1',
-      [programId]
+      'SELECT 1 FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_type_id = ? AND clinic_number = 0 LIMIT 1',
+      [programId, clinic]
     );
     if (flag.length > 0) return;
     const params = [];
     const values = [];
     for (let number = 0; number <= DEFAULT_CLINIC_COLUMN_COUNT; number += 1) {
-      params.push(programId, number);
-      values.push('(?, ?)');
+      params.push(programId, clinic, number);
+      values.push('(?, ?, ?)');
     }
     await db.query(
-      `INSERT IGNORE INTO primary_care_clinic_columns (program_id, clinic_number) VALUES ${values.join(', ')}`,
+      `INSERT IGNORE INTO primary_care_clinic_columns (program_id, clinic_type_id, clinic_number) VALUES ${values.join(', ')}`,
       params
     );
   }
 
   /**
-   * Append a new column (`Clinic N+1`) at the end of the grid.
+   * Append a new column (`Clinic N+1`) at the end of one clinic's grid.
    *
    * Returns the full column list afterwards so the caller can refresh its grid
    * from one response.
    */
-  static async addClinicColumn(programId) {
-    await this.ensureClinicColumns(programId);
+  static async addClinicColumn(programId, clinicTypeId = STANDARD_CLINIC_TYPE_ID) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
+    await this.ensureClinicColumns(programId, clinic);
     const [maxRows] = await db.query(
-      'SELECT MAX(clinic_number) AS max_number FROM primary_care_clinic_columns WHERE program_id = ?',
-      [programId]
+      'SELECT MAX(clinic_number) AS max_number FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_type_id = ?',
+      [programId, clinic]
     );
     const next = (Number(maxRows[0]?.max_number) || DEFAULT_CLINIC_COLUMN_COUNT) + 1;
     if (next > MAX_CLINIC_COLUMN_COUNT) {
@@ -1156,14 +1593,15 @@ class LongitudinalService {
       throw error;
     }
     await db.query(
-      'INSERT INTO primary_care_clinic_columns (program_id, clinic_number) VALUES (?, ?)',
-      [programId, next]
+      'INSERT INTO primary_care_clinic_columns (program_id, clinic_type_id, clinic_number) VALUES (?, ?, ?)',
+      [programId, clinic, next]
     );
-    return this.getMatrixColumns(programId);
+    return this.getMatrixColumns(programId, clinic);
   }
 
   /** Rename a clinic column's label. An empty label reverts to "Clinic N". */
-  static async renameClinicColumn(programId, clinicNumber, label) {
+  static async renameClinicColumn(programId, clinicNumber, label, clinicTypeId = STANDARD_CLINIC_TYPE_ID) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
     const number = Number(clinicNumber);
     if (!Number.isInteger(number) || number < 1 || number > MAX_CLINIC_COLUMN_COUNT) {
       const error = new Error('clinic_number must be a whole number between 1 and 99.');
@@ -1171,8 +1609,8 @@ class LongitudinalService {
       throw error;
     }
     const [rows] = await db.query(
-      'SELECT 1 FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_number = ? AND clinic_number > 0 LIMIT 1',
-      [programId, number]
+      'SELECT 1 FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_type_id = ? AND clinic_number = ? AND clinic_number > 0 LIMIT 1',
+      [programId, clinic, number]
     );
     if (rows.length === 0) {
       const error = new Error('clinic column not found.');
@@ -1181,14 +1619,15 @@ class LongitudinalService {
     }
     const clean = String(label ?? '').trim().slice(0, 120) || null;
     await db.query(
-      'UPDATE primary_care_clinic_columns SET label = ? WHERE program_id = ? AND clinic_number = ?',
-      [clean, programId, number]
+      'UPDATE primary_care_clinic_columns SET label = ? WHERE program_id = ? AND clinic_type_id = ? AND clinic_number = ?',
+      [clean, programId, clinic, number]
     );
-    return this.getMatrixColumns(programId);
+    return this.getMatrixColumns(programId, clinic);
   }
 
-  /** Remove a clinic column from the grid. Its historical slot rows are kept. */
-  static async deleteClinicColumn(programId, clinicNumber) {
+  /** Remove a clinic column from one grid. Its historical slot rows are kept. */
+  static async deleteClinicColumn(programId, clinicNumber, clinicTypeId = STANDARD_CLINIC_TYPE_ID) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
     const number = Number(clinicNumber);
     if (!Number.isInteger(number) || number < 1 || number > MAX_CLINIC_COLUMN_COUNT) {
       const error = new Error('clinic_number must be a whole number between 1 and 99.');
@@ -1196,21 +1635,25 @@ class LongitudinalService {
       throw error;
     }
     await db.query(
-      'DELETE FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_number = ?',
-      [programId, number]
+      'DELETE FROM primary_care_clinic_columns WHERE program_id = ? AND clinic_type_id = ? AND clinic_number = ?',
+      [programId, clinic, number]
     );
-    return this.getMatrixColumns(programId);
+    return this.getMatrixColumns(programId, clinic);
   }
 
   static async getCycleSchedule(programId, options = {}) {
     await this.ensureSchema();
     const { cycleId } = options;
+    const clinic = normalizeClinicTypeId(options.clinicTypeId);
     let cycle = null;
     if (cycleId) {
       const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ? AND program_id = ?', [cycleId, programId]);
       cycle = cycles[0] || null;
     } else {
-      const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+      const [cycles] = await db.query(
+        'SELECT * FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? ORDER BY id DESC LIMIT 1',
+        [programId, clinic]
+      );
       cycle = cycles[0] || null;
     }
 
@@ -1219,8 +1662,8 @@ class LongitudinalService {
     // anchored to a real row.
     if (!cycle) {
       const [res] = await db.query(
-        'INSERT INTO primary_care_cycles (program_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?)',
-        [programId, 'Cycle 1', 'Week 1', new Date().toISOString().split('T')[0]]
+        'INSERT INTO primary_care_cycles (program_id, clinic_type_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?, ?)',
+        [programId, clinic, 'Cycle 1', 'Week 1', new Date().toISOString().split('T')[0]]
       );
       const [rows] = await db.query('SELECT * FROM primary_care_cycles WHERE id = ?', [res.insertId]);
       cycle = rows[0];
@@ -1258,7 +1701,7 @@ class LongitudinalService {
     // The grid needs a slot for every clinic column, so a programme that has
     // added columns beyond the defaults still gets a cell to write into. Leaves
     // is not a slot, so the count is the columns themselves.
-    const columns = await this.getMatrixColumns(programId);
+    const columns = await this.getMatrixColumns(programId, clinic);
     const maxClinicNumber = columns.reduce(
       (highest, column) => Math.max(highest, column.clinic_number),
       0
@@ -1379,7 +1822,7 @@ class LongitudinalService {
     const residents = Array.isArray(data.residents) ? data.residents : [];
     const faculty = Array.isArray(data.faculty) ? data.faculty : [];
 
-    const header = await this.resolveDailyHeader(program, cycleId, dayOfWeek);
+    const header = await this.resolveDailyHeader(program, cycleId, dayOfWeek, data.clinic_type_id);
     const resolvedCycleId = header?.cycle_id ?? cycleId;
 
     // The day's calendar date, for the attendance mirror. The CCC week starts on
@@ -1466,14 +1909,20 @@ class LongitudinalService {
    * title themselves.
    */
   static async updateCycleHeader(programId, data = {}) {
+    // The clinic scope is only consulted when the caller did not name a cycle:
+    // an explicit `cycle_id` is already the grid the coordinator is editing.
+    const clinic = normalizeClinicTypeId(data.clinic_type_id);
     let cycleId = data.cycle_id;
     if (!cycleId) {
-      const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+      const [cycles] = await db.query(
+        'SELECT * FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? ORDER BY id DESC LIMIT 1',
+        [programId, clinic]
+      );
       if (cycles.length > 0) cycleId = cycles[0].id;
       else {
         const [res] = await db.query(
-          'INSERT INTO primary_care_cycles (program_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?)',
-          [programId, data.cycle_number || 'Cycle 1', data.week_number || 'Week 1', data.start_date || new Date().toISOString().split('T')[0]]
+          'INSERT INTO primary_care_cycles (program_id, clinic_type_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?, ?)',
+          [programId, clinic, data.cycle_number || 'Cycle 1', data.week_number || 'Week 1', data.start_date || new Date().toISOString().split('T')[0]]
         );
         cycleId = res.insertId;
       }
@@ -1906,14 +2355,18 @@ class LongitudinalService {
   }
 
   /** Resolve (creating if necessary) the day header a backup pool belongs to. */
-  static async resolveDailyHeader(programId, cycleId, dayOfWeek) {
+  static async resolveDailyHeader(programId, cycleId, dayOfWeek, clinicTypeId = STANDARD_CLINIC_TYPE_ID) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
     let resolvedCycleId = cycleId;
     if (!resolvedCycleId) {
-      const [cycles] = await db.query('SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+      const [cycles] = await db.query(
+        'SELECT * FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? ORDER BY id DESC LIMIT 1',
+        [programId, clinic]
+      );
       if (cycles.length === 0) {
         const [res] = await db.query(
-          'INSERT INTO primary_care_cycles (program_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?)',
-          [programId, 'Cycle 1', 'Week 1', new Date().toISOString().split('T')[0]]
+          'INSERT INTO primary_care_cycles (program_id, clinic_type_id, cycle_number, week_number, start_date) VALUES (?, ?, ?, ?, ?)',
+          [programId, clinic, 'Cycle 1', 'Week 1', new Date().toISOString().split('T')[0]]
         );
         resolvedCycleId = res.insertId;
       } else {
@@ -1949,7 +2402,7 @@ class LongitudinalService {
     const { cycle_id, day_of_week, faculty_list = [] } = data;
     if (!day_of_week) { const e = new Error('day_of_week required'); e.statusCode = 400; throw e; }
 
-    const dailyHeader = await this.resolveDailyHeader(programId, cycle_id, day_of_week);
+    const dailyHeader = await this.resolveDailyHeader(programId, cycle_id, day_of_week, data.clinic_type_id);
     const dailyHeaderId = dailyHeader.id;
 
     await db.query('DELETE FROM primary_care_backup_faculty WHERE daily_header_id = ? AND day_of_week = ?', [dailyHeaderId, day_of_week]);
@@ -2002,6 +2455,7 @@ class LongitudinalService {
       randomize = true,
       rationale = null,
     } = options;
+    const clinic = normalizeClinicTypeId(options.clinicTypeId);
 
     const [faculty] = await db.query(
       'SELECT id, first_name, last_name, specialty, CONCAT(\'Dr. \', first_name, \' \', last_name) AS display_name FROM faculty_supervisors WHERE program_id = ? AND is_active = 1 ORDER BY id ASC',
@@ -2011,7 +2465,10 @@ class LongitudinalService {
 
     const [cycle] = cycleId
       ? await db.query('SELECT * FROM primary_care_cycles WHERE id = ? AND program_id = ?', [cycleId, programId])
-      : await db.query('SELECT * FROM primary_care_cycles WHERE program_id = ? ORDER BY id DESC LIMIT 1', [programId]);
+      : await db.query(
+          'SELECT * FROM primary_care_cycles WHERE program_id = ? AND clinic_type_id = ? ORDER BY id DESC LIMIT 1',
+          [programId, clinic]
+        );
     if (!cycle[0]) return { updated: 0, days: [], reason: 'no_cycle' };
 
     let headerQuery = 'SELECT * FROM primary_care_daily_headers WHERE cycle_id = ?';

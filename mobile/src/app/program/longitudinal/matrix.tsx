@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { useLocalSearchParams } from 'expo-router';
 import { Check, Download, Minus, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react-native';
 
 import {
@@ -7,6 +8,7 @@ import {
   Banner,
   Button,
   Card,
+  CreateSpecializedClinicSheet,
   DateField,
   Divider,
   ExportMenu,
@@ -33,6 +35,7 @@ import {
   fetchCycleSchedule,
   fetchCycles,
   fetchFacultySupervisors,
+  fetchSpecializedClinics,
   randomizeSupervisors,
   renameClinicColumn,
   updateBackupFaculty,
@@ -86,6 +89,7 @@ import { colors, radius, spacing } from '../../../theme';
 import { goBack } from '../../../navigation/back';
 import { LEAVE_TYPES } from '../../../types/api';
 import type {
+  CloneSpecializedClinicResult,
   PrimaryCareAbsence,
   PrimaryCareClinicSlot,
   PrimaryCareCycle,
@@ -362,17 +366,63 @@ export default function LongitudinalMatrixScreen() {
   const programId = session?.programId ?? 0;
 
   /**
-   * The cycle-history selector. `selectedCycleId` is the stored cycle the
-   * coordinator chose, or null for the programme's current (latest) cycle. A
-   * past cycle is shown read-only: the schedule is a record of what happened, so
-   * the edit affordances are disabled rather than silently writing to the
-   * current cycle.
+   * Which grid is on screen. `0` is the programme's standard Continuity Care
+   * Clinics matrix; any other value is a specialized clinic created by cloning
+   * that template, which owns a grid of its own. The route may name one
+   * (`?clinic=<id>`) — that is how "Create Specialized Clinic" lands the
+   * coordinator on the clinic it just made.
    */
-  const [selectedCycleId, setSelectedCycleId] = useState<number | null>(null);
-  const cycles = useApiResource(() => fetchCycles(programId), [programId]);
+  const routeParams = useLocalSearchParams<{ clinic?: string }>();
+  const routeClinicId = Number(routeParams.clinic);
+  const routeClinicTypeId = Number.isInteger(routeClinicId) && routeClinicId > 0 ? routeClinicId : null;
+
+  /**
+   * The grid pair: which clinic's matrix is on screen, and which of that
+   * clinic's cycles. The two travel together because a stored cycle id belongs
+   * to exactly one clinic's grid, so switching clinic drops the cycle rather
+   * than opening a week that belongs somewhere else.
+   *
+   * `param` remembers the route value that produced this state, so a *new* route
+   * value is adopted during render — the documented way to adjust state when an
+   * incoming value changes, without an effect and its extra commit. That is how
+   * `/program/longitudinal/matrix?clinic=12` lands on clinic 12 even when a
+   * matrix screen is already mounted.
+   */
+  const [grid, setGrid] = useState<{
+    param: number | null;
+    clinicTypeId: number;
+    cycleId: number | null;
+  }>({
+    param: routeClinicTypeId,
+    clinicTypeId: routeClinicTypeId ?? 0,
+    cycleId: null,
+  });
+  if (grid.param !== routeClinicTypeId) {
+    setGrid({
+      param: routeClinicTypeId,
+      clinicTypeId: routeClinicTypeId ?? grid.clinicTypeId,
+      cycleId: null,
+    });
+  }
+  const clinicTypeId = grid.clinicTypeId;
+  const selectedCycleId = grid.cycleId;
+
+  /**
+   * Pick a cycle of the grid on screen. `null` is the programme's current
+   * (latest) cycle; a past cycle opens read-only, because the schedule is a
+   * record of what happened rather than a draft to edit.
+   */
+  const selectCycle = (next: number | null) =>
+    setGrid((current) => ({ ...current, cycleId: next }));
+
+  const specializedClinics = useApiResource(() => fetchSpecializedClinics(programId), [programId]);
+  const cycles = useApiResource(
+    () => fetchCycles(programId, clinicTypeId),
+    [programId, clinicTypeId],
+  );
   const schedule = useApiResource(
-    () => fetchCycleSchedule(programId, selectedCycleId ?? undefined),
-    [programId, selectedCycleId],
+    () => fetchCycleSchedule(programId, selectedCycleId ?? undefined, clinicTypeId),
+    [programId, selectedCycleId, clinicTypeId],
   );
   const facultyResource = useApiResource(() => fetchFacultySupervisors(programId), [programId]);
   const residentsResource = useApiResource(
@@ -426,6 +476,14 @@ export default function LongitudinalMatrixScreen() {
   const [columnLabelValue, setColumnLabelValue] = useState('');
   const [savingColumn, setSavingColumn] = useState(false);
   const [removingColumn, setRemovingColumn] = useState(false);
+
+  /**
+   * The "Create Specialized Clinic" sheet. `specializedSheetSeq` re-keys the
+   * sheet on every open so its form starts blank and its template preview is
+   * re-read — the seeding contract `CreateSpecializedClinicSheet` documents.
+   */
+  const [specializedSheetOpen, setSpecializedSheetOpen] = useState(false);
+  const [specializedSheetSeq, setSpecializedSheetSeq] = useState(0);
 
   /** The Leaves column editor: one CCC day's resident and faculty absences. */
   const [leavesEditDay, setLeavesEditDay] = useState<DayName | null>(null);
@@ -502,6 +560,65 @@ export default function LongitudinalMatrixScreen() {
     }
     return options;
   }, [cycleList, latestCycleId, cycle]);
+
+  /**
+   * The grid selector: the standard CCC matrix plus every specialized clinic
+   * cloned from it. A clinic appears here the moment it is created, which is
+   * what makes a new clinic immediately navigable rather than a row a
+   * coordinator has to find somewhere else.
+   */
+  const specializedClinicList = useMemo(
+    () => specializedClinics.data ?? [],
+    [specializedClinics.data],
+  );
+  const clinicOptions = useMemo<SegmentedOption[]>(
+    () => [
+      { value: '0', label: 'CCC Standard' },
+      ...specializedClinicList.map((clinic) => ({
+        value: String(clinic.id),
+        label: clinic.clinic_name,
+      })),
+    ],
+    [specializedClinicList],
+  );
+  const activeClinic = useMemo(
+    () => specializedClinicList.find((clinic) => clinic.id === clinicTypeId) ?? null,
+    [specializedClinicList, clinicTypeId],
+  );
+
+  /**
+   * Switch grids. A stored cycle id belongs to exactly one clinic's grid, so it
+   * is dropped on the way: the new clinic opens on its own current cycle rather
+   * than on an id that means a different week elsewhere.
+   */
+  function selectClinicType(nextId: number) {
+    if (nextId === clinicTypeId) return;
+    setGrid((current) => ({ ...current, clinicTypeId: nextId, cycleId: null }));
+    setFeedback(null);
+    setActionError(null);
+  }
+
+  function openSpecializedSheet() {
+    setSpecializedSheetSeq((seq) => seq + 1);
+    setSpecializedSheetOpen(true);
+    setFeedback(null);
+    setActionError(null);
+  }
+
+  /**
+   * Land on the clinic that was just cloned. The grid it copied is already on
+   * screen one render later, so the coordinator can start staffing it without
+   * hunting for it.
+   */
+  function handleSpecializedClinicCreated(result: CloneSpecializedClinicResult) {
+    specializedClinics.refresh();
+    setGrid((current) => ({ ...current, clinicTypeId: result.clinic.id, cycleId: null }));
+    setFeedback(
+      `${result.clinic.clinic_name} created. Its grid copied ${result.cloned.headers} day(s), ` +
+        `${result.cloned.columns} clinic column(s) and ${result.cloned.slots} slot(s) from the ` +
+        'Continuity Care Clinics template. Residents and supervising faculty start empty — assign them here.',
+    );
+  }
 
   /**
    * The week's day order, rotated to begin on the cycle's Week Start Date. A
@@ -1398,7 +1515,7 @@ export default function LongitudinalMatrixScreen() {
     setActionError(null);
     setFeedback(null);
     try {
-      await addClinicColumn(programId);
+      await addClinicColumn(programId, clinicTypeId);
       setFeedback('A new clinic column was added at the end. Tap its header to rename it.');
       schedule.refresh();
     } catch (error) {
@@ -1431,7 +1548,12 @@ export default function LongitudinalMatrixScreen() {
     setActionError(null);
     setFeedback(null);
     try {
-      await renameClinicColumn(programId, columnManage.clinicNumber, columnLabelValue.trim());
+      await renameClinicColumn(
+        programId,
+        columnManage.clinicNumber,
+        columnLabelValue.trim(),
+        clinicTypeId,
+      );
       setFeedback(`${columnManage.title} column updated.`);
       setColumnManage(null);
       schedule.refresh();
@@ -1451,7 +1573,7 @@ export default function LongitudinalMatrixScreen() {
     setActionError(null);
     setFeedback(null);
     try {
-      await deleteClinicColumn(programId, columnManage.clinicNumber);
+      await deleteClinicColumn(programId, columnManage.clinicNumber, clinicTypeId);
       setFeedback(`${columnManage.title} column removed. Its historical slots are preserved.`);
       setColumnManage(null);
       schedule.refresh();
@@ -1523,15 +1645,38 @@ export default function LongitudinalMatrixScreen() {
     >
       <AppHeader
         title="Continuity Care Clinics"
-        subtitle="Weekly clinic matrix, supervisors and backup faculty"
+        subtitle={
+          activeClinic
+            ? `${activeClinic.clinic_name} · specialized clinic grid`
+            : 'Weekly clinic matrix, supervisors and backup faculty'
+        }
         onBack={goBack}
       />
+
+      <Button
+        label="Create Specialized Clinic"
+        variant="outline"
+        icon={Plus}
+        onPress={openSpecializedSheet}
+        accessibilityHint="Name a new clinic and copy the Continuity Care Clinics grid into a matrix of its own."
+      />
+
+      {clinicOptions.length > 1 ? (
+        <SegmentedControl
+          label="Clinic"
+          value={String(clinicTypeId)}
+          onChange={(value) => selectClinicType(Number(value))}
+          options={clinicOptions}
+          scroll
+          hint="Switch between the standard Continuity Care Clinics matrix and the specialized clinics cloned from it. Each clinic keeps its own grid."
+        />
+      ) : null}
 
       {cycleOptions.length > 1 ? (
         <SegmentedControl
           label="Cycle history"
           value={selectedCycleId === null ? '' : String(selectedCycleId)}
-          onChange={(value) => setSelectedCycleId(value === '' ? null : Number(value))}
+          onChange={(value) => selectCycle(value === '' ? null : Number(value))}
           options={cycleOptions}
           scroll
           hint="Pick a past cycle to review it as it was run. Past cycles open read-only, so an edit can never land on the wrong week."
@@ -1586,7 +1731,7 @@ export default function LongitudinalMatrixScreen() {
         template="ccc"
         downloadOptions={cccTemplatePayload ? { ccc: cccTemplatePayload, programId } : { programId }}
         upload={(file) => {
-          const payload: any = { program_id: programId };
+          const payload: any = { program_id: programId, clinic_type_id: clinicTypeId };
           return uploadCccMatrix(file, payload);
         }}
         onImported={() => {
@@ -2935,6 +3080,20 @@ export default function LongitudinalMatrixScreen() {
             <ScheduleReportView ref={reportRef} report={reportModel} />
           </View>
         </>
+      ) : null}
+
+      {/*
+        Mounted only while open (and re-keyed by `specializedSheetSeq`), so the
+        form starts blank and the template preview is re-read on every open.
+      */}
+      {specializedSheetOpen ? (
+        <CreateSpecializedClinicSheet
+          key={specializedSheetSeq}
+          visible
+          programId={programId}
+          onClose={() => setSpecializedSheetOpen(false)}
+          onCreated={handleSpecializedClinicCreated}
+        />
       ) : null}
 
     </Screen>
