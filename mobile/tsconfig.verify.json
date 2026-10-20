@@ -22,12 +22,14 @@
     "src/utils/masterGridHeadings.ts",
     "src/utils/letterPreview.ts",
     "src/utils/cccMatrix.ts",
+    "src/utils/clinicRotationRequest.ts",
     "scripts/verify-date-calc.ts",
     "scripts/verify-date-boundaries.ts",
     "scripts/verify-date-normalize.ts",
     "scripts/verify-master-grid-headings.ts",
     "scripts/verify-letter-preview.ts",
     "scripts/verify-ccc-matrix.ts",
+    "scripts/verify-clinic-rotation-request.ts",
     "../scripts/date-parity-cases.js"
   ]
 }

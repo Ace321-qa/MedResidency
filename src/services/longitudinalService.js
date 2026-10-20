@@ -14,6 +14,22 @@ const {
 const { academicYearForDate } = require('../utils/academicYear');
 
 /**
+ * The weekday set a clinic assignment covers, from either stored shape.
+ *
+ * A row written by the request queue carries the whole set in `clinic_days`; one
+ * written by a coordinator on the matrix carries only the single `day_of_week`
+ * enum. Readers are handed the set either way, so "which days am I released?"
+ * has one answer rather than two.
+ */
+function parseClinicDays(raw, fallbackDay) {
+  const list = Array.isArray(raw) ? raw : [];
+  const days = list.map((day) => canonicalDayName(day)).filter(Boolean);
+  if (days.length > 0) return [...new Set(days)];
+  const single = canonicalDayName(fallbackDay);
+  return single ? [single] : [];
+}
+
+/**
  * Residents are listed on the CCC matrix by name only — a resident is never
  * addressed as "Dr.". Faculty, by contrast, are always prefixed with the title
  * "Dr.". These two helpers are the single place that rule is enforced, so a slot
@@ -442,6 +458,72 @@ class LongitudinalService {
       'primary_care_cycles',
       'idx_primary_care_cycles_program_clinic',
       '(program_id, clinic_type_id)'
+    );
+
+    // An approved clinic-rotation request is a *release*, not a block posting, so
+    // it is recorded here — in `resident_longitudinal_assignments` — and never by
+    // overwriting the hospital rotation the resident's block already names. The
+    // columns below are what that needs and what the CCC tables never carried:
+    //
+    //   - `clinic_days` holds the whole weekday set of a multi-day request, where
+    //     `day_of_week` (one enum value, and the index every existing reader uses)
+    //     holds the first of them for compatibility.
+    //   - `source_request_id` ties the row back to the request that made it, so a
+    //     re-approval rewrites its own row instead of laying a second one over it.
+    //   - `summary` is the request's own words, shown on a cell that has no room
+    //     for a code.
+    //   - `assignment_source` says whether the row came from the queue or was
+    //     written by a coordinator editing the matrix; a release letter only ever
+    //     covers the first kind.
+    //
+    // `clinic_type_id` is relaxed to NULL because only a *catalogued* clinic has a
+    // grid to be recorded against: a resident who typed a clinic the programme
+    // does not run gets no clinic row (and therefore no slot), which is what keeps
+    // the Master Grid notation honest. `site_name`/`supervisor_name` are relaxed
+    // for the same reason — a request names neither.
+    const requestColumns = [
+      ['clinic_days', 'JSON NULL'],
+      ['source_request_id', 'INT NULL'],
+      ['summary', 'VARCHAR(255) NULL'],
+      ['assignment_source', "VARCHAR(32) NOT NULL DEFAULT 'MATRIX'"],
+    ];
+    for (const [column, definition] of requestColumns) {
+      const [existingColumn] = await db.query(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'resident_longitudinal_assignments'
+            AND COLUMN_NAME = ?`,
+        [column]
+      );
+      if (existingColumn.length === 0) {
+        await db.query(`ALTER TABLE resident_longitudinal_assignments ADD COLUMN ${column} ${definition}`);
+      }
+    }
+
+    const longAssignColumns = [
+      ['clinic_type_id', 'BIGINT UNSIGNED NULL'],
+      ['site_name', "VARCHAR(191) NOT NULL DEFAULT ''"],
+      ['supervisor_name', "VARCHAR(191) NOT NULL DEFAULT ''"],
+    ];
+    for (const [column, definition] of longAssignColumns) {
+      const [existingColumn] = await db.query(
+        `SELECT IS_NULLABLE, COLUMN_TYPE FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'resident_longitudinal_assignments'
+            AND COLUMN_NAME = ?`,
+        [column]
+      );
+      // Only the nullable ones are re-stated: re-running `MODIFY` on a column
+      // that is already as we want it would rewrite the whole table on every boot.
+      if (existingColumn.length > 0 && existingColumn[0].IS_NULLABLE !== 'YES') {
+        await db.query(`ALTER TABLE resident_longitudinal_assignments MODIFY ${column} ${definition}`);
+      }
+    }
+
+    await this.ensureIndex(
+      'resident_longitudinal_assignments',
+      'idx_long_assign_request',
+      '(source_request_id)'
     );
 
     this._schemaReady = true;
@@ -1096,6 +1178,7 @@ class LongitudinalService {
         rla.supervisor_name,
         rla.faculty_supervisor_id,
         rla.day_of_week,
+        rla.clinic_days,
         rla.start_time,
         rla.end_time,
         rla.start_date,
@@ -1103,14 +1186,16 @@ class LongitudinalService {
         rla.is_active,
         rla.requires_release_letter,
         rla.release_letter_generated,
-        rla.notes
+        rla.notes,
+        rla.source_request_id,
+        rla.assignment_source
       FROM resident_longitudinal_assignments rla
       JOIN longitudinal_clinic_types lct ON lct.id = rla.clinic_type_id
       WHERE rla.resident_id = ?
       ORDER BY rla.start_date ASC
     `;
     const [rows] = await db.query(query, [residentId]);
-    return rows;
+    return rows.map((row) => ({ ...row, clinic_days: parseClinicDays(row.clinic_days, row.day_of_week) }));
   }
 
   /**
@@ -1136,6 +1221,7 @@ class LongitudinalService {
         rla.supervisor_name,
         rla.faculty_supervisor_id,
         rla.day_of_week,
+        rla.clinic_days,
         rla.start_time,
         rla.end_time,
         rla.start_date,
@@ -1449,6 +1535,7 @@ class LongitudinalService {
         rla.site_name,
         rla.site_id,
         rla.day_of_week,
+        rla.clinic_days,
         rla.start_time,
         rla.end_time,
         rla.start_date,
@@ -2352,6 +2439,122 @@ class LongitudinalService {
 
     const [rows] = await db.query('SELECT * FROM primary_care_clinic_slots WHERE id = ?', [slotId]);
     return { slot: rows[0], warnings };
+  }
+
+  /**
+   * Record an approved clinic-rotation request on a clinic's grid.
+   *
+   * A clinic request is a *release*, not a block posting: the resident keeps the
+   * hospital assignment their block already carries and is owed one recurring
+   * session a week. The grid row that carries it is therefore a slot on the
+   * clinic's own cycle — the same cell the coordinator edits by hand in the CCC
+   * matrix — so an approval and a manual edit land in one place instead of two
+   * that disagree.
+   *
+   * Which slot is settled by the resident, not by the clinic number: a resident
+   * may hold only one clinic session per day (`updateCycleSlot`), so the first
+   * slot on that day that is free, or already theirs, is the one written.
+   * `clinic_number` is a label the coordinator owns and is never chosen here.
+   *
+   * The caller owns the transaction, so an approval that cannot be placed rolls
+   * the status change back with it.
+   *
+   * @param {object} params
+   * @param {import('mysql2/promise').PoolConnection} params.conn
+   * @param {number} params.programId
+   * @param {number} params.clinicTypeId - A `longitudinal_clinic_types` id.
+   * @param {string[]} params.days - Canonical day names, e.g. `['Wednesday']`.
+   * @param {string} params.residentName - Stored as the slot's `resident_1_name`.
+   * @returns {Promise<Array<{id:number, day_of_week:string, clinic_number:number, created:boolean}>>}
+   */
+  static async placeClinicRequestOnGrid({ conn, programId, clinicTypeId, days, residentName }) {
+    const clinic = normalizeClinicTypeId(clinicTypeId);
+    const name = formatResidentName(residentName);
+    const wanted = (days ?? []).map((day) => canonicalDayName(day)).filter(Boolean);
+    if (clinic === STANDARD_CLINIC_TYPE_ID) {
+      const error = new Error('A clinic assignment needs a catalogued clinic, not the standard CCC grid.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!name) {
+      const error = new Error('The request names no resident, so there is no one to place on the clinic.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (wanted.length === 0) {
+      const error = new Error('The request names no clinic day, so there is nothing to place on the clinic.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const placed = [];
+    for (const day of wanted) {
+      const header = await this.resolveDailyHeader(programId, null, day, clinic);
+      if (!header) continue;
+
+      // A slot is either the resident's already (re-approval) or free. Taking
+      // one that names somebody else would put two residents in one session and
+      // silently evict the first.
+      const [slots] = await conn.query(
+        'SELECT id, clinic_number, resident_1_name, resident_2_name FROM primary_care_clinic_slots WHERE daily_header_id = ? ORDER BY clinic_number ASC',
+        [header.id]
+      );
+
+      const held = slots.find(
+        (slot) => slot.resident_1_name === name || slot.resident_2_name === name
+      );
+      const free = slots.find((slot) => !slot.resident_1_name && !slot.resident_2_name);
+      const target = held ?? free;
+
+      if (target) {
+        if (!held) {
+          await conn.query('UPDATE primary_care_clinic_slots SET resident_1_name = ? WHERE id = ?', [
+            name,
+            target.id,
+          ]);
+        }
+        placed.push({
+          id: target.id,
+          day_of_week: day,
+          clinic_number: Number(target.clinic_number),
+          created: !held,
+        });
+        continue;
+      }
+
+      // Every slot on that day is taken (or reserved for another resident): the
+      // grid is not full, it only lacks a slot at this clinic number, so one more
+      // is opened rather than the approval being dropped.
+      const [maxRows] = await conn.query(
+        'SELECT COALESCE(MAX(clinic_number), 0) AS max_number FROM primary_care_clinic_slots WHERE daily_header_id = ?',
+        [header.id]
+      );
+      const nextNumber = Math.min((Number(maxRows[0]?.max_number) || 0) + 1, MAX_CLINIC_COLUMN_COUNT);
+      if (nextNumber < 1) continue;
+      await conn.query(
+        'INSERT INTO primary_care_clinic_slots (daily_header_id, clinic_number, resident_1_name) VALUES (?, ?, ?)',
+        [header.id, nextNumber, name]
+      );
+      const [created] = await conn.query(
+        'SELECT id FROM primary_care_clinic_slots WHERE daily_header_id = ? AND clinic_number = ?',
+        [header.id, nextNumber]
+      );
+      placed.push({
+        id: created[0]?.id ?? null,
+        day_of_week: day,
+        clinic_number: nextNumber,
+        created: true,
+      });
+    }
+
+    if (placed.length === 0) {
+      const error = new Error(
+        `None of the requested day(s) run at that clinic, so there is no session to place the resident on.`
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    return placed;
   }
 
   /** Resolve (creating if necessary) the day header a backup pool belongs to. */

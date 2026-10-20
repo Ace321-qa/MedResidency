@@ -8,6 +8,7 @@ export { Button, IconButton, type ButtonVariant } from './Button';
 export { CalendarPicker } from './CalendarPicker';
 export { Card, Divider, SectionHeader } from './Card';
 export { ChoiceGroup, type ChoiceOption } from './ChoiceGroup';
+export { ClinicDayField } from './ClinicDayField';
 export {
   DateField,
   SearchInput,

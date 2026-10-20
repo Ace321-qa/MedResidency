@@ -940,6 +940,37 @@ export interface CohortGridCell {
   is_assigned: number;
   /** How many assignments share this resident/block cell. */
   assignment_count: number;
+  /**
+   * Concurrent clinic releases overlapping this block — a *different* thing from
+   * the hospital assignment the rest of the cell describes.
+   *
+   * An approved clinic request never overwrites the block's rotation (it is a
+   * release, not a posting), so the cell carries both: the hospital rotation as
+   * its badge, and these releases as a secondary notation. `clinic_count` is how
+   * many there are; `concurrent_clinic_label` is the ready-to-print summary, e.g.
+   * `+ ANC (Wed)`; `clinic_source` says whether they came from an approved
+   * request or were written straight onto a clinic's matrix.
+   */
+  clinic_count?: number;
+  clinic_source?: 'CLINIC_REQUEST' | 'MATRIX' | null;
+  concurrent_clinic_label?: string | null;
+  clinic_releases?: CohortClinicRelease[];
+}
+
+/** One recurring clinic release riding alongside a resident's block rotation. */
+export interface CohortClinicRelease {
+  /** The clinic's coordinator-facing code, or `''` for an uncatalogued clinic. */
+  code: string;
+  /** The first weekday, in enum form. */
+  day: string;
+  /** Every weekday the release covers, in enum form. */
+  days: string[];
+  /** The request's own words, e.g. `Clinic release: ANC (Wed)`. */
+  summary: string;
+  /** A badge-sized clinic name derived from the code or the summary. */
+  name?: string;
+  /** Where in the block the release sits, e.g. `B5.2`. */
+  at?: string;
 }
 
 export interface RotationAssignmentDetail {

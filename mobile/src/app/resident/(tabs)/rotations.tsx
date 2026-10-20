@@ -7,6 +7,7 @@ import {
   Banner,
   Button,
   Card,
+  ClinicDayField,
   DateField,
   EmptyState,
   ErrorState,
@@ -36,6 +37,21 @@ import {
 } from '../../../constants/reasons';
 import { spacing } from '../../../theme';
 import { buildClinicRequestOptions, rotationCatalogueLabel } from '../../../utils/clinicRequestOptions';
+import {
+  CUSTOM_PERIOD,
+  MAX_CLINIC_DAYS,
+  MIN_CLINIC_DAYS,
+  PERIOD_WEEK_PRESETS,
+  clinicDaysAreValid,
+  clinicEndDate,
+  clinicEndDateLabel,
+  clinicStartWeekday,
+  formatClinicDays,
+  parsePeriodWeeks,
+  shortClinicDay,
+  sortClinicDays,
+} from '../../../utils/clinicRotationRequest';
+import { DAY_NAMES, type DayName } from '../../../utils/dateCalc';
 import { formatDateRange, formatShortDate, formatWeeks, normalizeToISODate } from '../../../utils/format';
 import { groupScheduleByBlock, type RotationPhase } from '../../../utils/insights';
 import type { RotationRequestType } from '../../../types/api';
@@ -92,7 +108,18 @@ interface RequestForm {
    */
   departmentClinic: string;
   startDate: string;
-  endDate: string;
+  /**
+   * How long the request runs, in weeks, as the resident entered it.
+   *
+   * The end date is *derived* from this and the start date, never typed, so the
+   * two can never disagree: the form stores the period and recomputes the end
+   * whenever either end of it changes.
+   */
+  periodValue: string;
+  /** Free text, read only when `periodValue` is `CUSTOM_PERIOD`. */
+  customWeeks: string;
+  /** The recurring weekdays the clinic release asks for, one to three of them. */
+  clinicDays: DayName[];
   /** The preset the resident tapped, `OTHER_REASON`, or `''` for "not answered". */
   reasonValue: string;
   /** Free text, read only when `reasonValue` is `OTHER_REASON`. */
@@ -104,7 +131,9 @@ const EMPTY_FORM: RequestForm = {
   clinicValue: null,
   departmentClinic: '',
   startDate: '',
-  endDate: '',
+  periodValue: '4',
+  customWeeks: '',
+  clinicDays: [],
   reasonValue: '',
   customReason: '',
 };
@@ -170,6 +199,47 @@ export default function RotationsScreen() {
   const [clinicManual, setClinicManual] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  /**
+   * The request window: a start date the resident picks, a period in weeks they
+   * choose, and an end date the two *derive*.
+   *
+   * The end date is read-only on purpose. Two independent date fields let a
+   * resident ask for "4 weeks" and then type an end date that is five weeks out,
+   * and the approval has no way to tell which one they meant. Deriving it means
+   * the period is the single source of truth and the arithmetic
+   * (`start + weeks × 7 − 1`) happens exactly once, in `clinicRotationRequest`.
+   */
+  const periodWeeks = useMemo(() => {
+    const raw = form.periodValue === CUSTOM_PERIOD ? form.customWeeks : form.periodValue;
+    return parsePeriodWeeks(raw);
+  }, [form.periodValue, form.customWeeks]);
+
+  const derivedEndDate = useMemo(
+    () => clinicEndDate(form.startDate, periodWeeks),
+    [form.startDate, periodWeeks],
+  );
+
+  const startWeekday = useMemo(() => clinicStartWeekday(form.startDate), [form.startDate]);
+
+  const endDateLabel = useMemo(
+    () => (derivedEndDate ? clinicEndDateLabel(form.startDate, periodWeeks) : ''),
+    [derivedEndDate, form.startDate, periodWeeks],
+  );
+
+  const periodOptions = useMemo(
+    () => [
+      ...PERIOD_WEEK_PRESETS.map((weeks) => ({
+        value: String(weeks),
+        label: `${weeks} ${weeks === 1 ? 'week' : 'weeks'}`,
+      })),
+      { value: CUSTOM_PERIOD, label: 'Custom…' },
+    ],
+    [],
+  );
+
+  /** The clinic days as a compact list, e.g. `Wed, Fri` — for the field hint. */
+  const chosenClinicDays = useMemo(() => sortClinicDays(form.clinicDays), [form.clinicDays]);
 
   const reasonOptions = useMemo(() => {
     const presets = reasonOptionsFor(requestType ?? 'HOSPITAL');
@@ -256,13 +326,18 @@ export default function RotationsScreen() {
         rotationId = pickedClinic.rotationId ?? undefined;
       }
     }
-    // `DateField` normalises on blur, so in practice these already read
+    // `DateField` normalises on blur, so in practice the start already reads
     // `YYYY-MM-DD`. Normalising again here means a pasted `18/10` still submits
     // correctly when the field never lost focus — e.g. the button is tapped
     // straight after typing — and keeps the error message about the *unreadable*
     // input rather than the readable-but-shorthand kind.
+    //
+    // The end date is not read from a field: it is derived from the start date
+    // and the period above, so "4 weeks" can never be submitted alongside a
+    // window that is not four weeks long.
     const startDate = normalizeToISODate(form.startDate) ?? form.startDate.trim();
-    const endDate = normalizeToISODate(form.endDate) ?? form.endDate.trim();
+    const endDate = derivedEndDate ?? '';
+    const clinicDays = sortClinicDays(form.clinicDays);
 
     if (departmentClinic === '') {
       setFormError(
@@ -274,12 +349,30 @@ export default function RotationsScreen() {
       );
       return;
     }
-    if (!looksLikeDate(startDate) || !looksLikeDate(endDate)) {
-      setFormError(`Dates must be in ${EMPTY_DATE} format — a DD/MM shorthand works too.`);
+    if (!looksLikeDate(startDate)) {
+      setFormError(`Start date must be in ${EMPTY_DATE} format — a DD/MM shorthand works too.`);
       return;
     }
-    if (endDate < startDate) {
-      setFormError('End date cannot be before the start date.');
+    if (periodWeeks === null) {
+      setFormError(
+        form.periodValue === CUSTOM_PERIOD && form.customWeeks.trim() === ''
+          ? 'Enter how many weeks this rotation runs for.'
+          : `Enter a period of between 1 and 52 weeks.`,
+      );
+      return;
+    }
+    if (!looksLikeDate(endDate)) {
+      setFormError('The end date could not be worked out — check the start date and the period.');
+      return;
+    }
+    // A clinic release is released for one, two or three recurring weekdays, and
+    // the approval needs to know which; a hospital request has no such field.
+    if (requestType === 'CLINIC' && !clinicDaysAreValid(clinicDays)) {
+      setFormError(
+        clinicDays.length === 0
+          ? `Choose the day${'s'} the clinic runs — you can pick up to ${MAX_CLINIC_DAYS}.`
+          : `A clinic request can hold at most ${MAX_CLINIC_DAYS} days.`,
+      );
       return;
     }
 
@@ -307,14 +400,21 @@ export default function RotationsScreen() {
         rotation_id: rotationId,
         start_date: startDate,
         end_date: endDate,
+        // Only a clinic request carries the recurring weekdays; the server
+        // ignores the field on a hospital request.
+        clinic_days: requestType === 'CLINIC' ? clinicDays : undefined,
         reason,
       });
 
+      const dayText =
+        requestType === 'CLINIC' && clinicDays.length > 0
+          ? ` on ${formatClinicDays(clinicDays)}`
+          : '';
       notify({
         title: 'Request submitted',
         message: `${requestType === 'HOSPITAL' ? 'Hospital' : 'Clinic'} rotation request for ${formatShortDate(
           startDate,
-        )} – ${formatShortDate(endDate)} is with your coordinator. Watch the Approvals queue for the decision.`,
+        )} – ${formatShortDate(endDate)}${dayText} is with your coordinator. Watch the Approvals queue for the decision.`,
         tone: 'success',
       });
       setRequestType(null);
@@ -659,15 +759,63 @@ export default function RotationsScreen() {
             value={form.startDate}
             onChangeText={(value) => setForm((current) => ({ ...current, startDate: value }))}
             placeholder={EMPTY_DATE}
+            durationWeeks={periodWeeks}
+            hint={
+              startWeekday
+                ? `This is a ${startWeekday}. The period is counted from here.`
+                : 'The day this rotation begins.'
+            }
           />
 
-          <DateField
-            label="End date"
+          <SelectField
+            label="Period in weeks"
             required
-            value={form.endDate}
-            onChangeText={(value) => setForm((current) => ({ ...current, endDate: value }))}
-            placeholder={EMPTY_DATE}
+            value={form.periodValue}
+            onChange={(value) => setForm((current) => ({ ...current, periodValue: value }))}
+            options={periodOptions}
+            hint="How long the rotation runs, counted in whole weeks from the start date."
           />
+
+          {form.periodValue === CUSTOM_PERIOD ? (
+            <TextField
+              label="Weeks"
+              required
+              value={form.customWeeks}
+              onChangeText={(value) => setForm((current) => ({ ...current, customWeeks: value }))}
+              keyboardType="number-pad"
+              placeholder="e.g. 6"
+              hint="A whole number of weeks, up to 52."
+            />
+          ) : null}
+
+          <TextField
+            label="End date"
+            value={derivedEndDate ?? ''}
+            onChangeText={() => {}}
+            editable={false}
+            placeholder="Chosen by the start date and period"
+            hint={
+              endDateLabel
+                ? `Works out to ${endDateLabel} — the last day of week ${periodWeeks}.`
+                : 'Worked out from the start date and the period.'
+            }
+          />
+
+          {requestType === 'CLINIC' ? (
+            <ClinicDayField
+              label="Clinic days"
+              required
+              value={chosenClinicDays}
+              onChange={(days) => setForm((current) => ({ ...current, clinicDays: days }))}
+              hint={
+                chosenClinicDays.length > 0
+                  ? `Releases you every ${formatClinicDays(chosenClinicDays)} for the whole period. Pick up to ${MAX_CLINIC_DAYS}.`
+                  : `Pick ${MIN_CLINIC_DAYS} to ${MAX_CLINIC_DAYS} weekdays this clinic runs on — e.g. ${
+                      shortClinicDay(DAY_NAMES[3])
+                    }.`
+              }
+            />
+          ) : null}
 
           <SelectField
             label="Reason for request"

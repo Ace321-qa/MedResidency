@@ -83,6 +83,109 @@ const EMAIL_IDENTIFIER_SQL = `
     LIMIT 1
   )`;
 
+/** The three-letter form of a weekday, for a badge that has ~110pt to fit in. */
+const SHORT_DAY = {
+  SUNDAY: 'Sun',
+  MONDAY: 'Mon',
+  TUESDAY: 'Tue',
+  WEDNESDAY: 'Wed',
+  THURSDAY: 'Thu',
+  FRIDAY: 'Fri',
+  SATURDAY: 'Sat',
+};
+
+/**
+ * A short, badge-sized name for a clinic.
+ *
+ * `clinic_code` is the coordinator's own label and is preferred when it is
+ * present. A clinic the resident typed that no coordinator catalogued has no
+ * code, so the name is recovered from the summary the approval wrote
+ * (`Clinic release: <name> (<days>)`) rather than leaving the badge blank.
+ */
+function clinicBadgeName(release) {
+  const code = String(release.code ?? '').trim();
+  if (code) return code;
+
+  const summary = String(release.summary ?? '').trim();
+  const match = /^Clinic release:\s*(.+?)(?:\s*\([^)]*\))?$/.exec(summary);
+  const name = (match?.[1] ?? summary).trim();
+  if (!name) return '';
+  // A typed name can be a sentence; a badge cannot. 18 characters is roughly
+  // what fits next to a rotation code before the cell starts wrapping.
+  return name.length > 18 ? `${name.slice(0, 17).trimEnd()}…` : name;
+}
+
+/**
+ * Turn the cohort query's clinic aggregates into the badge the grid draws.
+ *
+ * `GROUP_CONCAT` is deliberate: the grain of the grid is one row per
+ * resident/block/assignment, so a second JOIN or a second row per clinic release
+ * would multiply every resident's block across the grid. The separator pair
+ * (`;;` between releases, `|` inside one) is safe because none of the four fields
+ * can contain either character.
+ *
+ * The label reads `+ ANC (Wed)` — clinic, then the days it releases. It is kept
+ * short on purpose: the cell already carries the hospital rotation's own badge,
+ * and this rides beside it. Standing rows a coordinator entered on the matrix
+ * months ago have no `source_request_id`; they say "on the matrix" rather than
+ * inventing a request, so the cell is honest about where the release came from.
+ */
+function decodeClinicColumns(row) {
+  const clinicCount = Number(row.clinic_count) || 0;
+  const standingCount = Number(row.standing_clinic_count) || 0;
+  const releases = String(row.concurrent_clinics ?? '')
+    .split(';;')
+    .filter((entry) => entry.trim() !== '')
+    .map((entry) => {
+      const [code, day, daysJson, summary] = entry.split('|');
+      return { code: code ?? '', day: day ?? '', days: daysJson ?? '', summary: summary ?? '' };
+    })
+    .map((entry) => {
+      let days = [];
+      try {
+        const parsed = JSON.parse(entry.days);
+        if (Array.isArray(parsed)) days = parsed;
+      } catch {
+        days = [];
+      }
+      if (days.length === 0 && entry.day) days = [entry.day];
+      return {
+        ...entry,
+        days: days.map((value) => String(value).toUpperCase()).filter((value) => SHORT_DAY[value]),
+      };
+    })
+    .map((entry) => ({ ...entry, name: clinicBadgeName(entry) }));
+
+  const startsFromRequest = clinicCount > standingCount;
+  const withAt = (limit) =>
+    releases.slice(0, limit).map((release, index) => ({
+      ...release,
+      /** Where in the block the release sits, e.g. `B5.2`. */
+      at: `B${row.block_number}.${index + 1}`,
+    }));
+
+  let label = null;
+  let source = null;
+  if (clinicCount > 0) {
+    const shown = withAt(2);
+    const parts = shown.map((release) => {
+      const dayText = release.days.map((day) => SHORT_DAY[day]).join(', ');
+      if (!release.name) return dayText ? `(${dayText})` : 'Clinic';
+      return dayText ? `${release.name} (${dayText})` : release.name;
+    });
+    if (clinicCount > shown.length) parts.push(`+${clinicCount - shown.length} more`);
+    label = `+ ${parts.join(', ')}`;
+    source = startsFromRequest ? 'CLINIC_REQUEST' : 'MATRIX';
+  }
+
+  return {
+    clinic_count: clinicCount,
+    clinic_source: source,
+    clinic_releases: withAt(3),
+    concurrent_clinic_label: label,
+  };
+}
+
 class RotationService {
   /**
    * Fetch all academic blocks for a specific residency program
@@ -718,7 +821,42 @@ class RotationService {
           FROM resident_rotation_assignments cell_rra
           WHERE cell_rra.resident_id = re.resident_id
             AND cell_rra.rotation_block_id = rb.id
-        ) AS assignment_count
+        ) AS assignment_count,
+        -- Concurrent clinic releases. A clinic request is approved without
+        -- touching the block rota (it is a release, not a posting), so the grid
+        -- is where the two are put back together: the hospital rotation stays in
+        -- the cell and each clinic session rides alongside it as a notation.
+        -- Aggregated one row per cell because the badge is part of the cell, and
+        -- a per-release row would multiply the resident's block across the grid.
+        (
+          SELECT GROUP_CONCAT(
+                   CONCAT_WS('|', COALESCE(lct.clinic_code, ''), COALESCE(rla.day_of_week, ''), COALESCE(rla.clinic_days, ''), COALESCE(rla.summary, ''))
+                   ORDER BY rla.start_date ASC, rla.id ASC SEPARATOR ';;'
+                 )
+          FROM resident_longitudinal_assignments rla
+          LEFT JOIN longitudinal_clinic_types lct ON lct.id = rla.clinic_type_id
+          WHERE rla.resident_id = re.resident_id
+            AND rla.is_active = 1
+            AND rla.start_date <= rb.end_date
+            AND rla.end_date >= rb.start_date
+        ) AS concurrent_clinics,
+        (
+          SELECT COUNT(*)
+          FROM resident_longitudinal_assignments cell_rla
+          WHERE cell_rla.resident_id = re.resident_id
+            AND cell_rla.is_active = 1
+            AND cell_rla.start_date <= rb.end_date
+            AND cell_rla.end_date >= rb.start_date
+        ) AS clinic_count,
+        (
+          SELECT COUNT(*)
+          FROM resident_longitudinal_assignments cell_rla
+          WHERE cell_rla.resident_id = re.resident_id
+            AND cell_rla.source_request_id IS NULL
+            AND cell_rla.is_active = 1
+            AND cell_rla.start_date <= rb.end_date
+            AND cell_rla.end_date >= rb.start_date
+        ) AS standing_clinic_count
       FROM rotation_blocks rb
       JOIN programs p ON p.id = rb.program_id
       JOIN residency_enrollments re ON re.program_id = rb.program_id
@@ -736,7 +874,7 @@ class RotationService {
     query += ' ORDER BY rb.block_number ASC, re.year_in_program DESC, r.first_name ASC, r.last_name ASC';
 
     const [rows] = await db.query(query, params);
-    return rows;
+    return rows.map((row) => ({ ...row, ...decodeClinicColumns(row) }));
   }
 
   /**

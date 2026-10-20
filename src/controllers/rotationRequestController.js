@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const NotificationService = require('../services/notificationService');
 const RotationApprovalService = require('../services/rotationApprovalService');
+const { DAY_NAMES, normalizeWeekStartDay } = require('../utils/blockDates');
 
 /**
  * Rotation requests — a resident asking to be moved onto a hospital rotation
@@ -33,6 +34,7 @@ const TABLE_SQL = `
     request_type VARCHAR(16) NOT NULL DEFAULT 'HOSPITAL',
     department_clinic VARCHAR(255) NOT NULL,
     rotation_id INT NULL,
+    clinic_days JSON NULL,
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
     reason TEXT,
@@ -50,6 +52,15 @@ const VALID_TYPES = ['HOSPITAL', 'CLINIC'];
 const VALID_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'];
 /** Long enough for a paragraph of context, short enough for a queue column. */
 const MAX_REASON_LENGTH = 500;
+/**
+ * The most recurring weekdays one clinic request may hold.
+ *
+ * Three is a deliberate ceiling, not an arbitrary one: a release is meant to fit
+ * around the resident's hospital block, and asking for a clinic four or five days
+ * a week is asking to not be on the block at all — a case the coordinator should
+ * arrange directly rather than through a release.
+ */
+const MAX_CLINIC_DAYS = 3;
 
 /** Memoised DDL — every handler awaits this before touching the table. */
 let tableReady = null;
@@ -74,6 +85,18 @@ function ensureTable() {
           'CREATE INDEX idx_rotation_requests_rotation ON rotation_requests (rotation_id)',
         );
       }
+
+      // The recurring weekdays a clinic request asks for. A table created before
+      // the request form offered a day picker has no such column, and
+      // `CREATE TABLE IF NOT EXISTS` will not add one.
+      const [dayColumns] = await db.query(
+        `SHOW COLUMNS FROM rotation_requests LIKE 'clinic_days'`,
+      );
+      if (dayColumns.length === 0) {
+        await db.query(
+          'ALTER TABLE rotation_requests ADD COLUMN clinic_days JSON NULL AFTER rotation_id',
+        );
+      }
       return true;
     })().catch((error) => {
       tableReady = null;
@@ -90,6 +113,40 @@ function toIsoDate(value) {
   if (!match) return null;
   const date = new Date(`${value.trim()}T00:00:00Z`);
   return Number.isNaN(date.getTime()) ? null : value.trim();
+}
+
+/**
+ * The recurring weekdays a clinic request names, normalised and ordered.
+ *
+ * Accepts the array the form sends (`['Wednesday']`), a JSON string of the same,
+ * or the single `day_of_week` an older client posted, and reduces every shape to
+ * canonical weekday names in institution order. Anything unrecognised is dropped
+ * rather than rejected here — [`decide`] is where a request with no usable day is
+ * refused, because it is the approval, not the writing down, that needs the days.
+ *
+ * @param {*} value
+ * @returns {string[]|null} `null` when the request carries no day at all.
+ */
+function toClinicDays(value) {
+  if (value === undefined || value === null || value === '') return null;
+
+  let list = Array.isArray(value) ? value : [value];
+  if (typeof value === 'string' && value.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {
+      list = value.split(',');
+    }
+  } else if (typeof value === 'string') {
+    list = value.split(/[,;]/);
+  }
+
+  const wanted = new Set(
+    list.map((day) => normalizeWeekStartDay(day)).filter((day) => Boolean(day)),
+  );
+  const ordered = DAY_NAMES.filter((day) => wanted.has(day));
+  return ordered.length > 0 ? ordered : null;
 }
 
 function badRequest(res, messages) {
@@ -114,6 +171,7 @@ class RotationRequestController {
         clinic_name,
         department_name,
         rotation_id,
+        clinic_days,
         start_date,
         end_date,
         reason,
@@ -147,6 +205,19 @@ class RotationRequestController {
       if (typeof reason === 'string' && reason.trim().length > MAX_REASON_LENGTH) {
         problems.push(`Reason must be ${MAX_REASON_LENGTH} characters or fewer.`);
       }
+
+      // A clinic release is for one to three recurring weekdays; a request that
+      // names none cannot be placed on a clinic grid, so it is refused here
+      // rather than at approval time, when the resident is no longer watching.
+      const clinicDays = toClinicDays(clinic_days ?? req.body?.day_of_week);
+      if (String(request_type).toUpperCase() === 'CLINIC') {
+        if (!clinicDays) {
+          problems.push('Choose the weekday(s) the clinic runs on.');
+        } else if (clinicDays.length > MAX_CLINIC_DAYS) {
+          problems.push(`A clinic request can hold at most ${MAX_CLINIC_DAYS} days.`);
+        }
+      }
+
       if (problems.length > 0) return badRequest(res, problems);
 
       // A pick-list selection is a foreign key in everything but name: refuse a
@@ -166,14 +237,15 @@ class RotationRequestController {
 
       const [result] = await db.query(
         `INSERT INTO rotation_requests
-           (resident_id, program_id, request_type, department_clinic, rotation_id, start_date, end_date, reason, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+           (resident_id, program_id, request_type, department_clinic, rotation_id, clinic_days, start_date, end_date, reason, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
         [
           Number(resident_id),
           Number(program_id) || 0,
           String(request_type).toUpperCase(),
           departmentClinic.trim().slice(0, 255),
           rotationIdValue,
+          clinicDays ? JSON.stringify(clinicDays) : null,
           start,
           end,
           typeof reason === 'string' && reason.trim() !== '' ? reason.trim() : null,
@@ -212,7 +284,7 @@ class RotationRequestController {
 
       const [rows] = await db.query(
         `SELECT r.request_id, r.resident_id, r.program_id, r.request_type, r.department_clinic,
-                r.rotation_id,
+                r.rotation_id, r.clinic_days,
                 DATE_FORMAT(r.start_date, '%Y-%m-%d') AS start_date,
                 DATE_FORMAT(r.end_date, '%Y-%m-%d') AS end_date,
                 r.reason, r.status, r.decision_reason,
@@ -225,7 +297,10 @@ class RotationRequestController {
         params,
       );
 
-      return res.json({ success: true, data: rows });
+      return res.json({
+        success: true,
+        data: rows.map((row) => ({ ...row, clinic_days: toClinicDays(row.clinic_days) })),
+      });
     } catch (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
@@ -330,6 +405,7 @@ class RotationRequestController {
          r.request_type,
          r.department_clinic,
          r.rotation_id,
+         r.clinic_days,
          DATE_FORMAT(r.start_date, '%Y-%m-%d') AS start_date,
          DATE_FORMAT(r.end_date, '%Y-%m-%d') AS end_date,
          r.reason,
@@ -343,7 +419,7 @@ class RotationRequestController {
         WHERE r.request_id = ?`,
       [requestId],
     );
-    return rows;
+    return rows.map((row) => ({ ...row, clinic_days: toClinicDays(row.clinic_days) }));
   }
 }
 

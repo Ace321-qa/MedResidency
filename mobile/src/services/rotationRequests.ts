@@ -23,6 +23,14 @@ export interface CreateRotationRequestBody {
   rotation_id?: number | null;
   start_date: string;
   end_date: string;
+  /**
+   * The recurring weekdays a clinic release asks for, e.g. `['Wednesday']`.
+   *
+   * Only a `CLINIC` request carries it, and the server derives each day's own
+   * session from the set — a resident may hold one to three. Omitted on a
+   * hospital request, where the field has no meaning.
+   */
+  clinic_days?: string[];
   reason?: string;
 }
 

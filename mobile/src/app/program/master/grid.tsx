@@ -741,8 +741,48 @@ function assignmentBadge(assignment: CohortGridCell, label: string, key: string)
   );
 }
 
-function unassignedCell(onAdd: () => void): React.ReactNode {
+/**
+ * A clinic release riding alongside the block's hospital rotation.
+ *
+ * Deliberately *not* a rotation badge: an approved clinic request is a weekly
+ * release the resident keeps while staying on their block, so it is drawn as a
+ * quieter secondary notation under the rotation rather than as a second posting.
+ * Two shapes reach here — a catalogued clinic whose release was written onto its
+ * own grid, and a clinic the resident typed that the programme does not run —
+ * and both read the same on the cell: the clinic's short name and the weekday(s)
+ * it releases.
+ */
+function clinicNotation(cell: CohortGridCell[] | undefined, key: string): React.ReactNode {
+  const label = cell?.find((row) => row.concurrent_clinic_label)?.concurrent_clinic_label;
+  if (!label) return null;
+
+  const fromRequest = cell?.some((row) => row.clinic_source === 'CLINIC_REQUEST');
+  const names = (cell?.[0]?.clinic_releases ?? [])
+    .map((release) => `${release.name || release.code} (${release.days
+      .map((day) => day.slice(0, 3))
+      .map((day) => day.charAt(0) + day.slice(1).toLowerCase())
+      .join(', ')})`)
+    .join(', ');
+
   return (
+    <View
+      key={key}
+      style={styles.clinicNotation}
+      accessible
+      accessibilityLabel={
+        names
+          ? `Also released for ${names}${fromRequest ? ', from an approved clinic request' : ''}`
+          : `Also on a clinic release: ${label}`
+      }
+    >
+      <Text numberOfLines={2} style={styles.clinicNotationText}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function unassignedCell(onAdd: () => void): React.ReactNode {  return (
     <Pressable onPress={onAdd} style={styles.unassignedCell} accessibilityLabel="Assign rotation">
       <Plus size={14} color={colors.textMuted} />
       <Text variant="caption" tone="muted">
@@ -819,7 +859,17 @@ function blockCellNode(
 
   if (slots.size < 4) badges.push(addBadge(onAdd));
 
-  return <View style={styles.cellBadges}>{badges}</View>;
+  // The clinic release is an addition to the block, not one of its four
+  // sub-slots: a resident keeps their rotation and is owed a weekly session, so
+  // it is rendered under the rotation badges rather than competing for a slot.
+  const clinic = clinicNotation(cell, `clinic-${residentId}-${blockId ?? blockNumber}`);
+
+  return (
+    <View style={styles.cellBadges}>
+      {badges}
+      {clinic}
+    </View>
+  );
 }
 
 /**
@@ -846,6 +896,7 @@ function weeklyCellNode(
   return (
     <View style={styles.cellBadges}>
       {assignmentBadge(assignment, label, badgeKey({ residentId, assignment, weekNumber }))}
+      {clinicNotation(cell, `clinic-${residentId}-w${weekNumber}`)}
     </View>
   );
 }
@@ -910,6 +961,24 @@ const styles = StyleSheet.create({
   cellBadgeText: {
     fontSize: 10,
     fontWeight: '600',
+  },
+  /**
+   * A clinic release, drawn under the rotation badge: dashed and lighter so it
+   * reads as an addition to the block rather than a second posting in it.
+   */
+  clinicNotation: {
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    overflow: 'hidden',
+  },
+  clinicNotationText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: colors.textSecondary,
   },
   addBadge: {
     paddingHorizontal: 4,

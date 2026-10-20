@@ -8,6 +8,8 @@ const {
   weeksSpanned,
 } = require('../utils/masterGridCalendar');
 const { academicYearForDate, academicYearMatchValues } = require('../utils/academicYear');
+const { DAY_NAMES, normalizeWeekStartDay } = require('../utils/blockDates');
+const LongitudinalService = require('./longitudinalService');
 
 /**
  * Placing an approved rotation request onto the rota.
@@ -333,9 +335,113 @@ async function resolveRotation(conn, programId, departmentClinic, rotationId) {
   };
 }
 
+/**
+ * The canonical Title-case name of a weekday, or `null`.
+ *
+ * `normalizeWeekStartDay` already accepts the MySQL enum (`WEDNESDAY`), the
+ * display name (`Wednesday`), the abbreviation (`Wed`) and a numeric weekday;
+ * this narrows its `SUNDAY`-style result to the form the rest of the service and
+ * the app speak in.
+ */
+function canonicalDay(day) {
+  const enumDay = normalizeWeekStartDay(day);
+  if (!enumDay) return null;
+  return DAY_NAMES[DAY_NAMES.indexOf(enumDay)] ?? enumDay;
+}
+
+/**
+ * The weekdays a clinic request names.
+ *
+ * Two shapes arrive here. A form that offers checkboxes sends `clinic_days`; the
+ * older single-select sends `day_of_week`. Free text is matched against the day
+ * names only as a last resort, because this is the field that decides which
+ * sessions a resident is released for — guessing "Weds" is worth doing, guessing
+ * between Tuesday and Thursday is not.
+ */
+function requestedClinicDays(request) {
+  const raw = [request.clinic_days, request.days, request.day_of_week, request.clinic_day]
+    .find((value) => value !== undefined && value !== null && value !== '');
+
+  const candidates = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string' && raw.trim().startsWith('[')
+      ? safeJsonArray(raw)
+      : String(raw ?? '').split(/[,;]/);
+
+  const days = [];
+  for (const candidate of candidates) {
+    const day = canonicalDay(candidate);
+    if (day && !days.includes(day)) days.push(day);
+  }
+  return days;
+}
+
+/** `[...]` as stored in a JSON column, or `[]` when it is not valid JSON. */
+function safeJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The `SUNDAY`-style enum spelling of a calendar day name. */
+function dayEnum(day) {
+  const name = canonicalDay(day);
+  return name ? name.toUpperCase() : null;
+}
+
+/** `+ ANC (Wed)`, or `+ ANC (Wed, Fri)` for a multi-day release. */
+function clinicBadgeLabel(clinicCode, clinicDays, fallbackName) {
+  const label = String(clinicCode ?? '').trim() || String(fallbackName ?? '').trim();
+  const short = (clinicDays ?? []).map((day) => canonicalDay(day)?.slice(0, 3)).filter(Boolean);
+  if (!label) return short.length > 0 ? `+ (${short.join(', ')})` : '+ Clinic';
+  return short.length > 0 ? `+ ${label} (${short.join(', ')})` : `+ ${label}`;
+}
+
+/**
+ * The clinic a clinic request names, matched the way the clinic pick-list
+ * matches it, or `null` when the programme runs no such clinic.
+ *
+ * A `rotation_id` on the request is deliberately ignored: the two pick-lists
+ * share a form, so a clinic chosen from the *Rotations Catalogue* tail carries a
+ * rotation id that has nothing to do with `longitudinal_clinic_types`. The name
+ * is namespaced by source on the way in (`clinic:antenatal care clinic (anc)` vs
+ * `rotation:7`) and matched on the bare name here.
+ *
+ * `ACTIVE` only: a clinic the programme has retired has no grid to place anyone
+ * on, so the assignment is still recorded — it is still a real decision and the
+ * coordinator is told what did not land — but nothing is written to a matrix.
+ */
+async function resolveClinicType(conn, programId, departmentClinic) {
+  const name = String(departmentClinic ?? '').trim().slice(0, MAX_NAME_LENGTH);
+  if (!name) return null;
+
+  const [rows] = await conn.query(
+    `SELECT id, clinic_code, clinic_name, default_day_of_week
+       FROM longitudinal_clinic_types
+      WHERE program_id = ? AND is_active = 1
+      ORDER BY id ASC`,
+    [programId],
+  );
+
+  const wanted = rotationMatchKey(name);
+  const loose = rotationLooseKey(name);
+  return (
+    rows.find((row) => rotationMatchKey(row.clinic_name) === wanted) ??
+    rows.find((row) => rotationMatchKey(row.clinic_code) === wanted) ??
+    rows.find(
+      (row) =>
+        rotationLooseKey(row.clinic_name) === loose || rotationLooseKey(row.clinic_code) === loose,
+    ) ??
+    null
+  );
+}
+
 class RotationApprovalService {
   /**
-   * Place an approved request on the rota and return the assignment the grid
+   * Place an approved request onto the rota and return the assignment the grid
    * will read.
    *
    * @param {import('mysql2/promise').PoolConnection} conn An open connection;
@@ -383,6 +489,24 @@ class RotationApprovalService {
     }
     const coversWholeBlock = assignStart === bounds.start && assignEnd === bounds.end;
     const assignmentType = coversWholeBlock ? 'FULL_BLOCK' : 'PARTIAL_BLOCK';
+
+    // A clinic request stops here. It is a release for one recurring session a
+    // week, not a posting: the resident keeps the hospital rotation their block
+    // already names, and overwriting that row would erase a decision the
+    // coordinator made. So the two kinds of request are stored in two tables —
+    // the block rota in `resident_rotation_assignments`, the release in
+    // `resident_longitudinal_assignments` — and only the Master Grid merges them.
+    if (String(request.request_type ?? 'HOSPITAL').toUpperCase() === 'CLINIC') {
+      return this.#placeClinicRequest(conn, {
+        request,
+        residentId,
+        programId,
+        block,
+        assignStart,
+        assignEnd,
+        assignedWeeks: weeksSpanned(assignStart, assignEnd),
+      });
+    }
 
     const rotation = await resolveRotation(conn, programId, request.department_clinic, request.rotation_id);
 
@@ -433,6 +557,137 @@ class RotationApprovalService {
       notes: NOTES,
       created,
       catalogued_rotation: Boolean(rotation.catalogued),
+    };
+  }
+
+  /**
+   * Record an approved clinic request as a recurring release.
+   *
+   * Nothing here writes `resident_rotation_assignments`: the block rota is a
+   * different question from "which clinic session is this resident released for",
+   * and answering the second by rewriting the first is how an approved clinic
+   * request used to erase a hospital rotation.
+   *
+   * The row therefore lands in `resident_longitudinal_assignments`, keyed on the
+   * request that made it so re-approving rewrites it rather than stacking a
+   * second one. When the clinic is one the programme actually runs
+   * (`longitudinal_clinic_types`) the session is *also* written onto that clinic's
+   * own matrix, because that is the grid the clinic's supervisor reads; a clinic
+   * the resident typed that no coordinator has catalogued is recorded here and
+   * shown as a notation on the Master Grid, with no matrix to place it in.
+   *
+   * @private
+   */
+  static async #placeClinicRequest(conn, { request, residentId, programId, block, assignStart, assignEnd, assignedWeeks }) {
+    const name = String(request.department_clinic ?? '').trim();
+    if (!name) {
+      throw reject(400, 'The request names no clinic, so there is nothing to place on the clinic.');
+    }
+
+    const clinic = await resolveClinicType(conn, programId, name);
+    const requested = requestedClinicDays(request);
+    const days = requested.length > 0
+      ? requested
+      : clinic?.default_day_of_week
+        ? [canonicalDay(clinic.default_day_of_week)].filter(Boolean)
+        : DAY_NAMES.slice(0, 5);
+
+    const [residentRows] = await conn.query(
+      'SELECT CONCAT(first_name, \' \', last_name) AS resident_name FROM residents WHERE id = ? LIMIT 1',
+      [residentId],
+    );
+    const residentName = residentRows[0]?.resident_name ?? null;
+
+    const summary = `Clinic release: ${name}${days.length > 0 ? ` (${days.map((day) => day.slice(0, 3)).join(', ')})` : ''}`;
+    const daysJson = JSON.stringify(days);
+
+    const [existing] = await conn.query(
+      `SELECT id FROM resident_longitudinal_assignments
+        WHERE source_request_id = ?
+        LIMIT 1`,
+      [request.request_id],
+    );
+
+    let assignmentId;
+    let created;
+    if (existing[0]) {
+      await conn.query(
+        `UPDATE resident_longitudinal_assignments
+            SET clinic_type_id = ?, day_of_week = ?, clinic_days = ?, start_date = ?, end_date = ?,
+                notes = ?, summary = ?, assignment_source = 'CLINIC_REQUEST', is_active = 1
+          WHERE id = ?`,
+        [
+          clinic?.id ?? null,
+          dayEnum(days[0]),
+          daysJson,
+          assignStart,
+          assignEnd,
+          NOTES,
+          summary,
+          existing[0].id,
+        ],
+      );
+      assignmentId = existing[0].id;
+      created = false;
+    } else {
+      const [result] = await conn.query(
+        `INSERT INTO resident_longitudinal_assignments
+           (resident_id, clinic_type_id, site_name, supervisor_name, day_of_week, clinic_days,
+            start_date, end_date, notes, summary, source_request_id, assignment_source, is_active)
+         VALUES (?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, 'CLINIC_REQUEST', 1)`,
+        [
+          residentId,
+          clinic?.id ?? null,
+          dayEnum(days[0]),
+          daysJson,
+          assignStart,
+          assignEnd,
+          NOTES,
+          summary,
+          request.request_id ?? null,
+        ],
+      );
+      assignmentId = result.insertId;
+      created = true;
+    }
+
+    // A catalogued clinic owns a grid, and the grid is where the clinic's
+    // supervisor reads who is coming. A clinic the programme does not run has no
+    // grid: the request is still recorded, and the Master Grid says so.
+    let grid = [];
+    if (clinic) {
+      grid = await LongitudinalService.placeClinicRequestOnGrid({
+        conn,
+        programId,
+        clinicTypeId: clinic.id,
+        days,
+        residentName: residentName ?? '',
+      });
+    }
+
+    return {
+      assignment_id: assignmentId,
+      resident_id: residentId,
+      rotation_id: null,
+      rotation_name: name,
+      rotation_block_id: block.id,
+      block_number: block.block_number,
+      block_name: block.block_name,
+      start_date: assignStart,
+      end_date: assignEnd,
+      assigned_weeks: assignedWeeks,
+      assignment_type: 'CLINIC_RELEASE',
+      notes: NOTES,
+      created,
+      catalogued_rotation: false,
+      clinic_id: clinic?.id ?? null,
+      clinic_code: clinic?.clinic_code ?? null,
+      clinic_name: clinic?.clinic_name ?? name,
+      clinic_days: days,
+      clinic_days_enum: days.map(dayEnum),
+      badge_label: clinicBadgeLabel(clinic?.clinic_code, days, name),
+      matrix_records: grid,
+      catalogued_clinic: Boolean(clinic),
     };
   }
 }
