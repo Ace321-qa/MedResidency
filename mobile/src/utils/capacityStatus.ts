@@ -44,4 +44,4 @@ export function capacityTone(status: OccupancyStatus | null | undefined): Capaci
   return { ...words, ...palette };
 }
 
-export { capacityOptionLabel } from './capacityRules';
+export { capacityOptionLabel, isAtCapacity } from './capacityRules';

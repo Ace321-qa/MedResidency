@@ -165,6 +165,16 @@ export function TextField({
 export interface SelectOption<T extends string> {
   value: T;
   label: string;
+  /**
+   * An optional attention hint drawn as a tint behind the option.
+   *
+   * Used for a rotation whose seats are already taken: the coordinator sees the
+   * full ones shaded before tapping, rather than discovering the limit only
+   * after choosing. It is a hint, never a refusal — a full rotation can still be
+   * chosen, and the capacity banner is what decides whether the placement is
+   * allowed.
+   */
+  tone?: 'warning';
 }
 
 interface SelectFieldProps<T extends string> {
@@ -374,6 +384,7 @@ export function SheetSelectField<T extends string>({
                     accessibilityLabel={option.label}
                     style={({ pressed }) => [
                       styles.sheetOption,
+                      option.tone === 'warning' && !isSelected ? styles.sheetOptionWarning : null,
                       isSelected ? styles.sheetOptionSelected : null,
                       pressed && !isSelected ? styles.sheetOptionPressed : null,
                     ]}
@@ -801,6 +812,10 @@ const styles = StyleSheet.create({
   sheetOptionSelected: {
     borderColor: colors.primary,
     backgroundColor: colors.primarySoft,
+  },
+  /** A full rotation: amber-tinted so it is visible before it is tapped. */
+  sheetOptionWarning: {
+    backgroundColor: colors.warningSurface,
   },
   sheetOptionPressed: {
     backgroundColor: colors.surfaceMuted,

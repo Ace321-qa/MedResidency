@@ -23,6 +23,7 @@ import {
   SegmentedControl,
   SelectField,
   Sheet,
+  SheetSelectField,
   SkeletonList,
   StatusBadge,
   Text,
@@ -42,7 +43,7 @@ import {
   getAcademicYears,
 } from '../../../utils/academicYear';
 import { describeWindow, isCalendarDate } from '../../../utils/dateCalc';
-import { capacityOptionLabel } from '../../../utils/capacityRules';
+import { capacityOptionLabel, isAtCapacity } from '../../../utils/capacityRules';
 import { rotationBadgeLabel, rotationCellDescription, rotationPalette } from '../../../utils/rotationBadges';
 import { colors, radius, spacing } from '../../../theme';
 import { ApiError } from '../../../services/client';
@@ -150,16 +151,30 @@ export default function MasterGridScreen() {
     endDate?: string;
   } | null>(null);
   const [assignRotationId, setAssignRotationId] = useState<number | null>(null);
+  /** The block the modal is assigning into, for the picker's occupancy count. */
+  const selectedBlockId = selected?.blockId ?? null;
   const [assignNotes, setAssignNotes] = useState('');
   // The seat-limit verdict for the placement being prepared, stamped with the
   // rotation-and-window key it answers. It is fetched from the server rather than
   // derived here, so the banner and the enforcement can never disagree.
-  const [verdict, setVerdict] = useState<{ key: string; verdict: CapacityVerdict | null } | null>(null);
+  //
+  // `failed` records that the check could not be completed, which is a *third*
+  // state distinct from "still checking" and "checked, and fine". Without it a
+  // dropped request collapsed to the same silent nothing as a within-capacity
+  // rotation, so a coordinator looking at an over-capacity department saw no
+  // warning at all — the limit appeared to pass when it had never been asked.
+  const [verdict, setVerdict] = useState<{
+    key: string;
+    verdict: CapacityVerdict | null;
+    failed: boolean;
+  } | null>(null);
   const [exceptionReason, setExceptionReason] = useState('');
   const [exceptionApprover, setExceptionApprover] = useState('');
   const [facultyConfirmed, setFacultyConfirmed] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /** Bumped to re-run the seat-limit check after a failed one. */
+  const [capacityAttempt, setCapacityAttempt] = useState(0);
   const [exportOpen, setExportOpen] = useState(false);
   const reportRef = useRef<View>(null);
 
@@ -437,6 +452,10 @@ export default function MasterGridScreen() {
     if (!assignSheetOpen || !assignRotationId || !targetWindow) return;
     const key = verdictKey(assignRotationId, targetWindow.start, targetWindow.end);
     let cancelled = false;
+    // Re-selecting the rotation that already failed would not change
+    // `assignRotationId`, so the effect would not re-run and the retry the
+    // failure banner offers would do nothing. `capacityAttempt` is that retry:
+    // it is a dependency purely so an identical selection can be re-asked.
     checkAssignmentCapacity({
       rotation_id: assignRotationId,
       program_id: programId ?? undefined,
@@ -444,17 +463,21 @@ export default function MasterGridScreen() {
       end_date: targetWindow.end,
     })
       .then((next) => {
-        if (!cancelled) setVerdict({ key, verdict: next });
+        if (!cancelled) setVerdict({ key, verdict: next, failed: false });
       })
       .catch(() => {
-        // A failed preview must not block the form; the write still enforces the
-        // limit and will return the same verdict on a 409 if there is one.
-        if (!cancelled) setVerdict({ key, verdict: null });
+        // The check itself failed — the network dropped, or the server answered
+        // with an error. This is recorded as a failure rather than as "no
+        // verdict", because the two must not look alike: a missing verdict used
+        // to render the same empty space as a within-capacity rotation, so an
+        // unchecked over-capacity placement looked approved. The write still
+        // enforces the limit, but the coordinator is told the preview is blind.
+        if (!cancelled) setVerdict({ key, verdict: null, failed: true });
       });
     return () => {
       cancelled = true;
     };
-  }, [assignSheetOpen, assignRotationId, programId, targetWindow]);
+  }, [assignSheetOpen, assignRotationId, programId, targetWindow, capacityAttempt]);
 
   /**
    * The verdict, but only while it still describes the current selection.
@@ -467,11 +490,12 @@ export default function MasterGridScreen() {
     assignRotationId && targetWindow
       ? verdictKey(assignRotationId, targetWindow.start, targetWindow.end)
       : null;
-  const activeVerdict =
-    verdict && verdict.key === verdictKeyForSelection ? verdict.verdict : null;
-  const verdictLoading = Boolean(
-    verdictKeyForSelection && (!verdict || verdict.key !== verdictKeyForSelection),
-  );
+  const settled =
+    verdict && verdict.key === verdictKeyForSelection ? verdict : null;
+  const activeVerdict = settled?.verdict ?? null;
+  const verdictLoading = Boolean(verdictKeyForSelection && !settled);
+  /** The preview could not be completed, so the coordinator is told so. */
+  const verdictFailed = settled?.failed === true;
 
   async function handleAssign() {
     if (!selected || !assignRotationId || !programId || !targetWindow) return;
@@ -507,13 +531,41 @@ export default function MasterGridScreen() {
       const apiError = error instanceof ApiError ? error : null;
       const serverVerdict = apiError?.body?.capacity as CapacityVerdict | undefined;
       if (serverVerdict && verdictKeyForSelection) {
-        setVerdict({ key: verdictKeyForSelection, verdict: serverVerdict });
+        // A verdict that arrived with the refusal is a *successful* check, so it
+        // clears any earlier failure flag rather than inheriting it.
+        setVerdict({ key: verdictKeyForSelection, verdict: serverVerdict, failed: false });
       }
       setAssignError(apiError?.detail ?? 'The assignment could not be saved.');
     } finally {
       setSaving(false);
     }
   }
+
+  // Live seat occupancy per rotation for the block the modal is assigning into,
+  // so each rotation in the picker can show `3/3 - FULL` before it is tapped.
+  //
+  // The count is the same `rotation_block_occupancy` the grid cells draw, keyed
+  // by rotation instead of by cell. It is deliberately the *block's* figure: the
+  // picker is choosing a rotation for a block, and a per-week number would only
+  // be meaningful once a window is fixed — which is the point the banner takes
+  // over and shows the real week-by-week count.
+  const occupancyByRotation = useMemo(() => {
+    const counts = new Map<number, { occupied: number; capacity: number | null }>();
+    for (const row of grid.data ?? []) {
+      if (selectedBlockId === null || row.block_id !== selectedBlockId) continue;
+      const rotationId = row.rotation_id;
+      if (rotationId === null || rotationId === undefined) continue;
+      const previous = counts.get(rotationId);
+      // Several residents share a rotation in a block and each row repeats the
+      // block's occupancy, so keep the highest seen rather than summing them.
+      const occupied = Math.max(previous?.occupied ?? 0, row.rotation_block_occupancy ?? 0);
+      counts.set(rotationId, {
+        occupied,
+        capacity: row.rotation_max_capacity ?? previous?.capacity ?? null,
+      });
+    }
+    return counts;
+  }, [grid.data, selectedBlockId]);
 
   const gridPreview = useMemo(() => {
     const first = blockWindow(1, startDate);
@@ -704,20 +756,36 @@ export default function MasterGridScreen() {
           />
         }
       >
-          <SelectField
+          {/* A searchable picker rather than a chip group: a programme has
+              dozens of rotations, and a wrapping wall of chips buries the one
+              being looked for. The label carries the block's live occupancy
+              (`3/3 - FULL`) so a full department is visible without opening it,
+              and the matching banner appears below once selected. */}
+          <SheetSelectField
             label="Rotation"
             value={assignRotationId ? String(assignRotationId) : ''}
             onChange={(v) => setAssignRotationId(Number(v))}
-            options={(rotations.data ?? []).map((r) => ({
-              value: String(r.rotation_id),
-              label: capacityOptionLabel(r.rotation_name, r.max_capacity),
-            }))}
-            hint="Each rotation shows its declared seat limit, if it has one."
+            placeholder="Choose a rotation"
+            options={(rotations.data ?? []).map((r) => {
+              const live = occupancyByRotation.get(r.rotation_id);
+              const full = isAtCapacity(r.max_capacity, live?.occupied);
+              return {
+                value: String(r.rotation_id),
+                label: capacityOptionLabel(r.rotation_name, r.max_capacity, live?.occupied),
+                ...(full ? { tone: 'warning' as const } : {}),
+              };
+            })}
+            hint="Seat counts are for this block. A rotation marked FULL has no spare seats."
           />
 
           {/* The verdict for this rotation and window, fetched from the server so
               the banner and the enforcement cannot disagree. */}
-          <CapacityBanner verdict={activeVerdict} loading={verdictLoading} />
+          <CapacityBanner
+            verdict={activeVerdict}
+            loading={verdictLoading}
+            failed={verdictFailed}
+            onRetry={() => setCapacityAttempt((n) => n + 1)}
+          />
           <CapacityOkNote verdict={activeVerdict} />
 
           {/* Exception capture appears only when the server says one is owed, so a

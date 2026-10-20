@@ -1,4 +1,4 @@
-import { StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { AlertTriangle, Ban, Check } from 'lucide-react-native';
 
 import { colors, radius, spacing } from '../theme';
@@ -24,9 +24,59 @@ interface CapacityBannerProps {
   verdict: CapacityVerdict | null;
   /** True while a fresh verdict is being fetched. */
   loading?: boolean;
+  /**
+   * True when the check itself could not be completed.
+   *
+   * This is shown, not swallowed. A preview that failed and a rotation that is
+   * within capacity used to render the same empty space, so an over-capacity
+   * department looked fine precisely when the app could not tell — the most
+   * misleading state to fail in. The write still enforces the limit, but the
+   * coordinator is told the preview is unavailable.
+   */
+  failed?: boolean;
+  /** Re-runs the check, so a transient failure is recoverable in place. */
+  onRetry?: () => void;
 }
 
-export function CapacityBanner({ verdict, loading }: CapacityBannerProps) {
+export function CapacityBanner({ verdict, loading, failed, onRetry }: CapacityBannerProps) {
+  if (failed && !verdict) {
+    return (
+      <View
+        style={[styles.banner, styles.failed]}
+        accessible
+        accessibilityRole="alert"
+        accessibilityLabel="Seat capacity could not be checked"
+      >
+        <View style={styles.header}>
+          <AlertTriangle size={16} color={colors.warning} />
+          <Text variant="label" uppercase style={{ color: colors.warning }}>
+            Capacity not checked
+          </Text>
+        </View>
+        <Text variant="bodySmall" style={{ color: colors.warning }}>
+          The departmental seat check could not be completed, so this placement has
+          not been verified against the limit.
+        </Text>
+        <Text variant="caption" style={{ color: colors.warning }}>
+          The limit is still enforced when you assign, so an over-capacity
+          placement will be refused there.
+        </Text>
+        {onRetry ? (
+          <Pressable
+            onPress={onRetry}
+            accessibilityRole="button"
+            accessibilityLabel="Retry capacity check"
+            style={styles.retry}
+          >
+            <Text variant="label" style={{ color: colors.warning }}>
+              Retry check
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  }
+
   if (loading && !verdict) {
     return (
       <View style={[styles.banner, styles.neutral]}>
@@ -118,10 +168,23 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceMuted,
     borderColor: colors.border,
   },
+  /** The check failed: a warning, not a refusal, so amber rather than red. */
+  failed: {
+    backgroundColor: colors.warningSurface,
+    borderColor: colors.warning,
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
+  },
+  retry: {
+    alignSelf: 'flex-start',
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.warning,
   },
   ok: {
     flexDirection: 'row',

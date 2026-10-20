@@ -1,4 +1,4 @@
-import { capacityLabel, capacityOptionLabel } from '../src/utils/capacityRules';
+import { capacityLabel, capacityOptionLabel, isAtCapacity } from '../src/utils/capacityRules';
 import type { OccupancyStatus } from '../src/types/api';
 
 /*
@@ -31,13 +31,48 @@ function check(name: string, actual: unknown, expected: unknown): void {
 }
 
 console.log('-- capacityOptionLabel: the rotation picker line --');
-// The picker shows the *limit*, not a live occupancy: until a window is chosen
-// there is no occupancy to show, and inventing `0/3` would claim a rotation is
-// empty when it may be full.
+// Without a live count only the limit can be shown. Inventing `0/3` would claim
+// a rotation is empty when it may be full, so the honest fallback is the limit.
 check('a limited rotation shows its limit', capacityOptionLabel('Internal Medicine', 3), 'Internal Medicine (limit 3)');
 check('an unlimited rotation says so', capacityOptionLabel('Emergency', null), 'Emergency — No seat limit');
 check('a zero capacity says no limit', capacityOptionLabel('Emergency', 0), 'Emergency — No seat limit');
 check('a one-seat rotation reads as a limit', capacityOptionLabel('EEG', 1), 'EEG (limit 1)');
+
+console.log('\n-- capacityOptionLabel: live occupancy, once a block is known --');
+// With the block's occupancy the label becomes a seat counter, and a full
+// rotation says so before it is tapped.
+check(
+  'a partly-filled rotation shows the count',
+  capacityOptionLabel('Internal Medicine Inpatient Wards', 3, 2),
+  'Internal Medicine Inpatient Wards (2/3)',
+);
+check(
+  'a full rotation is marked FULL',
+  capacityOptionLabel('Internal Medicine Inpatient Wards', 3, 3),
+  'Internal Medicine Inpatient Wards (3/3 - FULL)',
+);
+check(
+  'an over-capacity rotation is still marked FULL',
+  capacityOptionLabel('Internal Medicine Inpatient Wards', 3, 5),
+  'Internal Medicine Inpatient Wards (5/3 - FULL)',
+);
+check(
+  'an empty rotation shows zero used',
+  capacityOptionLabel('Internal Medicine', 3, 0),
+  'Internal Medicine (0/3)',
+);
+check(
+  'live occupancy is ignored for an unlimited rotation',
+  capacityOptionLabel('Emergency', null, 9),
+  'Emergency — No seat limit',
+);
+
+console.log('\n-- isAtCapacity: the chip tint --');
+check('a full rotation is at capacity', isAtCapacity(3, 3), true);
+check('an over-capacity rotation is at capacity', isAtCapacity(3, 4), true);
+check('a partly-filled rotation is not at capacity', isAtCapacity(3, 2), false);
+check('an unlimited rotation is never at capacity', isAtCapacity(null, 99), false);
+check('an unknown occupancy is not at capacity', isAtCapacity(3, null), false);
 
 console.log('\n-- capacityLabel: every status is described --');
 for (const status of ['GREEN', 'AMBER', 'REVIEW', 'RED', 'BLOCKED'] as OccupancyStatus[]) {
