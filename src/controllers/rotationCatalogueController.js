@@ -25,7 +25,8 @@ const {
  */
 
 const VIEW_COLUMNS =
-  'id, program_id, full_name, department, abbreviation, is_active, default_duration_weeks, created_at, updated_at';
+  'id, program_id, full_name, department, abbreviation, is_active, default_duration_weeks, ' +
+  'max_capacity, capacity_locked, created_at, updated_at';
 
 const CREATE_VIEW_SQL = `
   CREATE OR REPLACE VIEW rotations_catalogue AS
@@ -36,9 +37,74 @@ const CREATE_VIEW_SQL = `
          rotation_code AS abbreviation,
          is_active,
          default_duration_weeks,
+         max_capacity,
+         capacity_locked,
          created_at,
          updated_at
     FROM rotations`;
+
+/**
+ * The seat-limit columns, added to `rotations` on first use.
+ *
+ * `max_capacity` is the departmental seat limit — how many residents may sit in
+ * this rotation in any one week — and `NULL` or `0` means unlimited, so the
+ * column can be added to a populated table without silently capping every
+ * existing rotation at zero seats.
+ *
+ * `capacity_locked` turns that limit into a hard stop: a locked limit is refused
+ * even with a rationale, which is what a department says when its three posts
+ * are funded rather than merely preferred.
+ *
+ * There is no migration runner in this project, so these are added the same
+ * idempotent way the CCC tables are: ask `information_schema` whether the column
+ * is there, and only then `ALTER`. A table created before this feature keeps
+ * working because the view's `CREATE OR REPLACE` runs after the columns exist.
+ */
+async function ensureCapacityColumns() {
+  const [capacity] = await db.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rotations' AND COLUMN_NAME = 'max_capacity'`,
+  );
+  if (capacity.length === 0) {
+    await db.query('ALTER TABLE rotations ADD COLUMN max_capacity INT NULL AFTER default_duration_weeks');
+  }
+
+  const [locked] = await db.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rotations' AND COLUMN_NAME = 'capacity_locked'`,
+  );
+  if (locked.length === 0) {
+    await db.query(
+      'ALTER TABLE rotations ADD COLUMN capacity_locked TINYINT(1) NOT NULL DEFAULT 0 AFTER max_capacity',
+    );
+  }
+
+  // The audit trail for every placement made over capacity. One row per
+  // exception, keyed to the assignment it excuses, so "who allowed this and
+  // why" is answerable years later without reading the assignment's notes.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS rotation_capacity_exceptions (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      assignment_id BIGINT UNSIGNED NULL,
+      resident_id BIGINT UNSIGNED NOT NULL,
+      rotation_id BIGINT UNSIGNED NOT NULL,
+      rotation_block_id BIGINT UNSIGNED NULL,
+      status VARCHAR(16) NOT NULL,
+      capacity INT NULL,
+      peak_occupancy INT NULL,
+      peak_weeks JSON NULL,
+      reason VARCHAR(500) NOT NULL,
+      approver VARCHAR(200) NOT NULL,
+      faculty_confirmed TINYINT(1) NOT NULL DEFAULT 0,
+      weekly_occupancy JSON NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_capacity_exceptions_assignment (assignment_id),
+      KEY idx_capacity_exceptions_rotation (rotation_id),
+      KEY idx_capacity_exceptions_resident (resident_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+}
 
 /**
  * Build the view once per process.
@@ -53,6 +119,7 @@ const CREATE_VIEW_SQL = `
 let schemaReady = false;
 async function ensureCatalogueSchema() {
   if (schemaReady) return;
+  await ensureCapacityColumns();
   try {
     await db.query(CREATE_VIEW_SQL);
     schemaReady = true;
@@ -73,6 +140,67 @@ const FIELD_LABELS = {
   department: 'Hospital Department',
   abbreviation: 'Abbreviation',
 };
+
+/** The largest seat limit the form will accept, so a typo cannot read as infinite. */
+const MAX_CAPACITY = 999;
+
+/**
+ * Normalise the optional seat-limit fields.
+ *
+ * Kept apart from the text fields because the rules are different in kind: the
+ * names are strings with a length limit, whereas `max_capacity` is an optional
+ * positive integer whose *absence* is meaningful — `NULL` means unlimited, and
+ * an empty form field has to be read as that absence rather than as a zero that
+ * would silently close the rotation.
+ *
+ * A blank string is therefore `NULL`, `0` is accepted and stored as `NULL` for
+ * the same reason, and anything that is not a non-negative integer is refused
+ * with the field named.
+ *
+ * @param {object} input
+ * @param {boolean} partial - when true, absent fields are left untouched.
+ * @returns {{values: object, errors: string[]}}
+ */
+function normalizeCapacity(input, partial) {
+  const values = {};
+  const errors = [];
+
+  if (Object.prototype.hasOwnProperty.call(input, 'max_capacity') && input.max_capacity !== undefined) {
+    const raw = input.max_capacity;
+    // An empty form field arrives as `''`; that is "no limit", not "zero seats".
+    if (raw === null || String(raw).trim() === '') {
+      values.max_capacity = null;
+    } else {
+      const parsed = Number(String(raw).trim());
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        errors.push('Max Capacity / Seat Limit must be a whole number of seats');
+      } else if (parsed > MAX_CAPACITY) {
+        errors.push(`Max Capacity / Seat Limit must be ${MAX_CAPACITY} or fewer`);
+      } else {
+        // 0 is documented as unlimited alongside NULL, so the two spellings are
+        // collapsed to one value the rest of the system has to understand.
+        values.max_capacity = parsed === 0 ? null : parsed;
+      }
+    }
+  } else if (!partial) {
+    values.max_capacity = null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(input, 'capacity_locked') && input.capacity_locked !== undefined) {
+    const raw = input.capacity_locked;
+    if (raw === true || raw === 1 || raw === '1' || raw === 'true') {
+      values.capacity_locked = 1;
+    } else if (raw === false || raw === 0 || raw === '0' || raw === 'false' || raw === '') {
+      values.capacity_locked = 0;
+    } else {
+      errors.push('Lock Seat Limit must be true or false');
+    }
+  } else if (!partial) {
+    values.capacity_locked = 0;
+  }
+
+  return { values, errors };
+}
 
 /**
  * Trim, upper-case the abbreviation, and report what is missing or too long.
@@ -114,6 +242,10 @@ function normalizeEntry(input, options = {}) {
     }
     values[field] = normalized;
   }
+
+  const capacity = normalizeCapacity(input, partial);
+  Object.assign(values, capacity.values);
+  errors.push(...capacity.errors);
 
   return { values, errors };
 }
@@ -199,8 +331,16 @@ class RotationCatalogueController {
 
       await ensureCatalogueSchema();
       const [result] = await db.query(
-        'INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation) VALUES (?, ?, ?, ?)',
-        [programId, values.full_name, values.department, values.abbreviation],
+        `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation, max_capacity, capacity_locked)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          programId,
+          values.full_name,
+          values.department,
+          values.abbreviation,
+          values.max_capacity ?? null,
+          values.capacity_locked ?? 0,
+        ],
       );
 
       const created = await findEntry(result.insertId);
@@ -244,7 +384,11 @@ class RotationCatalogueController {
       if (Object.keys(values).length === 0) {
         return res.status(400).json({
           success: false,
-          error: `Nothing to update. Provide at least one of: ${Object.keys(FIELD_LABELS).join(', ')}`,
+          error: `Nothing to update. Provide at least one of: ${[
+            ...Object.keys(FIELD_LABELS),
+            'max_capacity',
+            'capacity_locked',
+          ].join(', ')}`,
         });
       }
 
@@ -431,10 +575,10 @@ class RotationCatalogueController {
         if (alreadyThere.has(row.abbreviation)) updated += 1;
         else created += 1;
         await conn.query(
-          `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation)
-           VALUES (?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE full_name = VALUES(full_name), department = VALUES(department)`,
-          [program.id, row.full_name, row.department, row.abbreviation],
+          `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation, max_capacity)
+           VALUES (?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE full_name = VALUES(full_name), department = VALUES(department), max_capacity = VALUES(max_capacity)`,
+          [program.id, row.full_name, row.department, row.abbreviation, row.max_capacity ?? null],
         );
       }
 

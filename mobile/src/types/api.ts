@@ -167,6 +167,10 @@ export interface RotationDefinition {
   department_id: number | null;
   default_duration_weeks: number;
   is_active: number;
+  /** Departmental seat limit; `null` or `0` means unlimited. */
+  max_capacity?: number | null;
+  /** True when the limit is a hard departmental stop no rationale can clear. */
+  capacity_locked?: number;
 }
 
 /**
@@ -186,6 +190,10 @@ export interface RotationCatalogueEntry {
   abbreviation: string;
   default_duration_weeks: number;
   is_active: number;
+  /** Departmental seat limit; `null` or `0` means unlimited. */
+  max_capacity: number | null;
+  /** 1 when the limit is a hard departmental stop. */
+  capacity_locked: number;
   created_at: IsoDateString | null;
   updated_at: IsoDateString | null;
 }
@@ -197,6 +205,44 @@ export interface CatalogueRotationPayload {
   department: string;
   /** Sent upper-cased; the API enforces one per programme. */
   abbreviation: string;
+  /** `null` or omitted means unlimited. */
+  max_capacity?: number | null;
+  /** Locks the limit so no exception can clear it. */
+  capacity_locked?: boolean;
+}
+
+/**
+ * One weekly occupancy verdict from the seat-limit engine.
+ *
+ * Mirrors `src/utils/occupancy.js` on the server, which is the authority: this
+ * type describes what the API already decided, not a rule the client re-derives.
+ */
+export interface OccupancyWeek {
+  week_start: CalendarDateString;
+  week_end: CalendarDateString;
+  count: number;
+  over_by: number;
+}
+
+export type OccupancyStatus = 'GREEN' | 'AMBER' | 'REVIEW' | 'RED' | 'BLOCKED';
+
+export interface CapacityVerdict {
+  status: OccupancyStatus;
+  capacity: number | null;
+  locked: boolean;
+  allowed: boolean;
+  requires_exception: boolean;
+  peak: number;
+  peak_weeks: string[];
+  over_by: number;
+  sustained_weeks: number;
+  weeks: OccupancyWeek[];
+  worst_week: OccupancyWeek | null;
+  message: string;
+  /** Present on the preview endpoint, which echoes the rotation it checked. */
+  rotation_id?: number;
+  rotation_name?: string;
+  department_name?: string | null;
 }
 
 export interface ResidentIdentifier {
@@ -646,6 +692,15 @@ export interface CreateAssignmentPayload {
   assigned_weeks?: number;
   assignment_type?: AssignmentType;
   notes?: string;
+  /**
+   * The exception that excuses an over-capacity placement, required by the API
+   * whenever the verdict is AMBER, REVIEW or RED. All three parts are needed:
+   * the reason says what the exception was, the approver says who owns it, and
+   * the faculty confirmation is the educational half of the same question.
+   */
+  exception_reason?: string;
+  exception_approver?: string;
+  faculty_supervision_confirmed?: boolean;
 }
 
 /**
@@ -955,6 +1010,18 @@ export interface CohortGridCell {
   clinic_source?: 'CLINIC_REQUEST' | 'MATRIX' | null;
   concurrent_clinic_label?: string | null;
   clinic_releases?: CohortClinicRelease[];
+  /**
+   * The rotation's departmental seat limit, and how many residents stand in it
+   * during this block.
+   *
+   * `rotation_max_capacity` is `null` for a rotation with no limit — the ordinary
+   * case — so a cell shows a tag only when there is a limit worth showing.
+   * `rotation_block_occupancy` is the distinct-resident count across the block,
+   * which is what the tag reads as `(n/capacity)`.
+   */
+  rotation_max_capacity?: number | null;
+  rotation_capacity_locked?: number | null;
+  rotation_block_occupancy?: number | null;
 }
 
 /** One recurring clinic release riding alongside a resident's block rotation. */

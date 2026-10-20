@@ -1,12 +1,16 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { CalendarX, Download, Plus } from 'lucide-react-native';
 import { router, useFocusEffect } from 'expo-router';
 
 import {
   AppHeader,
+  Banner,
   Button,
   Card,
+  CapacityBanner,
+  CapacityOkNote,
+  CheckboxField,
   ChoiceGroup,
   DateField,
   EmptyState,
@@ -27,7 +31,7 @@ import {
   type SelectOption,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
-import { createAssignment, fetchCohortGrid, fetchRotations } from '../../../services/rotations';
+import { createAssignment, checkAssignmentCapacity, fetchCohortGrid, fetchRotations } from '../../../services/rotations';
 import { downloadScheduleReport } from '../../../services/scheduleExport';
 import { buildMasterGridReport } from '../../../utils/scheduleExport';
 import { uploadMasterGrid } from '../../../services/excelTemplates';
@@ -38,9 +42,11 @@ import {
   getAcademicYears,
 } from '../../../utils/academicYear';
 import { describeWindow, isCalendarDate } from '../../../utils/dateCalc';
+import { capacityOptionLabel } from '../../../utils/capacityRules';
 import { rotationBadgeLabel, rotationCellDescription, rotationPalette } from '../../../utils/rotationBadges';
 import { colors, radius, spacing } from '../../../theme';
-import type { CohortGridCell } from '../../../types/api';
+import { ApiError } from '../../../services/client';
+import type { CapacityVerdict, CohortGridCell } from '../../../types/api';
 import { goBack } from '../../../navigation/back';
 import {
   blockWindow,
@@ -145,6 +151,15 @@ export default function MasterGridScreen() {
   } | null>(null);
   const [assignRotationId, setAssignRotationId] = useState<number | null>(null);
   const [assignNotes, setAssignNotes] = useState('');
+  // The seat-limit verdict for the placement being prepared, stamped with the
+  // rotation-and-window key it answers. It is fetched from the server rather than
+  // derived here, so the banner and the enforcement can never disagree.
+  const [verdict, setVerdict] = useState<{ key: string; verdict: CapacityVerdict | null } | null>(null);
+  const [exceptionReason, setExceptionReason] = useState('');
+  const [exceptionApprover, setExceptionApprover] = useState('');
+  const [facultyConfirmed, setFacultyConfirmed] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const reportRef = useRef<View>(null);
 
@@ -372,6 +387,23 @@ export default function MasterGridScreen() {
     [residents, blocksByNumber, cellFor, startDate],
   );
 
+  /**
+   * The date window a placement into the selected cell would occupy.
+   *
+   * Pulled out so the capacity preview and the write compute it once: a preview
+   * that checked a different window than the write would be worse than no
+   * preview at all.
+   */
+  const targetWindow = useMemo(() => {
+    if (!selected) return null;
+    const start =
+      selected.startDate ??
+      (selected.blockNumber ? blockWindowStart(selected.blockNumber, startDate) : MASTER_GRID_START);
+    const end =
+      selected.endDate ?? (selected.blockNumber ? blockWindowEnd(selected.blockNumber, startDate) : null);
+    return { start, end: end ?? start };
+  }, [selected, startDate]);
+
   function openAssignSheet(opts: {
     residentId: number;
     residentName: string;
@@ -384,30 +416,102 @@ export default function MasterGridScreen() {
     setSelected(opts);
     setAssignRotationId(null);
     setAssignNotes('');
+    setVerdict(null);
+    setExceptionReason('');
+    setExceptionApprover('');
+    setFacultyConfirmed(false);
+    setAssignError(null);
     setAssignSheetOpen(true);
   }
 
+  // Ask the server for a verdict whenever the rotation or the window changes.
+  // Debounced by a cancelled flag rather than a timer: a verdict the user has
+  // moved on from must never land, and a stale one is worse than a missing one.
+  //
+  // Nothing is set synchronously in this effect — a `setState` in an effect body
+  // cascades renders. Instead each result is stamped with the key it answers,
+  // and the reading below trusts a result only while the key still matches. A
+  // selection with no matching result is therefore *derived* as "still checking"
+  // rather than declared as such, so the loading state needs no effect at all.
+  useEffect(() => {
+    if (!assignSheetOpen || !assignRotationId || !targetWindow) return;
+    const key = verdictKey(assignRotationId, targetWindow.start, targetWindow.end);
+    let cancelled = false;
+    checkAssignmentCapacity({
+      rotation_id: assignRotationId,
+      program_id: programId ?? undefined,
+      start_date: targetWindow.start,
+      end_date: targetWindow.end,
+    })
+      .then((next) => {
+        if (!cancelled) setVerdict({ key, verdict: next });
+      })
+      .catch(() => {
+        // A failed preview must not block the form; the write still enforces the
+        // limit and will return the same verdict on a 409 if there is one.
+        if (!cancelled) setVerdict({ key, verdict: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [assignSheetOpen, assignRotationId, programId, targetWindow]);
+
+  /**
+   * The verdict, but only while it still describes the current selection.
+   *
+   * A result fetched for one rotation must never be shown for another, and
+   * comparing the key here is what lets the effect above avoid a synchronous
+   * `setVerdict(null)` — a stale value is simply not read, and reads as pending.
+   */
+  const verdictKeyForSelection =
+    assignRotationId && targetWindow
+      ? verdictKey(assignRotationId, targetWindow.start, targetWindow.end)
+      : null;
+  const activeVerdict =
+    verdict && verdict.key === verdictKeyForSelection ? verdict.verdict : null;
+  const verdictLoading = Boolean(
+    verdictKeyForSelection && (!verdict || verdict.key !== verdictKeyForSelection),
+  );
+
   async function handleAssign() {
-    if (!selected || !assignRotationId || !programId) return;
-    const start = selected.startDate ?? (selected.blockNumber
-      ? blockWindowStart(selected.blockNumber, startDate)
-      : MASTER_GRID_START);
-    const end = selected.endDate ?? (selected.blockNumber ? blockWindowEnd(selected.blockNumber, startDate) : null);
+    if (!selected || !assignRotationId || !programId || !targetWindow) return;
+    setAssignError(null);
+    setSaving(true);
+
+    // Only an exception-requiring verdict sends the rationale: a green placement
+    // carrying an exception would record an audit row for a non-event.
+    const needsException = activeVerdict?.requires_exception === true;
     try {
       await createAssignment({
-        
         resident_id: selected.residentId,
         rotation_id: assignRotationId,
         rotation_block_id: selected.blockId ?? 0,
-        start_date: start,
-        end_date: end ?? start,
+        start_date: targetWindow.start,
+        end_date: targetWindow.end,
         notes: assignNotes || undefined,
         assignment_type: 'PARTIAL_BLOCK',
+        ...(needsException
+          ? {
+              exception_reason: exceptionReason.trim(),
+              exception_approver: exceptionApprover.trim(),
+              faculty_supervision_confirmed: facultyConfirmed,
+            }
+          : {}),
       });
       setAssignSheetOpen(false);
       grid.refresh();
-    } catch {
-      // ignore; UI can show a banner if needed
+    } catch (error) {
+      // The server refuses an over-capacity write without a rationale, and its
+      // 409 carries the verdict with the wording already formed — so the same
+      // banner the modal previewed can be shown again rather than a bare error.
+      const apiError = error instanceof ApiError ? error : null;
+      const serverVerdict = apiError?.body?.capacity as CapacityVerdict | undefined;
+      if (serverVerdict && verdictKeyForSelection) {
+        setVerdict({ key: verdictKeyForSelection, verdict: serverVerdict });
+      }
+      setAssignError(apiError?.detail ?? 'The assignment could not be saved.');
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -586,17 +690,73 @@ export default function MasterGridScreen() {
         <ScheduleReportView ref={reportRef} report={reportModel} />
       </View>
 
-      <Sheet visible={assignSheetOpen} onClose={() => setAssignSheetOpen(false)} title={`Assign Rotation${selected ? ` — ${selected.residentName}` : ''}`}>
+      <Sheet
+        visible={assignSheetOpen}
+        onClose={() => setAssignSheetOpen(false)}
+        title={`Assign Rotation${selected ? ` — ${selected.residentName}` : ''}`}
+        subtitle={targetWindow ? describeWindow(targetWindow.start, targetWindow.end) : undefined}
+        footer={
+          <Button
+            label={activeVerdict?.status === 'BLOCKED' ? 'Locked — cannot assign' : 'Assign'}
+            loading={saving}
+            disabled={!assignRotationId || activeVerdict?.status === 'BLOCKED'}
+            onPress={() => void handleAssign()}
+          />
+        }
+      >
           <SelectField
             label="Rotation"
             value={assignRotationId ? String(assignRotationId) : ''}
             onChange={(v) => setAssignRotationId(Number(v))}
             options={(rotations.data ?? []).map((r) => ({
               value: String(r.rotation_id),
-              label: r.rotation_name,
+              label: capacityOptionLabel(r.rotation_name, r.max_capacity),
             }))}
-            
+            hint="Each rotation shows its declared seat limit, if it has one."
           />
+
+          {/* The verdict for this rotation and window, fetched from the server so
+              the banner and the enforcement cannot disagree. */}
+          <CapacityBanner verdict={activeVerdict} loading={verdictLoading} />
+          <CapacityOkNote verdict={activeVerdict} />
+
+          {/* Exception capture appears only when the server says one is owed, so a
+              within-capacity placement is never asked for a rationale it does not
+              need — and a locked limit, which no rationale clears, never shows
+              these fields at all. */}
+          {activeVerdict?.requires_exception ? (
+            <View style={styles.exceptionBlock}>
+              <Text variant="label" uppercase tone="secondary">
+                Exception &amp; Audit
+              </Text>
+
+              <TextField
+                label="Reason for Exception"
+                required
+                value={exceptionReason}
+                onChangeText={setExceptionReason}
+                placeholder="Why this placement exceeds the departmental limit"
+                multiline
+                hint="Recorded against the assignment for audit."
+              />
+
+              <TextField
+                label="Approving Coordinator / Department Lead"
+                required
+                value={exceptionApprover}
+                onChangeText={setExceptionApprover}
+                placeholder="Name of the person approving this exception"
+                autoCapitalize="words"
+              />
+
+              <CheckboxField
+                label="Faculty supervision & educational adequacy confirmed"
+                checked={facultyConfirmed}
+                onChange={setFacultyConfirmed}
+                hint="Confirm the department can supervise every resident on this rotation in the affected weeks."
+              />
+            </View>
+          ) : null}
           <TextField
             label="Notes (optional)"
             value={assignNotes}
@@ -604,19 +764,26 @@ export default function MasterGridScreen() {
             multiline
             
           />
-          <Pressable style={styles.assignBtn} onPress={handleAssign}>
-            <Text variant="body" style={{ color: colors.surface }}>
-              Assign
-            </Text>
-          </Pressable>
+          {assignError ? <Banner tone="danger" title="Could not assign" message={assignError} /> : null}
 </Sheet>
     </Screen>
   );
 }
 
+/**
+ * A key naming the rotation-and-window a capacity verdict answers.
+ *
+ * The verdict is fetched asynchronously, so by the time it lands the user may
+ * have picked a different rotation or cell. Stamping each result with the
+ * question it answers lets the reading side discard a stale one by comparison,
+ * with no second render and no `setState` in an effect body.
+ */
+function verdictKey(rotationId: number, startDate: string, endDate: string): string {
+  return `${rotationId}|${startDate}|${endDate}`;
+}
+
 /** The assignment's own start date, preferring the timezone-safe iso copy. */
-function assignmentStartDate(assignment: CohortGridCell): string | null {
-  return assignment.assignment_start_date_iso ?? assignment.start_date ?? null;
+function assignmentStartDate(assignment: CohortGridCell): string | null {  return assignment.assignment_start_date_iso ?? assignment.start_date ?? null;
 }
 
 /** The assignment's own end date, preferring the timezone-safe iso copy. */
@@ -782,6 +949,39 @@ function clinicNotation(cell: CohortGridCell[] | undefined, key: string): React.
   );
 }
 
+/**
+ * The rotation's capacity tag, drawn small under its badge.
+ *
+ * Shown only when the rotation declares a limit: an unlimited rotation has no
+ * seat to count against, and printing "No seat limit" on every cell would bury
+ * the cells where a limit actually applies. The tone reflects fullness — a full
+ * department is a red tag, a partly full one is muted — so the grid is scannable
+ * for the rotations that are at or near capacity.
+ */
+function capacityNotation(cell: CohortGridCell[] | undefined, key: string): React.ReactNode {
+  const row = cell?.find((item) => item.rotation_max_capacity && item.rotation_max_capacity > 0);
+  if (!row || !row.rotation_max_capacity) return null;
+
+  const capacity = row.rotation_max_capacity;
+  const occupied = row.rotation_block_occupancy ?? 0;
+  const full = occupied >= capacity;
+  const locked = Number(row.rotation_capacity_locked) === 1;
+  const tone = locked || full ? colors.danger : colors.textSecondary;
+
+  return (
+    <View
+      key={key}
+      style={[styles.capacityTag, full && styles.capacityTagFull]}
+      accessible
+      accessibilityLabel={`${row.rotation_name ?? 'Rotation'} capacity: ${occupied} of ${capacity} seats filled${locked ? ', limit locked' : ''}`}
+    >
+      <Text numberOfLines={1} style={[styles.capacityTagText, { color: tone }]}>
+        {`${occupied}/${capacity}${full ? ' - Full' : ''}${locked ? ' \u{1F512}' : ''}`}
+      </Text>
+    </View>
+  );
+}
+
 function unassignedCell(onAdd: () => void): React.ReactNode {  return (
     <Pressable onPress={onAdd} style={styles.unassignedCell} accessibilityLabel="Assign rotation">
       <Plus size={14} color={colors.textMuted} />
@@ -868,6 +1068,7 @@ function blockCellNode(
     <View style={styles.cellBadges}>
       {badges}
       {clinic}
+      {capacityNotation(cell, `capacity-${residentId}-${blockId ?? blockNumber}`)}
     </View>
   );
 }
@@ -897,6 +1098,7 @@ function weeklyCellNode(
     <View style={styles.cellBadges}>
       {assignmentBadge(assignment, label, badgeKey({ residentId, assignment, weekNumber }))}
       {clinicNotation(cell, `clinic-${residentId}-w${weekNumber}`)}
+      {capacityNotation(cell, `capacity-${residentId}-w${weekNumber}`)}
     </View>
   );
 }
@@ -980,6 +1182,26 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.textSecondary,
   },
+  /**
+   * A seat-limit tag, drawn under the clinic notation: the smallest thing in the
+   * cell, because it qualifies the rotation rather than being one.
+   */
+  capacityTag: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+  },
+  capacityTagFull: {
+    borderColor: colors.danger,
+    backgroundColor: colors.dangerSurface,
+  },
+  capacityTagText: {
+    fontSize: 8,
+    fontWeight: '700',
+  },
   addBadge: {
     paddingHorizontal: 4,
     paddingVertical: 2,
@@ -997,12 +1219,14 @@ const styles = StyleSheet.create({
     borderRadius: radius.sm,
     flex: 1,
   },
-  assignBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-    marginTop: spacing.md,
+  /** The exception fields, grouped so their purpose reads as one block. */
+  exceptionBlock: {
+    gap: spacing.sm,
+    padding: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceMuted,
   },
   footnote: {
     marginTop: spacing.sm,

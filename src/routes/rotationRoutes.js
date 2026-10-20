@@ -26,6 +26,11 @@ router.get('/', RotationController.getRotations);
 router.post('/assignments', RotationController.createAssignment);
 router.get('/assignments', RotationController.getAssignments);
 
+// The seat-limit preview. Declared before `/assignments/:id`-style routes (and
+// alongside the literal `/assignments/cohort` below) so `check-capacity` can
+// never be captured as a dynamic id.
+router.post('/assignments/check-capacity', RotationController.checkCapacity);
+
 // Grid / matrix routes.
 //
 // These literal segments are declared before any `:id`-style parameter below so

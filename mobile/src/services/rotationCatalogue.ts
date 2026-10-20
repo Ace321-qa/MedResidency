@@ -22,7 +22,10 @@ import type {
  */
 
 export type CatalogueRotationUpdate = Partial<
-  Pick<CatalogueRotationPayload, 'full_name' | 'department' | 'abbreviation'>
+  Pick<
+    CatalogueRotationPayload,
+    'full_name' | 'department' | 'abbreviation' | 'max_capacity' | 'capacity_locked'
+  >
 >;
 
 /** `GET /rotations/catalogue?program_id=X` — every rotation in the programme. */

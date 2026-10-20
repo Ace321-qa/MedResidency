@@ -5,6 +5,7 @@ import type {
   BlockCalendar,
   BlockCalendarWindow,
   CalendarDateString,
+  CapacityVerdict,
   CohortGridCell,
   CreateAssignmentPayload,
   CreateBlockPayload,
@@ -58,6 +59,29 @@ export async function createAssignment(payload: CreateAssignmentPayload): Promis
     method: 'POST',
     data: payload,
   });
+  return response.data;
+}
+
+/**
+ * `POST /rotations/assignments/check-capacity` — preview a seat-limit verdict.
+ *
+ * The assignment modal calls this as soon as a rotation and a date window are
+ * chosen, so the amber or red banner appears *before* the coordinator fills in
+ * a rationale. The server runs the same engine the write runs, so the preview
+ * and the enforcement cannot disagree — which is why the client asks rather
+ * than re-deriving the tier table itself.
+ */
+export async function checkAssignmentCapacity(payload: {
+  rotation_id: number;
+  start_date: string;
+  end_date: string;
+  program_id?: number;
+  exclude_assignment_id?: number;
+}): Promise<CapacityVerdict> {
+  const response = await request<ApiResponse<CapacityVerdict>>(
+    '/rotations/assignments/check-capacity',
+    { method: 'POST', data: payload },
+  );
   return response.data;
 }
 

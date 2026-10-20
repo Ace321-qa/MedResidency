@@ -5,20 +5,24 @@ const { makeBuffer } = require('./common');
  * The rotation catalogue workbook: what the coordinator downloads, fills in and
  * uploads again.
  *
- * Three columns, because the catalogue is three facts about a rotation — what it
- * is called, which hospital department owns it, and the short code that appears
- * on every rota. The headers here are the exact strings the mobile client writes
- * when it builds the same template locally, so a file produced by either path
- * parses here, and parsing then accepts common renames (`Full Name`, `Hospital
- * Dept`, `Abbr`) because a parser must be forgiving even when the format is
- * not.
+ * Four columns, because the catalogue is four facts about a rotation — what it
+ * is called, which hospital department owns it, the short code that appears on
+ * every rota, and how many residents may sit in it at once. The headers here are
+ * the exact strings the mobile client writes when it builds the same template
+ * locally, so a file produced by either path parses here, and parsing then
+ * accepts common renames (`Full Name`, `Hospital Dept`, `Abbr`) because a parser
+ * must be forgiving even when the format is not.
+ *
+ * The seat limit is *optional* in a way the other three are not: a rotation with
+ * no limit is a normal rotation, so a blank cell is a valid answer rather than a
+ * missing one, and a file with only the original three columns still imports.
  *
  * Every rejected row comes back as `Row 4: Abbreviation is required` rather
  * than being dropped: a silently dropped rotation is one a coordinator believes
  * is available to assign when it is not.
  */
 
-const HEADERS = ['Full Rotation Name', 'Hospital Department', 'Abbreviation'];
+const HEADERS = ['Full Rotation Name', 'Hospital Department', 'Abbreviation', 'Max Capacity / Seat Limit'];
 
 /**
  * Sample rows shipped with the template.
@@ -29,13 +33,17 @@ const HEADERS = ['Full Rotation Name', 'Hospital Department', 'Abbreviation'];
  * workbook untouched therefore inserts five usable rotations, and importing it
  * a second time updates the same five (the upsert matches on abbreviation), so
  * the template is never a trap.
+ *
+ * Two rows carry a seat limit and three are left blank, which is deliberate: the
+ * sample has to show both that the column matters and that leaving it empty is
+ * allowed, or every coordinator reading it will assume a number is required.
  */
 const SAMPLE_ROWS = [
-  ['Continuity Clinic', 'Primary Health Care', 'PHC'],
-  ['Inpatient Medicine', 'Internal Medicine', 'MED-INP'],
-  ['General Surgery Inpatient', 'Department of Surgery', 'SURG-INP'],
-  ['Pediatrics Outpatient', 'Pediatrics', 'PEDS-OPD'],
-  ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD'],
+  ['Continuity Clinic', 'Primary Health Care', 'PHC', 8],
+  ['Inpatient Medicine', 'Internal Medicine', 'MED-INP', 3],
+  ['General Surgery Inpatient', 'Department of Surgery', 'SURG-INP', 4],
+  ['Pediatrics Outpatient', 'Pediatrics', 'PEDS-OPD', ''],
+  ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD', ''],
 ];
 
 /** Tolerant header aliases, matched against a lower-cased, trimmed header. */
@@ -43,10 +51,20 @@ const HEADER_ALIASES = {
   fullName: ['full rotation name', 'full name', 'full_name', 'rotation name', 'name'],
   department: ['hospital department', 'department', 'hospital dept', 'dept', 'department name'],
   abbreviation: ['abbreviation', 'abbr', 'code', 'rotation code', 'short code'],
+  maxCapacity: [
+    'max capacity / seat limit',
+    'max capacity',
+    'capacity',
+    'seat limit',
+    'seats',
+    'max_capacity',
+  ],
 };
 
 const MAX_ABBREVIATION_LENGTH = 50;
 const MAX_NAME_LENGTH = 255;
+/** The largest seat limit the importer will accept, matching the API's own cap. */
+const MAX_CAPACITY = 999;
 
 function headerIndex(headers, keys) {
   const normalised = headers.map((header) => String(header ?? '').trim().toLowerCase());
@@ -86,6 +104,9 @@ function parseCatalogueFile(buffer) {
     fullName: headerIndex(headers, HEADER_ALIASES.fullName),
     department: headerIndex(headers, HEADER_ALIASES.department),
     abbreviation: headerIndex(headers, HEADER_ALIASES.abbreviation),
+    // Optional: a workbook with only the original three columns still parses,
+    // and every row simply carries no limit.
+    maxCapacity: headerIndex(headers, HEADER_ALIASES.maxCapacity),
   };
 
   if (idx.fullName < 0 || idx.department < 0 || idx.abbreviation < 0) {
@@ -109,6 +130,7 @@ function parseCatalogueFile(buffer) {
     const fullName = cell('fullName');
     const department = cell('department');
     const abbreviation = cell('abbreviation').toUpperCase();
+    const capacityText = cell('maxCapacity');
 
     const rowErrors = [];
     if (!fullName) rowErrors.push({ row: rowNumber, field: 'Full Rotation Name', message: 'is required' });
@@ -126,6 +148,25 @@ function parseCatalogueFile(buffer) {
         field: 'Abbreviation',
         message: `must be ${MAX_ABBREVIATION_LENGTH} characters or fewer`,
       });
+    }
+
+    // A blank seat limit is "unlimited", which is the normal case, so only a
+    // cell that holds something unreadable is an error. `0` is accepted and
+    // normalised to no limit, matching the API's own rule.
+    let maxCapacity = null;
+    if (capacityText !== '') {
+      const parsed = Number(capacityText);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        rowErrors.push({
+          row: rowNumber,
+          field: HEADERS[3],
+          message: 'must be a whole number of seats, or left blank for no limit',
+        });
+      } else if (parsed > MAX_CAPACITY) {
+        rowErrors.push({ row: rowNumber, field: HEADERS[3], message: `must be ${MAX_CAPACITY} or fewer` });
+      } else {
+        maxCapacity = parsed === 0 ? null : parsed;
+      }
     }
 
     if (rowErrors.length > 0) {
@@ -146,7 +187,7 @@ function parseCatalogueFile(buffer) {
     }
     seenAbbreviations.set(abbreviation, rowNumber);
 
-    rows.push({ row: rowNumber, full_name: fullName, department, abbreviation });
+    rows.push({ row: rowNumber, full_name: fullName, department, abbreviation, max_capacity: maxCapacity });
   }
 
   if (rows.length === 0 && errors.length === 0) {
@@ -160,6 +201,7 @@ module.exports = {
   HEADERS,
   SAMPLE_ROWS,
   MAX_ABBREVIATION_LENGTH,
+  MAX_CAPACITY,
   generateCatalogueTemplate,
   parseCatalogueFile,
 };

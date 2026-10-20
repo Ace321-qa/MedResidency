@@ -48,11 +48,12 @@ export const ROSTER_COLUMNS = [
   'Expected Completion Date (YYYY-MM-DD)',
 ] as const;
 
-/** The rotation catalogue's three columns, in the order the API parses them. */
+/** The rotation catalogue's four columns, in the order the API parses them. */
 export const CATALOGUE_COLUMNS = [
   'Full Rotation Name',
   'Hospital Department',
   'Abbreviation',
+  'Max Capacity / Seat Limit',
 ] as const;
 
 /**
@@ -84,13 +85,17 @@ const FACULTY_SAMPLE_ROWS: XlsxCellValue[][] = [
  * are the same file as far as the import is concerned. They are real rotations
  * rather than placeholders: importing the untouched template gives a new
  * programme five usable rows, and importing it twice upserts the same five.
+ *
+ * Two rows carry a seat limit and three are blank, matching the server's copy:
+ * the sample has to show both that the column matters and that leaving it empty
+ * is allowed, or every coordinator reading it assumes a number is required.
  */
 const CATALOGUE_SAMPLE_ROWS: XlsxCellValue[][] = [
-  ['Continuity Clinic', 'Primary Health Care', 'PHC'],
-  ['Inpatient Medicine', 'Internal Medicine', 'MED-INP'],
-  ['General Surgery Inpatient', 'Department of Surgery', 'SURG-INP'],
-  ['Pediatrics Outpatient', 'Pediatrics', 'PEDS-OPD'],
-  ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD'],
+  ['Continuity Clinic', 'Primary Health Care', 'PHC', 8],
+  ['Inpatient Medicine', 'Internal Medicine', 'MED-INP', 3],
+  ['General Surgery Inpatient', 'Department of Surgery', 'SURG-INP', 4],
+  ['Pediatrics Outpatient', 'Pediatrics', 'PEDS-OPD', ''],
+  ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD', ''],
 ];
 
 /**

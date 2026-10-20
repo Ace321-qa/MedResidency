@@ -6,7 +6,9 @@ export { AppHeader } from './AppHeader';
 export { Banner } from './Banner';
 export { Button, IconButton, type ButtonVariant } from './Button';
 export { CalendarPicker } from './CalendarPicker';
+export { CapacityBanner, CapacityOkNote } from './CapacityBanner';
 export { Card, Divider, SectionHeader } from './Card';
+export { CheckboxField } from './CheckboxField';
 export { ChoiceGroup, type ChoiceOption } from './ChoiceGroup';
 export { ClinicDayField } from './ClinicDayField';
 export {

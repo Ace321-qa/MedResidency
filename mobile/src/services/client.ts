@@ -27,6 +27,16 @@ export class ApiError extends Error {
   readonly detail: string;
   /** Whether offering a "Try again" button makes sense. */
   readonly retryable: boolean;
+  /**
+   * The server's full JSON body, when there was one.
+   *
+   * Most screens only need `detail`, but a rejection can carry structured data
+   * the UI must act on rather than merely display — an over-capacity 409, for
+   * instance, includes the weekly occupancy verdict so the assignment modal can
+   * render the same amber or red banner it previewed. Without this the screen
+   * would have to re-request what the server already said.
+   */
+  readonly body: Record<string, unknown> | null;
 
   constructor(init: {
     kind: ApiErrorKind;
@@ -34,6 +44,7 @@ export class ApiError extends Error {
     title: string;
     detail: string;
     retryable: boolean;
+    body?: Record<string, unknown> | null;
   }) {
     super(init.detail);
     this.name = 'ApiError';
@@ -42,6 +53,7 @@ export class ApiError extends Error {
     this.title = init.title;
     this.detail = init.detail;
     this.retryable = init.retryable;
+    this.body = init.body ?? null;
   }
 }
 
@@ -109,6 +121,12 @@ export function toApiError(rejection: unknown): ApiError {
 
     const status = error.response.status;
     const serverMessage = messageFromBody(error.response.data);
+    // The raw body travels with the error so a screen can read structured
+    // detail — the capacity verdict, say — that lives beside the message.
+    const rawBody =
+      error.response.data && typeof error.response.data === 'object'
+        ? (error.response.data as unknown as Record<string, unknown>)
+        : null;
 
     if (status === 404) {
       return new ApiError({
@@ -117,6 +135,7 @@ export function toApiError(rejection: unknown): ApiError {
         title: 'Record not found',
         detail: serverMessage ?? 'The record you asked for no longer exists. Pull down to refresh the list.',
         retryable: true,
+        body: rawBody,
       });
     }
 
@@ -127,6 +146,7 @@ export function toApiError(rejection: unknown): ApiError {
         title: 'Server error',
         detail: serverMessage ?? 'MedResidency’s server reported a problem while handling this request. Try again shortly.',
         retryable: true,
+        body: rawBody,
       });
     }
 
@@ -136,6 +156,7 @@ export function toApiError(rejection: unknown): ApiError {
       title: 'Request rejected',
       detail: serverMessage ?? 'The server refused this request. Review the details and try again.',
       retryable: false,
+      body: rawBody,
     });
   }
 

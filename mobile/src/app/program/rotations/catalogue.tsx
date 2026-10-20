@@ -7,6 +7,7 @@ import {
   Banner,
   Button,
   Card,
+  CheckboxField,
   EmptyState,
   ErrorState,
   IconButton,
@@ -60,18 +61,42 @@ interface FormState {
   fullName: string;
   department: string;
   abbreviation: string;
+  /** Kept as text: an empty field means "no limit", which is not the number 0. */
+  maxCapacity: string;
+  capacityLocked: boolean;
 }
 
 interface FieldErrors {
   fullName?: string;
   department?: string;
   abbreviation?: string;
+  maxCapacity?: string;
 }
 
-const EMPTY_FORM: FormState = { fullName: '', department: '', abbreviation: '' };
+const EMPTY_FORM: FormState = {
+  fullName: '',
+  department: '',
+  abbreviation: '',
+  maxCapacity: '',
+  capacityLocked: false,
+};
 
 const MAX_NAME_LENGTH = 255;
 const MAX_ABBREVIATION_LENGTH = 50;
+/** Matches the API's own ceiling, so the form never accepts what the server won't. */
+const MAX_CAPACITY = 999;
+
+/**
+ * Render a rotation's seat limit as a compact tag.
+ *
+ * `null`/`0` is "no limit" rather than "zero seats", and the two must read
+ * differently: one means a rotation anyone may join, the other would mean nobody
+ * can, and showing them the same way would be actively misleading.
+ */
+function formatCapacity(entry: RotationCatalogueEntry): string {
+  if (entry.max_capacity === null || entry.max_capacity <= 0) return 'No seat limit';
+  return `Max Capacity: ${entry.max_capacity} seat${entry.max_capacity === 1 ? '' : 's'}`;
+}
 
 export default function RotationsCatalogueScreen() {
   const { session } = useSession();
@@ -127,6 +152,8 @@ export default function RotationsCatalogueScreen() {
       fullName: entry.full_name,
       department: entry.department,
       abbreviation: entry.abbreviation,
+      maxCapacity: entry.max_capacity === null ? '' : String(entry.max_capacity),
+      capacityLocked: entry.capacity_locked === 1,
     });
     setFieldErrors({});
     setSaveError(null);
@@ -180,6 +207,19 @@ export default function RotationsCatalogueScreen() {
       if (clash) errors.abbreviation = `Already used by “${clash.full_name}”.`;
     }
 
+    // A blank seat limit is a valid answer — it means "no limit" — so only a
+    // filled-in cell that holds something unusable is an error. A bare `0` is
+    // accepted and read as no limit, exactly as the API reads it.
+    const capacityText = form.maxCapacity.trim();
+    if (capacityText !== '') {
+      const parsed = Number(capacityText);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        errors.maxCapacity = 'Enter a whole number of seats, or leave blank for no limit.';
+      } else if (parsed > MAX_CAPACITY) {
+        errors.maxCapacity = `Enter ${MAX_CAPACITY} or fewer.`;
+      }
+    }
+
     return errors;
   }
 
@@ -194,6 +234,8 @@ export default function RotationsCatalogueScreen() {
       full_name: form.fullName.trim(),
       department: form.department.trim(),
       abbreviation: form.abbreviation.trim().toUpperCase(),
+      max_capacity: form.maxCapacity.trim() === '' ? null : Number(form.maxCapacity.trim()),
+      capacity_locked: form.capacityLocked,
     };
 
     setBusy(true);
@@ -271,7 +313,7 @@ export default function RotationsCatalogueScreen() {
         uploadLabel="Upload Excel (.xlsx)"
         upload={(file) => uploadCatalogue(file, programId)}
         onImported={() => catalogue.refresh()}
-        hint="Three columns: full rotation name, hospital department, abbreviation. Existing abbreviations are updated, not duplicated."
+        hint="Four columns: full rotation name, hospital department, abbreviation, and an optional Max Capacity / Seat Limit. Existing abbreviations are updated, not duplicated."
         style={styles.importTools}
       />
 
@@ -360,6 +402,27 @@ export default function RotationsCatalogueScreen() {
                       <Text variant="bodySmall" tone="secondary" numberOfLines={2}>
                         {entry.department}
                       </Text>
+                      <View style={styles.capacityRow}>
+                        <View
+                          style={[
+                            styles.capacityBadge,
+                            entry.max_capacity && entry.max_capacity > 0
+                              ? styles.capacityBadgeLimited
+                              : styles.capacityBadgeUnlimited,
+                          ]}
+                        >
+                          <Text variant="caption" tone="secondary">
+                            {formatCapacity(entry)}
+                          </Text>
+                        </View>
+                        {entry.capacity_locked === 1 ? (
+                          <View style={[styles.capacityBadge, styles.capacityBadgeLocked]}>
+                            <Text variant="caption" style={{ color: colors.danger }}>
+                              Locked
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
 
                     <View style={styles.colActions}>
@@ -451,6 +514,28 @@ export default function RotationsCatalogueScreen() {
             error={fieldErrors.abbreviation}
             hint="The short code shown on the rota. One per programme."
           />
+
+          <TextField
+            label="Max Capacity / Seat Limit (Optional)"
+            value={form.maxCapacity}
+            onChangeText={(value) => setForm((current) => ({ ...current, maxCapacity: value }))}
+            placeholder="Leave blank for no limit"
+            keyboardType="number-pad"
+            error={fieldErrors.maxCapacity}
+            hint="Maximum approved concurrent residents physically present per week."
+          />
+
+          {/* Locking the limit is only meaningful once there is a limit to lock,
+              so the toggle appears with the number rather than beside a blank
+              field where it would read as a switch that does nothing. */}
+          {form.maxCapacity.trim() !== '' && Number(form.maxCapacity) > 0 ? (
+            <CheckboxField
+              label="Lock this limit"
+              checked={form.capacityLocked}
+              onChange={(next) => setForm((current) => ({ ...current, capacityLocked: next }))}
+              hint="A locked limit is a hard stop: no rationale can override it."
+            />
+          ) : null}
         </View>
       </Sheet>
 
@@ -527,6 +612,31 @@ const styles = StyleSheet.create({
   colName: {
     flex: 1,
     gap: spacing.xxs,
+  },
+  capacityRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginTop: spacing.xxs,
+  },
+  capacityBadge: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 1,
+  },
+  capacityBadgeUnlimited: {
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceMuted,
+  },
+  capacityBadgeLimited: {
+    borderColor: colors.primaryBorder,
+    backgroundColor: colors.infoSurface,
+  },
+  capacityBadgeLocked: {
+    borderColor: colors.danger,
+    backgroundColor: colors.dangerSurface,
   },
   colActions: {
     width: 88,

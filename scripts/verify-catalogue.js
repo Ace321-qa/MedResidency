@@ -156,6 +156,22 @@ async function cleanup(baseline) {
   for (const id of createdIds) {
     await call('DELETE', `/rotations/catalogue/${id}`);
   }
+
+  // A baseline row is not deleted, but the template import *updates* it in place
+  // (the upsert matches on abbreviation), so its seat limit may differ from the
+  // baseline now. Restoring only the fields this run can have changed — the
+  // capacity pair — keeps a check run from silently editing the live catalogue
+  // the way it silently would if rows were compared by identity alone.
+  const currentById = new Map(current.map((row) => [row.id, row]));
+  for (const original of baseline) {
+    const now = currentById.get(original.id);
+    if (!now) continue;
+    if (Number(now.max_capacity ?? 0) !== Number(original.max_capacity ?? 0)) {
+      await call('PUT', `/rotations/catalogue/${original.id}`, {
+        max_capacity: original.max_capacity ?? null,
+      });
+    }
+  }
 }
 
 async function main() {
@@ -193,6 +209,8 @@ async function main() {
       'abbreviation',
       'is_active',
       'default_duration_weeks',
+      'max_capacity',
+      'capacity_locked',
       'created_at',
       'updated_at',
     ],
@@ -421,7 +439,14 @@ async function main() {
     blankrows: false,
   });
   equal('the headers are the ones the parser looks for', sheetRows[0], HEADERS);
-  equal('it ships the five sample rotations', sheetRows.slice(1), SAMPLE_ROWS);
+  // `raw: false` turns every cell into a string, so the numeric seat limits come
+  // back as "8"/"3"/"4" while the fixture holds numbers. Compare as text so the
+  // check is about the values shipped, not about spreadsheet cell typing.
+  equal(
+    'it ships the five sample rotations',
+    sheetRows.slice(1).map((row) => row.map((cell) => String(cell ?? ''))),
+    SAMPLE_ROWS.map((row) => row.map((cell) => String(cell ?? ''))),
+  );
 
   const clientSource = fs.readFileSync(
     path.join(__dirname, '..', 'mobile', 'src', 'services', 'excelTemplates.ts'),
@@ -433,7 +458,15 @@ async function main() {
   );
   check(
     'the mobile client ships the same sample rows',
-    SAMPLE_ROWS.flat().every((cell) => clientSource.includes(`'${cell}'`)),
+    SAMPLE_ROWS.flat()
+      .filter((cell) => String(cell ?? '').trim() !== '')
+      .every((cell) =>
+        // A quoted string cell is written with quotes; a numeric seat limit is a
+        // bare number in the client, so match it as a token rather than `'8'`.
+        typeof cell === 'number'
+          ? new RegExp(`\\b${cell}\\b`).test(clientSource)
+          : clientSource.includes(`'${cell}'`),
+      ),
   );
   check(
     'the mobile client downloads this endpoint',

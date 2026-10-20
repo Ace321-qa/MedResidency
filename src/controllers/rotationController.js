@@ -1,5 +1,7 @@
 const RotationService = require('../services/rotationService');
 const LongitudinalService = require('../services/longitudinalService');
+const RotationCapacityService = require('../services/rotationCapacityService');
+const db = require('../config/db');
 const { isCheckConstraintViolation } = require('../utils/mysqlErrors');
 
 /**
@@ -173,13 +175,73 @@ class RotationController {
       if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
         return res.status(404).json({ success: false, error: 'Invalid foreign key reference. Ensure resident_id, rotation_id, and rotation_block_id exist.' });
       }
+      // An over-capacity placement is not a malformed request: it is a valid
+      // request this department's seat limit refuses. The verdict travels with
+      // the refusal so the screen can render the same banner it previewed,
+      // rather than a generic error string with the numbers stripped out.
+      if (error.requires_exception || (error.capacity && error.capacity.status === 'BLOCKED')) {
+        return res.status(409).json({
+          success: false,
+          error: error.message,
+          capacity: error.capacity,
+          requires_exception: error.requires_exception === true,
+        });
+      }
       if (typeof error.statusCode === 'number') {
-        return res.status(error.statusCode).json({ success: false, error: error.message });
+        return res.status(error.statusCode).json({
+          success: false,
+          error: error.message,
+          capacity: error.capacity ?? undefined,
+        });
       }
       if (isCheckConstraintViolation(error)) {
         return res.status(400).json({ success: false, error: 'Invalid dates. end_date must be greater than or equal to start_date.' });
       }
       return res.status(500).json({ success: false, error: 'Assignment failed', details: error.message });
+    }
+  }
+
+  /**
+   * `POST /rotations/assignments/check-capacity` — preview an over-capacity
+   * decision before committing to it.
+   *
+   * The assignment modal needs the tier *before* the coordinator fills in a
+   * rationale, so it can decide whether to show the amber banner, the red
+   * escalation, or a hard stop at all. Deriving that on the client would mean a
+   * second implementation of the tier table; this endpoint runs the same engine
+   * the write runs, so what the screen promises and what the server enforces
+   * cannot drift.
+   */
+  static async checkCapacity(req, res) {
+    try {
+      const { rotation_id, start_date, end_date, program_id, exclude_assignment_id } = req.body ?? {};
+      if (!rotation_id || !start_date || !end_date) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: rotation_id, start_date, end_date',
+        });
+      }
+      const outcome = await RotationCapacityService.checkPlacement(db, {
+        rotation_id,
+        program_id: program_id ?? null,
+        proposal: { start_date, end_date },
+        excludeAssignmentId: exclude_assignment_id ?? null,
+      });
+      if (!outcome.rotation) {
+        return res.status(404).json({ success: false, error: `Rotation ${rotation_id} was not found` });
+      }
+      return res.status(200).json({
+        success: true,
+        data: {
+          rotation_id: outcome.rotation.id,
+          rotation_name: outcome.rotation.rotation_name,
+          department_name: outcome.rotation.department_name,
+          ...outcome.result,
+        },
+      });
+    } catch (error) {
+      console.error('Error in checkCapacity controller:', error.message);
+      return res.status(500).json({ success: false, error: 'Capacity check failed', details: error.message });
     }
   }
 

@@ -47,6 +47,14 @@ const dbStub = {
     // silently return an array where the service expects an object, which is the
     // kind of stub bug that makes a test pass while proving nothing.
     if (/^\s*SELECT/i.test(sql)) {
+      if (/FROM rotations/i.test(sql)) {
+        // No seat limit by default, so the capacity engine classifies every
+        // case in this file as GREEN and the assignment rules under test stay
+        // the only thing deciding the outcome.
+        return rotationToReturn ? [[rotationToReturn], []] : [[], []];
+      }
+      if (/FROM resident_rotation_assignments/i.test(sql)) return [[], []];
+      if (/FROM programs/i.test(sql)) return [[{ week_start_day: 'Sunday' }], []];
       const block = blockToReturn;
       return block ? [[block], []] : [[], []];
     }
@@ -55,7 +63,31 @@ const dbStub = {
   async execute(sql, params) {
     return dbStub.query(sql, params);
   },
+  /**
+   * The transaction handle `assignResidentToRotation` now takes for the
+   * capacity check. It shares this stub's `query`, so the same fixtures answer
+   * and the same `queryLog` records, and it exposes the four methods the
+   * service calls on it.
+   */
+  async getConnection() {
+    return {
+      query: (sql, params) => dbStub.query(sql, params),
+      beginTransaction: async () => {},
+      commit: async () => {},
+      rollback: async () => {},
+      release: () => {},
+    };
+  },
 };
+
+/**
+ * The rotation a capacity lookup resolves to.
+ *
+ * `null` means "no such rotation", which is how a suite that predates this
+ * feature behaves: the service then writes the assignment with no capacity
+ * decision attached, exactly as it did before seat limits existed.
+ */
+let rotationToReturn = null;
 
 require.cache[require.resolve('../src/config/db')] = {
   id: require.resolve('../src/config/db'),

@@ -1,6 +1,7 @@
 // Step 1: Import our Hostinger MySQL connection pool
 const db = require('../config/db');
 const NotificationService = require('./notificationService');
+const RotationCapacityService = require('./rotationCapacityService');
 const {
   academicYearForDate,
   academicYearMatchValues,
@@ -475,7 +476,9 @@ class RotationService {
         r.department_name,
         r.department_id,
         r.default_duration_weeks,
-        r.is_active
+        r.is_active,
+        r.max_capacity,
+        r.capacity_locked
       FROM rotations r
       WHERE r.program_id = ? AND r.is_active = TRUE
       ORDER BY r.rotation_name ASC;
@@ -529,39 +532,116 @@ class RotationService {
       }
     }
 
-    const query = `
-      INSERT INTO resident_rotation_assignments
-        (resident_id, rotation_id, rotation_block_id, start_date, end_date, assigned_weeks, assignment_type, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-    `;
-    const [result] = await db.query(query, [
-      resident_id,
-      rotation_id,
-      rotation_block_id,
-      start_date,
-      end_date,
-      Number(assigned_weeks) > 0 ? Number(assigned_weeks) : derivedWeeks ?? 4.0,
-      assignment_type || 'FULL_BLOCK',
-      notes || null,
-    ]);
+    // The departmental seat limit. The check is on *weeks*, not on date ranges:
+    // three residents may share a week, but a fourth is over capacity, and the
+    // response says which weeks are affected so the coordinator can move the
+    // posting rather than guess.
+    //
+    // The check runs inside the same transaction as the insert below, so two
+    // coordinators placing a resident simultaneously cannot both read "3 of 3"
+    // and both write a fourth. A read outside the write would make the limit a
+    // suggestion under concurrency, which is exactly when a limit matters.
+    const conn = await db.getConnection();
+    let inTransaction = false;
+    let exception = null;
+    let capacityOutcome = null;
+    try {
+      await conn.beginTransaction();
+      inTransaction = true;
 
-    // Tell the resident their rota changed. Best-effort: a notification problem
-    // must not fail an assignment the coordinator just created.
-    await NotificationService.notifyResidentSafe(resident_id, {
-      type: 'ROTATION_APPROVAL',
-      title: 'Rotation assignment confirmed',
-      message: `You have been assigned a ${(assignment_type || 'FULL_BLOCK')
-        .toLowerCase()
-        .replace(/_/g, ' ')} rotation from ${start_date} to ${end_date}.`,
-      reference_id: result.insertId,
-      reference_type: 'resident_rotation_assignments',
-    });
+      const programId = block?.program_id ?? null;
+      const check = await RotationCapacityService.checkPlacement(conn, {
+        rotation_id,
+        program_id: programId,
+        proposal: { start_date, end_date },
+        // Serialise concurrent placements into this rotation: the lock is held
+        // until the commit below, so a second coordinator's count includes this
+        // one's insert and the limit cannot be exceeded by a race.
+        forUpdate: true,
+      });
+      capacityOutcome = check.result;
 
-    return {
-      assignment_id: result.insertId,
-      ...assignmentData,
-      assigned_weeks: Number(assigned_weeks) > 0 ? Number(assigned_weeks) : derivedWeeks,
-    };
+      if (check.result && check.result.status === 'BLOCKED') {
+        const error = new Error(
+          `${check.rotation.rotation_name} has locked its seat limit at ${check.rotation.max_capacity}. ` +
+            `${check.result.message}`,
+        );
+        error.statusCode = 409;
+        error.capacity = check.result;
+        throw error;
+      }
+
+      if (check.result && check.result.requires_exception) {
+        const normalized = RotationCapacityService.normalizeException(assignmentData);
+        if (!normalized.ok) {
+          const error = new Error(normalized.errors.join('; '));
+          error.statusCode = 409;
+          error.capacity = check.result;
+          error.requires_exception = true;
+          throw error;
+        }
+        exception = normalized.values;
+      }
+
+      const query = `
+        INSERT INTO resident_rotation_assignments
+          (resident_id, rotation_id, rotation_block_id, start_date, end_date, assigned_weeks, assignment_type, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+      `;
+      const [result] = await conn.query(query, [
+        resident_id,
+        rotation_id,
+        rotation_block_id,
+        start_date,
+        end_date,
+        Number(assigned_weeks) > 0 ? Number(assigned_weeks) : derivedWeeks ?? 4.0,
+        assignment_type || 'FULL_BLOCK',
+        notes || null,
+      ]);
+
+      // The exception is written in the same transaction as the assignment it
+      // excuses. An over-capacity placement with no audit row would be a
+      // placement nobody can account for, so the two cannot be allowed to
+      // diverge.
+      if (exception && check.rotation) {
+        await RotationCapacityService.recordException(conn, {
+          assignment_id: result.insertId,
+          resident_id,
+          rotation: check.rotation,
+          block_id: rotation_block_id,
+          result: check.result,
+          exception,
+        });
+      }
+
+      await conn.commit();
+      inTransaction = false;
+
+      // Tell the resident their rota changed. Best-effort: a notification problem
+      // must not fail an assignment the coordinator just created.
+      await NotificationService.notifyResidentSafe(resident_id, {
+        type: 'ROTATION_APPROVAL',
+        title: 'Rotation assignment confirmed',
+        message: `You have been assigned a ${(assignment_type || 'FULL_BLOCK')
+          .toLowerCase()
+          .replace(/_/g, ' ')} rotation from ${start_date} to ${end_date}.`,
+        reference_id: result.insertId,
+        reference_type: 'resident_rotation_assignments',
+      });
+
+      return {
+        assignment_id: result.insertId,
+        ...assignmentData,
+        assigned_weeks: Number(assigned_weeks) > 0 ? Number(assigned_weeks) : derivedWeeks,
+        capacity: capacityOutcome,
+        exception_recorded: exception !== null,
+      };
+    } catch (error) {
+      if (inTransaction) await conn.rollback().catch(() => {});
+      throw error;
+    } finally {
+      conn.release();
+    }
   }
 
   static async getScheduleByResident(residentId) {
@@ -808,6 +888,24 @@ class RotationService {
         rot.rotation_code,
         rot.rotation_name,
         rot.department_name,
+        -- The departmental seat limit travels with the cell so the grid can show
+        -- (n/capacity) without a second request per cell. NULL means the rotation
+        -- has no limit, which is the ordinary case, not a zero.
+        rot.max_capacity AS rotation_max_capacity,
+        rot.capacity_locked AS rotation_capacity_locked,
+        -- Distinct residents standing in this rotation during this block. Counted
+        -- per block rather than per week: it is the figure a cell can show, and
+        -- it is the same number the capacity engine reports as the peak when a
+        -- block is fully held by one rotation. A partial block shows the whole
+        -- block's occupancy, which is deliberate — the tag answers "how full is
+        -- this department" at the granularity the grid draws.
+        (
+          SELECT COUNT(DISTINCT occ_rra.resident_id)
+          FROM resident_rotation_assignments occ_rra
+          WHERE occ_rra.rotation_id = rra.rotation_id
+            AND occ_rra.start_date <= rb.end_date
+            AND occ_rra.end_date >= rb.start_date
+        ) AS rotation_block_occupancy,
         rra.start_date,
         rra.end_date,
         DATE_FORMAT(rra.start_date, '%Y-%m-%d') AS assignment_start_date_iso,
