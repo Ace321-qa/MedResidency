@@ -138,6 +138,16 @@ export interface RotationBlock {
   start_date: IsoDateString;
   end_date: IsoDateString;
   /**
+   * Whether the coordinator has declared this block's schedule settled.
+   *
+   * A draft block may still be edited; only a finalized block's notices are
+   * meant to be dispatched. Optional so fixtures written before finalization
+   * existed still type-check — absent is read as "draft", which is the safe
+   * default, because treating an unmarked block as sendable is the mistake this
+   * flag exists to prevent.
+   */
+  is_finalized?: number | boolean | null;
+  /**
    * `start_date`/`end_date` re-formatted as `YYYY-MM-DD`.
    *
    * The `*_date` fields above are raw MySQL DATE values, which arrive as JS
@@ -971,6 +981,8 @@ export interface CohortGridCell {
   block_number: number;
   block_name: string;
   academic_year: string;
+  /** Whether this block's schedule has been declared settled by the coordinator. */
+  is_finalized?: number | boolean | null;
   block_start_date: IsoDateString;
   block_end_date: IsoDateString;
   /** Timezone-safe `YYYY-MM-DD` copies of the block window. */
@@ -1286,4 +1298,106 @@ export interface NotificationReadAllResult {
   message: string;
   changed: number;
   unread: number;
+}
+
+/**
+ * `POST /rotations/grid/notices/preview` and `.../send-notices`.
+ *
+ * The preview and the send share one shape deliberately: the confirmation the
+ * coordinator reads and the run they trigger are computed by the same planner,
+ * so the counts cannot drift apart between agreeing and acting.
+ */
+
+/** One receiving department the run would address. */
+export interface RotationNoticeDepartment {
+  department_name: string;
+  resident_count: number;
+  /** The `Block N` numbers this department would be written about. */
+  block_numbers: number[];
+  /**
+   * The coordinator address this department resolves to, or null when none is
+   * on file. `has_recipient` says so outright, because a notice that is stored
+   * without an address is not a notice that was delivered.
+   */
+  recipient_coord_email: string | null;
+  recipient_coord_name: string | null;
+  has_recipient: boolean;
+}
+
+/** One resident a run would touch. */
+export interface RotationNoticeResident {
+  resident_id: number;
+  resident_name: string;
+  pgy_level: string | null;
+  assignment_count: number;
+}
+
+/** The confirmation summary, before anything is written. */
+export interface RotationNoticePlan {
+  targets: unknown[];
+  departments: RotationNoticeDepartment[];
+  residents: RotationNoticeResident[];
+  block_ids: number[];
+  finalized_block_ids: number[];
+  draft_block_ids: number[];
+  template_code: string;
+}
+
+/** One stored letter from a completed dispatch. */
+export interface RotationNoticeLetter {
+  letter_id: number;
+  resident_id: number;
+  resident_name: string;
+  pgy_level: string | null;
+  rotation_assignment_id: number;
+  rotation_name: string;
+  hospital_department_name: string;
+  block_id: number;
+  block_number: number;
+  release_start_date: string | null;
+  release_end_date: string | null;
+  recipient_coord_email: string | null;
+  has_recipient: boolean;
+  sent_status: string;
+  dispatched_to_coordinator: boolean;
+  /** Tokens the merge could not fill; a letter with any is not sendable as-is. */
+  unresolved_placeholders: string[];
+}
+
+/** An assignment the run left out, with the reason it was left out. */
+export interface RotationNoticeSkip {
+  rotation_assignment_id: number;
+  resident_id: number;
+  resident_name: string;
+  reason: string;
+  existing_letter_id?: number;
+}
+
+/** The result of a dispatch. */
+export interface RotationNoticeDispatchResult {
+  program_id: number;
+  template_code: string;
+  dispatch_type: string;
+  sent_by_user_id: number | null;
+  block_ids: number[];
+  finalized_block_ids: number[];
+  draft_block_ids: number[];
+  send_to_coordinators: boolean;
+  notify_residents: boolean;
+  departments: RotationNoticeDepartment[];
+  letters: RotationNoticeLetter[];
+  letters_sent: number;
+  /** Letters stored with no address to send them to. */
+  letters_without_recipient: number;
+  residents_notified: number;
+  notifications: { notification_id: number; resident_id: number; resident_name: string }[];
+  skipped: RotationNoticeSkip[];
+}
+
+/** `PATCH /rotations/blocks/:block_id/finalized`. */
+export interface BlockFinalizationResult {
+  block_id: number;
+  block_number: number;
+  academic_year: string;
+  is_finalized: boolean;
 }

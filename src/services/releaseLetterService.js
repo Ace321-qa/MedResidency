@@ -1,6 +1,57 @@
 const db = require('../config/db');
+const NotificationService = require('./notificationService');
 
 const DEFAULT_TEMPLATE_CODE = 'STANDARD-RELEASE';
+
+/**
+ * The rotation-notice template.
+ *
+ * A second template rather than a rewording of `STANDARD-RELEASE`, because the
+ * two are different documents: the release request asks a department to let a
+ * resident *out* of service for a recurring weekly clinic, while this one
+ * confirms a placement and asks the receiving department to accept the resident
+ * *in* for a whole block. Reusing one body for both would mail a department a
+ * request it had already agreed to.
+ */
+const ROTATION_NOTICE_TEMPLATE_CODE = 'STANDARD-ROTATION-NOTICE';
+
+const ROTATION_NOTICE_SUBJECT =
+  'Rotation Placement Notice: {{RESIDENT_NAME}} ({{PGY_LEVEL}}) — {{HOSPITAL_DEPT}}';
+
+/**
+ * Deliberately written against the tokens `composeLetter` already resolves, so
+ * nothing here needs a new merge value. Every token appears at least once, which
+ * is what lets the merge's `unresolved` report stand as a real check: a token
+ * that is missing from the body can never be reported as missing.
+ */
+const ROTATION_NOTICE_BODY = `Dear {{DEPT_HEAD_NAME}},
+
+This letter confirms that Dr. {{RESIDENT_NAME}} ({{PGY_LEVEL}}), Corporate ID {{CORPORATE_ID}}, of the {{PROGRAM_NAME}} at {{INSTITUTION_NAME}}, has been scheduled to rotate in your department.
+
+Rotation: {{ROTATION_NAME}}
+Receiving department: {{HOSPITAL_DEPT}}
+Period: {{RELEASE_START_DATE}} to {{RELEASE_END_DATE}}
+Supervising faculty: {{SUPERVISING_FACULTY}}
+
+We would be grateful for your acceptance of this placement for the period above. Should the resident's supervision, accommodation or orientation require any arrangement on your side, please contact the programme office and we will make it promptly.
+
+For your records, the resident may be reached at {{RESIDENT_EMAIL}} or {{RESIDENT_MOBILE}}.
+
+Thank you for your continued support of medical residency education.
+
+Sincerely,
+{{COORDINATOR_NAME}}
+{{PROGRAM_NAME}}
+{{INSTITUTION_NAME}}
+
+Issued {{TODAYS_DATE}}`;
+
+/**
+ * How a letter row was produced. The column is written by both flows so a log
+ * entry says which action created it; the master-grid notice dispatch is the
+ * one this constant names.
+ */
+const DISPATCH_TYPE_MASTER_GRID = 'FINALIZED_MASTER_GRID';
 
 // Sent states that block a regeneration unless the caller explicitly opts in.
 // DRAFT is deliberately absent: a draft is superseded by the real dispatch.
@@ -111,6 +162,19 @@ function pickName(...values) {
     if (typeof value === 'string' && value.trim() !== '') return value.trim();
   }
   return null;
+}
+
+/**
+ * A block's human label for resident-facing copy.
+ *
+ * Derived from block metadata only — `Block 5` from the stored number, never a
+ * rotation name typed into a heading. A run spanning blocks falls back to a
+ * neutral phrase rather than naming one of them and being wrong for the rest.
+ */
+function formatBlockLabel(blockNumber) {
+  const parsed = Number(blockNumber);
+  if (!Number.isInteger(parsed) || parsed <= 0) return 'the scheduled block';
+  return `Block ${parsed}`;
 }
 
 async function tableColumns(tableName) {
@@ -274,6 +338,20 @@ async function applySchema() {
     'supervising_faculty'
   );
 
+  // Master-grid notice dispatch metadata. `dispatch_type` says which action
+  // produced the row (a single clinic release or a whole-block notice run),
+  // `recipient_coord_email` is the address the notice was addressed to — kept
+  // even when it could not be resolved, so a log entry never implies a recipient
+  // that does not exist — and `sent_by_user_id` records who clicked send.
+  await addMetadataColumn('generated_release_letters', letterNames, 'dispatch_type', 'VARCHAR(40) NULL');
+  await addMetadataColumn('generated_release_letters', letterNames, 'recipient_coord_email', 'VARCHAR(191) NULL');
+  await addMetadataColumn(
+    'generated_release_letters',
+    letterNames,
+    'sent_by_user_id',
+    'BIGINT UNSIGNED NULL'
+  );
+
   // Letters dispatched before the destination column existed already carry their
   // preceptor in `supervising_faculty`; copy it across so the first read after
   // migration resolves {{SUPERVISING_FACULTY}} for them too.
@@ -341,32 +419,56 @@ async function applySchema() {
  * first writing a template from scratch. Matched by (program_id, template_code),
  * exactly like the default-clinic seeder.
  */
+/**
+ * Seed a programme with its standard templates at boot, so a programme created
+ * after boot can generate a letter without a coordinator first writing a
+ * template from scratch. Matched by (program_id, template_code), exactly like
+ * the default-clinic seeder.
+ *
+ * Seeded per code rather than as one pair: a database that already has
+ * STANDARD-RELEASE still needs STANDARD-ROTATION-NOTICE, and re-running must
+ * add only the missing one.
+ */
+const SEEDED_TEMPLATES = [
+  {
+    code: DEFAULT_TEMPLATE_CODE,
+    name: 'Standard Department Release Request Letter',
+    subject: DEFAULT_TEMPLATE_SUBJECT,
+    body: DEFAULT_TEMPLATE_BODY,
+  },
+  {
+    code: ROTATION_NOTICE_TEMPLATE_CODE,
+    name: 'Standard Rotation Placement Notice Letter',
+    subject: ROTATION_NOTICE_SUBJECT,
+    body: ROTATION_NOTICE_BODY,
+  },
+];
+
 async function ensureDefaultTemplates() {
   const [programs] = await db.query('SELECT id FROM programs ORDER BY id ASC;');
   if (programs.length === 0) return 0;
 
+  const codes = SEEDED_TEMPLATES.map((template) => template.code);
   const [existing] = await db.query(
-    'SELECT program_id FROM release_letter_templates WHERE template_code = ?;',
-    [DEFAULT_TEMPLATE_CODE]
+    `SELECT program_id, template_code FROM release_letter_templates WHERE template_code IN (?);`,
+    [codes]
   );
-  const covered = new Set(existing.map((row) => Number(row.program_id)));
+  const covered = new Set(
+    existing.map((row) => `${row.program_id}:${row.template_code}`)
+  );
   let seeded = 0;
 
   for (const program of programs) {
-    if (covered.has(Number(program.id))) continue;
-    await db.query(
-      `INSERT INTO release_letter_templates
-         (program_id, template_code, template_name, subject_line, letter_body, is_active)
-       VALUES (?, ?, ?, ?, ?, 1);`,
-      [
-        program.id,
-        DEFAULT_TEMPLATE_CODE,
-        'Standard Department Release Request Letter',
-        DEFAULT_TEMPLATE_SUBJECT,
-        DEFAULT_TEMPLATE_BODY,
-      ]
-    );
-    seeded += 1;
+    for (const template of SEEDED_TEMPLATES) {
+      if (covered.has(`${program.id}:${template.code}`)) continue;
+      await db.query(
+        `INSERT INTO release_letter_templates
+           (program_id, template_code, template_name, subject_line, letter_body, is_active)
+         VALUES (?, ?, ?, ?, ?, 1);`,
+        [program.id, template.code, template.name, template.subject, template.body]
+      );
+      seeded += 1;
+    }
   }
   return seeded;
 }
@@ -1334,6 +1436,397 @@ class ReleaseLetterService {
     return true;
   }
 
+  /**
+   * The assignments a master-grid notice run would cover.
+   *
+   * Scoped by block or explicit window, and always by programme. "Finalized" is
+   * a property of the block, not of the assignment, so it is carried on the
+   * block row and returned here rather than filtered silently — the caller needs
+   * to see which blocks are draft to say so, not to be handed an empty list.
+   */
+  static async listNoticeTargets({ block_id, start_date, end_date, academic_year, program_id }) {
+    await ensureSchema();
+    const params = [program_id];
+    let scope = '';
+
+    if (block_id) {
+      scope = ' AND rb.id = ?';
+      params.push(block_id);
+    } else if (start_date && end_date) {
+      // Overlap, not containment: a block that straddles the window still has
+      // residents on service inside it, and omitting it would silently drop
+      // notices for exactly the weeks the coordinator was looking at.
+      scope = ' AND rra.start_date <= ? AND rra.end_date >= ?';
+      params.push(end_date, start_date);
+    } else if (academic_year) {
+      scope = ' AND rb.academic_year = ?';
+      params.push(academic_year);
+    }
+
+    const [rows] = await db.query(
+      `SELECT
+         rra.id AS rotation_assignment_id,
+         rra.resident_id,
+         CONCAT(r.first_name, ' ', r.last_name) AS resident_name,
+         re.year_in_program,
+         rot.id AS rotation_id,
+         rot.rotation_name,
+         rot.department_name,
+         rb.id AS block_id,
+         rb.block_number,
+         rb.block_name,
+         rb.academic_year,
+         rb.is_finalized,
+         DATE_FORMAT(rra.start_date, '%Y-%m-%d') AS start_date,
+         DATE_FORMAT(rra.end_date, '%Y-%m-%d') AS end_date
+       FROM resident_rotation_assignments rra
+       JOIN rotations rot ON rot.id = rra.rotation_id
+       JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id
+       JOIN residents r ON r.id = rra.resident_id
+       LEFT JOIN residency_enrollments re ON re.resident_id = rra.resident_id
+       WHERE rb.program_id = ?
+         AND rot.department_name IS NOT NULL
+         AND rot.department_name <> ''
+         ${scope}
+       ORDER BY rb.block_number ASC, rot.department_name ASC, r.last_name ASC, r.first_name ASC;`,
+      params
+    );
+
+    return rows;
+  }
+
+  /**
+   * Compose every notice a run would produce, without writing anything.
+   *
+   * Shared by the dispatch and the confirmation preview so the dialog's counts
+   * and departments are the ones the send will actually act on — a summary
+   * computed separately from the send is a summary that can lie.
+   */
+  static async planRotationNotices({ block_id, start_date, end_date, academic_year, program_id }) {
+    await ensureSchema();
+
+    const targets = await this.listNoticeTargets({
+      block_id,
+      start_date,
+      end_date,
+      academic_year,
+      program_id,
+    });
+
+    const recipients = await this.resolveDepartmentRecipients(program_id);
+    const departments = new Map();
+    const residents = new Map();
+
+    for (const target of targets) {
+      const key = String(target.department_name);
+      if (!departments.has(key)) {
+        const contact = recipients.get(key) || null;
+        departments.set(key, {
+          department_name: key,
+          resident_count: 0,
+          block_numbers: new Set(),
+          recipient_coord_email: contact ? contact.email : null,
+          recipient_coord_name: contact ? contact.name : null,
+          // Said out loud rather than left blank: a notice with no address is
+          // stored, not sent, and the coordinator should know that before
+          // dispatching a run they believe reaches the department.
+          has_recipient: Boolean(contact && contact.email),
+        });
+      }
+      const department = departments.get(key);
+      department.resident_count += 1;
+      if (target.block_number !== null && target.block_number !== undefined) {
+        department.block_numbers.add(target.block_number);
+      }
+
+      if (!residents.has(target.resident_id)) {
+        residents.set(target.resident_id, {
+          resident_id: target.resident_id,
+          resident_name: target.resident_name,
+          pgy_level: target.year_in_program ? `PGY-${target.year_in_program}` : null,
+          assignment_count: 0,
+        });
+      }
+      residents.get(target.resident_id).assignment_count += 1;
+    }
+
+    const departmentList = [...departments.values()].map((department) => ({
+      ...department,
+      block_numbers: [...department.block_numbers].sort((a, b) => a - b),
+    }));
+
+    return {
+      targets,
+      departments: departmentList,
+      residents: [...residents.values()],
+      block_ids: [...new Set(targets.map((target) => target.block_id))],
+      finalized_block_ids: [
+        ...new Set(targets.filter((target) => Number(target.is_finalized) === 1).map((t) => t.block_id)),
+      ],
+      draft_block_ids: [
+        ...new Set(targets.filter((target) => Number(target.is_finalized) !== 1).map((t) => t.block_id)),
+      ],
+      template_code: ROTATION_NOTICE_TEMPLATE_CODE,
+    };
+  }
+
+  /**
+   * Department name → the coordinator who receives that department's notices.
+   *
+   * There is no department-contact table: `rotations.department_name` is free
+   * text and nothing owns it. Rather than invent a recipient, this reads the
+   * programme's `users` rows for a coordinator whose name matches the
+   * department by prefix and who has an email on file. When nothing matches, the
+   * department is reported as having no recipient instead of being sent to a
+   * guessed address.
+   */
+  static async resolveDepartmentRecipients(programId) {
+    const contacts = new Map();
+    if (!programId) return contacts;
+    try {
+      const [rows] = await db.query(
+        `SELECT full_name, email
+         FROM users
+         WHERE role = 'COORDINATOR' AND program_id = ? AND is_active = 1
+           AND email IS NOT NULL AND email <> '';`,
+        [programId]
+      );
+      for (const row of rows) {
+        contacts.set(String(row.full_name).trim().toLowerCase(), {
+          name: row.full_name,
+          email: row.email,
+        });
+      }
+    } catch (error) {
+      // The identity table belongs to another service; its absence only means no
+      // department resolves a recipient, which `planRotationNotices` reports.
+      return contacts;
+    }
+    return contacts;
+  }
+
+  /**
+   * Dispatch rotation notices for a block or window.
+   *
+   * One letter per resident-assignment is composed from the notice template and
+   * stored in `generated_release_letters` with `dispatch_type`
+   * FINALIZED_MASTER_GRID — the log the Release Letters screen already reads, so
+   * a notice shows up wherever a coordinator expects to find letters.
+   *
+   * The letter rows commit together: a run that half-wrote would leave a
+   * department holding a notice for a placement it was never told about.
+   */
+  static async dispatchRotationNotices({
+    block_id,
+    start_date,
+    end_date,
+    academic_year,
+    program_id,
+    template_code,
+    send_to_coordinators = true,
+    notify_residents = true,
+    sent_by_user_id = null,
+    recipient_dept_head = null,
+    coordinator_name = null,
+    program_director_name = null,
+    regenerate = false,
+  } = {}) {
+    if (!program_id) {
+      const error = new Error('program_id is required to dispatch rotation notices.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!block_id && !(start_date && end_date) && !academic_year) {
+      const error = new Error(
+        'A dispatch needs a block_id, an explicit start_date and end_date, or an academic_year.'
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const plan = await this.planRotationNotices({
+      block_id,
+      start_date,
+      end_date,
+      academic_year,
+      program_id,
+    });
+
+    const code = template_code || ROTATION_NOTICE_TEMPLATE_CODE;
+    const letters = [];
+    const skipped = [];
+    const recipientsByDepartment = new Map(
+      plan.departments.map((department) => [
+        department.department_name,
+        { has_recipient: department.has_recipient, email: department.recipient_coord_email },
+      ])
+    );
+
+    for (const target of plan.targets) {
+      const recipient = recipientsByDepartment.get(String(target.department_name)) || {};
+      let composed;
+      try {
+        composed = await this.composeLetter({
+          resident_id: target.resident_id,
+          rotation_assignment_id: target.rotation_assignment_id,
+          template_code: code,
+          recipient_dept_head: recipient_dept_head || 'Head of Department',
+          hospital_department_name: target.department_name,
+          coordinator_name,
+          program_director_name,
+        });
+      } catch (error) {
+        // One unmergeable assignment must not abort the run: the rest of the
+        // block still needs its notices, and the coordinator is told which rows
+        // were left out and why.
+        skipped.push({
+          rotation_assignment_id: target.rotation_assignment_id,
+          resident_id: target.resident_id,
+          resident_name: target.resident_name,
+          reason: error.message,
+        });
+        continue;
+      }
+
+      const existing = await this.findExistingLetter(composed.anchor, composed.template.id);
+      if (existing && !regenerate) {
+        skipped.push({
+          rotation_assignment_id: target.rotation_assignment_id,
+          resident_id: target.resident_id,
+          resident_name: target.resident_name,
+          reason: `A notice already exists for this assignment (letter ${existing.id}).`,
+          existing_letter_id: existing.id,
+        });
+        continue;
+      }
+
+      letters.push({
+        target,
+        composed,
+        existing,
+        recipient_coord_email: recipient.email || null,
+        has_recipient: Boolean(recipient.has_recipient),
+      });
+    }
+
+    const connection = await db.getConnection();
+    const stored = [];
+    const notified = [];
+
+    try {
+      await connection.beginTransaction();
+
+      for (const letter of letters) {
+        const { target, composed } = letter;
+        const [result] = await connection.query(
+          `INSERT INTO generated_release_letters
+             (rotation_assignment_id, resident_id, template_id,
+              recipient_dept_head, hospital_department_name, supervising_faculty,
+              destination_supervising_faculty, coordinator_name, program_director_name,
+              letter_issue_date, generated_letter_body, sent_status, sent_at,
+              dispatch_type, recipient_coord_email, sent_by_user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENT', ?, ?, ?, ?);`,
+          [
+            composed.anchor.rotation_assignment_id,
+            target.resident_id,
+            composed.template.id,
+            recipient_dept_head || 'Head of Department',
+            composed.hospitalDept,
+            composed.destinationFaculty,
+            composed.destinationFaculty,
+            composed.coordinatorName,
+            composed.programDirectorName,
+            composed.issueDate,
+            composed.body.merged,
+            new Date(),
+            DISPATCH_TYPE_MASTER_GRID,
+            letter.recipient_coord_email,
+            sent_by_user_id,
+          ]
+        );
+
+        if (letter.existing) {
+          await connection.query(
+            `UPDATE generated_release_letters SET sent_status = 'REVOKED' WHERE id = ?;`,
+            [letter.existing.id]
+          );
+        }
+
+        stored.push({
+          letter_id: result.insertId,
+          resident_id: target.resident_id,
+          resident_name: target.resident_name,
+          pgy_level: target.year_in_program ? `PGY-${target.year_in_program}` : null,
+          rotation_assignment_id: composed.anchor.rotation_assignment_id,
+          rotation_name: target.rotation_name,
+          hospital_department_name: composed.hospitalDept,
+          block_id: target.block_id,
+          block_number: target.block_number,
+          release_start_date: composed.values.RELEASE_START_DATE,
+          release_end_date: composed.values.RELEASE_END_DATE,
+          recipient_coord_email: letter.recipient_coord_email,
+          has_recipient: letter.has_recipient,
+          sent_status: 'SENT',
+          dispatched_to_coordinator: send_to_coordinators,
+          unresolved_placeholders: composed.unresolved,
+        });
+      }
+
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    // Resident notifications are deliberately outside the transaction: they are
+    // a courtesy to the resident, and a notification that could not be written
+    // must never roll back letters a department has already been sent. They go
+    // through `notifyResidentSafe` for the same reason every other trigger does.
+    if (notify_residents) {
+      for (const letter of stored) {
+        const blockLabel = formatBlockLabel(letter.block_number);
+        const notification = await NotificationService.notifyResidentSafe(letter.resident_id, {
+          title: 'New Rotation Schedule Finalized',
+          message:
+            `You have been assigned to ${letter.rotation_name} in ` +
+            `${letter.hospital_department_name} for ${blockLabel} ` +
+            `(${letter.release_start_date} to ${letter.release_end_date}).`,
+          type: 'ROTATION_APPROVAL',
+          reference_id: letter.rotation_assignment_id,
+          reference_type: 'ROTATION_ASSIGNMENT',
+        });
+        if (notification) {
+          notified.push({
+            notification_id: notification.id,
+            resident_id: letter.resident_id,
+            resident_name: letter.resident_name,
+          });
+        }
+      }
+    }
+
+    return {
+      program_id,
+      template_code: code,
+      dispatch_type: DISPATCH_TYPE_MASTER_GRID,
+      sent_by_user_id,
+      block_ids: plan.block_ids,
+      finalized_block_ids: plan.finalized_block_ids,
+      draft_block_ids: plan.draft_block_ids,
+      send_to_coordinators,
+      notify_residents,
+      departments: plan.departments,
+      letters: stored,
+      letters_sent: stored.length,
+      letters_without_recipient: stored.filter((letter) => !letter.has_recipient).length,
+      residents_notified: notified.length,
+      notifications: notified,
+      skipped,
+    };
+  }
+
   static async ensureReady() {
     await ensureSchema();
     await ensureDefaultTemplates();
@@ -1342,5 +1835,7 @@ class ReleaseLetterService {
 
 ReleaseLetterService.SENT_STATUSES = SENT_STATUSES;
 ReleaseLetterService.DEFAULT_TEMPLATE_CODE = DEFAULT_TEMPLATE_CODE;
+ReleaseLetterService.ROTATION_NOTICE_TEMPLATE_CODE = ROTATION_NOTICE_TEMPLATE_CODE;
+ReleaseLetterService.DISPATCH_TYPE_MASTER_GRID = DISPATCH_TYPE_MASTER_GRID;
 
 module.exports = ReleaseLetterService;

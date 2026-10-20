@@ -4,6 +4,7 @@ import type {
   ApiResponse,
   BlockCalendar,
   BlockCalendarWindow,
+  BlockFinalizationResult,
   CalendarDateString,
   CapacityVerdict,
   CohortGridCell,
@@ -13,6 +14,8 @@ import type {
   RotationAssignment, RotationAssignmentDetail,
   RotationBlock,
   RotationDefinition,
+  RotationNoticeDispatchResult,
+  RotationNoticePlan,
 } from '../types/api';
 
 /** Rotation blocks, rotation catalogue and resident assignments. */
@@ -44,6 +47,59 @@ export async function fetchRotations(programId: number): Promise<RotationDefinit
   const path = `/rotations${queryString({ program_id: programId })}`;
   const response = await request<ApiListResponse<RotationDefinition>>(path);
   return response.data ?? [];
+}
+
+/**
+ * `PATCH /rotations/blocks/:block_id/finalized` — declare a block settled (or
+ * return it to draft) so its notices may be dispatched.
+ */
+export async function setBlockFinalized(
+  blockId: number,
+  isFinalized: boolean,
+): Promise<BlockFinalizationResult> {
+  const response = await request<ApiResponse<BlockFinalizationResult>>(
+    `/rotations/blocks/${blockId}/finalized`,
+    { method: 'PATCH', data: { is_finalized: isFinalized } },
+  );
+  return response.data;
+}
+
+/** The confirmation summary for a notice run. Reads only; writes nothing. */
+export async function previewRotationNotices(payload: {
+  program_id: number;
+  block_id?: number;
+  start_date?: string;
+  end_date?: string;
+  academic_year?: string;
+}): Promise<RotationNoticePlan> {
+  const response = await request<ApiResponse<RotationNoticePlan>>('/rotations/grid/notices/preview', {
+    method: 'POST',
+    data: payload,
+  });
+  return response.data;
+}
+
+/** Dispatch the notices: one stored letter per assignment, plus resident notifications. */
+export async function sendRotationNotices(payload: {
+  program_id: number;
+  block_id?: number;
+  start_date?: string;
+  end_date?: string;
+  academic_year?: string;
+  template_code?: string;
+  send_to_coordinators?: boolean;
+  notify_residents?: boolean;
+  sent_by_user_id?: number;
+  recipient_dept_head?: string;
+  coordinator_name?: string;
+  program_director_name?: string;
+  regenerate?: boolean;
+}): Promise<RotationNoticeDispatchResult> {
+  const response = await request<ApiResponse<RotationNoticeDispatchResult>>(
+    '/rotations/grid/send-notices',
+    { method: 'POST', data: payload },
+  );
+  return response.data;
 }
 
 /** The rotation schedule for one resident, ordered by start date. */

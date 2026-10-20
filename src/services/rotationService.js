@@ -27,6 +27,13 @@ const {
 const STANDARD_BLOCKS_PER_YEAR = 13;
 
 /**
+ * Memoises the `rotation_blocks.is_finalized` DDL for the process lifetime.
+ * Declared at module scope (not on the class) so it survives across calls
+ * without being re-created per request; cleared on failure by the ensure method.
+ */
+let finalizedColumnPromise = null;
+
+/**
  * Scalar subquery yielding one display identifier per resident.
  *
  * `resident_identifiers.is_primary` is set on every identifier row in this
@@ -199,6 +206,7 @@ class RotationService {
    * @param {number} programId - e.g., 1 for Family Medicine
    */
   static async getBlocksByProgram(programId, academicYear = null) {
+    await this.ensureFinalizedColumn();
     let query = `
       SELECT 
         b.id AS block_id,
@@ -210,6 +218,7 @@ class RotationService {
         b.block_name,
         b.start_date,
         b.end_date,
+        b.is_finalized,
         DATE_FORMAT(b.start_date, '%Y-%m-%d') AS start_date_iso,
         DATE_FORMAT(b.end_date, '%Y-%m-%d') AS end_date_iso,
         DAYNAME(b.start_date) AS actual_start_day,
@@ -761,6 +770,93 @@ class RotationService {
     return { affectedRows: result.affectedRows };
   }
 
+  /**
+   * Add `rotation_blocks.is_finalized` when it is missing.
+   *
+   * Finalization is the coordinator's declaration that a block's schedule is
+   * settled and may be sent out. It lives on the block rather than on each
+   * assignment because a block is finalized as a unit — a half-finalized block
+   * has no meaning, and a per-assignment flag would let one resident be notified
+   * for a schedule still being edited around them.
+   *
+   * Memoised, and awaited by every reader that selects the column: those selects
+   * name `is_finalized` unconditionally, so the DDL has to have converged before
+   * they run or a fresh database answers "Unknown column" instead of an empty
+   * grid. The promise is cleared on failure so a transient error can retry.
+   */
+  static async ensureFinalizedColumn() {
+    if (!finalizedColumnPromise) {
+      finalizedColumnPromise = (async () => {
+        const [columns] = await db.query(
+          `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND TABLE_NAME = 'rotation_blocks'
+             AND COLUMN_NAME = 'is_finalized'`
+        );
+        if (columns.length === 0) {
+          await db.query(
+            `ALTER TABLE rotation_blocks
+             ADD COLUMN is_finalized TINYINT(1) NOT NULL DEFAULT 0 AFTER end_date`
+          );
+        }
+        return true;
+      })().catch((error) => {
+        finalizedColumnPromise = null;
+        throw error;
+      });
+    }
+    return finalizedColumnPromise;
+  }
+
+  /**
+   * Mark a block finalized (or return it to draft).
+   *
+   * Returns the stored state rather than the requested one, so a caller that
+   * asks for what is already true still reports the truth. Finalizing an empty
+   * block is refused: there is nothing to send, and a finalized-empty block
+   * would let the grid show a "ready" state for a block nobody has scheduled.
+   */
+  static async setBlockFinalized(blockId, isFinalized) {
+    await this.ensureFinalizedColumn();
+
+    const block = await this.getBlockById(blockId);
+    if (!block) {
+      const error = new Error(`Rotation block ${blockId} was not found.`);
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const next = isFinalized ? 1 : 0;
+
+    if (next === 1) {
+      const [counts] = await db.query(
+        `SELECT COUNT(*) AS assignment_count
+         FROM resident_rotation_assignments
+         WHERE rotation_block_id = ?;`,
+        [blockId]
+      );
+      if (Number(counts[0]?.assignment_count ?? 0) === 0) {
+        const error = new Error(
+          'This block has no assignments yet, so there is nothing to finalize.'
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+
+    await db.query(
+      `UPDATE rotation_blocks SET is_finalized = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;`,
+      [next, blockId]
+    );
+
+    return {
+      block_id: Number(blockId),
+      block_number: block.block_number,
+      academic_year: block.academic_year,
+      is_finalized: next === 1,
+    };
+  }
+
   static async getAssignments(filters = {}) {
     const { program_id, academic_year, block_id, pgy_level } = filters;
     let query = `
@@ -856,6 +952,7 @@ class RotationService {
   static async getCohortGrid(filters = {}) {
     const { program_id, pgy_level, resident_status } = filters;
     const yearValues = academicYearMatchValues(filters.academic_year);
+    await this.ensureFinalizedColumn();
 
     let query = `
       SELECT
@@ -876,6 +973,7 @@ class RotationService {
         rb.block_number,
         rb.block_name,
         rb.academic_year,
+        rb.is_finalized,
         rb.start_date AS block_start_date,
         rb.end_date AS block_end_date,
         DATE_FORMAT(rb.start_date, '%Y-%m-%d') AS block_start_date_iso,

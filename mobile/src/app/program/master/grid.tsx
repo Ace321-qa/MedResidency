@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
-import { CalendarX, Download, Plus } from 'lucide-react-native';
+import { CalendarX, Download, Mail, Plus } from 'lucide-react-native';
 import { router, useFocusEffect } from 'expo-router';
 
 import {
@@ -18,6 +18,7 @@ import {
   ExportMenu,
   ImportTools,
   MatrixTable,
+  NoticeDispatchSheet,
   ScheduleReportView,
   Screen,
   SegmentedControl,
@@ -32,7 +33,8 @@ import {
   type SelectOption,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
-import { createAssignment, checkAssignmentCapacity, fetchCohortGrid, fetchRotations } from '../../../services/rotations';
+import { createAssignment, checkAssignmentCapacity, fetchCohortGrid, fetchRotations, sendRotationNotices, setBlockFinalized } from '../../../services/rotations';
+import { describeDispatchOutcome } from '../../../utils/noticeDispatch';
 import { downloadScheduleReport } from '../../../services/scheduleExport';
 import { buildMasterGridReport } from '../../../utils/scheduleExport';
 import { uploadMasterGrid } from '../../../services/excelTemplates';
@@ -47,7 +49,11 @@ import { capacityOptionLabel, isAtCapacity } from '../../../utils/capacityRules'
 import { rotationBadgeLabel, rotationCellDescription, rotationPalette } from '../../../utils/rotationBadges';
 import { colors, radius, spacing } from '../../../theme';
 import { ApiError } from '../../../services/client';
-import type { CapacityVerdict, CohortGridCell } from '../../../types/api';
+import type {
+  CapacityVerdict,
+  CohortGridCell,
+  RotationNoticeDispatchResult,
+} from '../../../types/api';
 import { goBack } from '../../../navigation/back';
 import {
   blockWindow,
@@ -85,8 +91,16 @@ interface GridBlock {
   block_number: number;
   // `block_name` is deliberately not carried: it is coordinator-typed free text
   // and must never reach a column header (see `buildMasterGridBlockColumns`).
+  // The notice-dispatch labels follow the same rule, naming blocks by their
+  // number only, so a typed name can never leak into a heading or a letter.
   startDateIso: string | null;
   endDateIso: string | null;
+  /**
+   * Whether the coordinator has declared this block settled, so its notices may
+   * be sent. Carried here (unlike `block_name`) because it is a stored state
+   * flag rather than free text, and the grid already has the block row in hand.
+   */
+  is_finalized: number | boolean | null;
 }
 
 interface GridResident {
@@ -175,6 +189,16 @@ export default function MasterGridScreen() {
   const [saving, setSaving] = useState(false);
   /** Bumped to re-run the seat-limit check after a failed one. */
   const [capacityAttempt, setCapacityAttempt] = useState(0);
+
+  // --- Notice dispatch -----------------------------------------------------
+  // The block whose notices are being prepared. Defaults to the earliest block
+  // that has assignments, so the action is usable immediately without the
+  // coordinator first having to pick a block they can see on screen anyway.
+  const [noticeBlockNumber, setNoticeBlockNumber] = useState<number | null>(null);
+  const [noticeSheetOpen, setNoticeSheetOpen] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
+  const [noticeError, setNoticeError] = useState<string | null>(null);
+  const [noticeOutcome, setNoticeOutcome] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const reportRef = useRef<View>(null);
 
@@ -227,6 +251,7 @@ export default function MasterGridScreen() {
           block_number: row.block_number,
           startDateIso: row.block_start_date_iso,
           endDateIso: row.block_end_date_iso,
+          is_finalized: row.is_finalized ?? 0,
         });
       }
       if (!residentMap.has(row.resident_id)) {
@@ -567,6 +592,76 @@ export default function MasterGridScreen() {
     return counts;
   }, [grid.data, selectedBlockId]);
 
+  // --- Notice dispatch derivations ----------------------------------------
+
+  /**
+   * The blocks that actually have assignments, which are the only ones worth
+   * offering as a dispatch scope. A block with nothing scheduled has nothing to
+   * send, and listing it would invite a coordinator to pick a dead scope.
+   */
+  const blocksWithAssignments = useMemo(() => {
+    const ids = new Set<number>();
+    for (const row of grid.data ?? []) {
+      if (row.assignment_id !== null && row.assignment_id !== undefined && row.block_number) {
+        ids.add(row.block_number);
+      }
+    }
+    return BLOCK_NUMBERS.filter((number) => ids.has(number));
+  }, [grid.data]);
+
+  /**
+   * The block the notice sheet acts on: the coordinator's choice when they have
+   * made one, otherwise the earliest block that has anything in it. Deriving a
+   * default rather than storing one means the sheet is usable the moment the
+   * grid loads, and follows the data if the year changes underneath.
+   */
+  const noticeBlock = useMemo(() => {
+    const candidate =
+      noticeBlockNumber !== null && blocksWithAssignments.includes(noticeBlockNumber)
+        ? noticeBlockNumber
+        : blocksWithAssignments[0] ?? null;
+    if (candidate === null) return null;
+    return blocksByNumber.get(candidate) ?? null;
+  }, [noticeBlockNumber, blocksWithAssignments, blocksByNumber]);
+
+  const noticeBlockId = noticeBlock?.block_id ?? null;
+  const noticeIsFinalized = Number(noticeBlock?.is_finalized ?? 0) === 1;
+
+  async function handleToggleFinalized() {
+    if (!noticeBlockId) return;
+    setNoticeError(null);
+    setFinalizing(true);
+    try {
+      await setBlockFinalized(noticeBlockId, !noticeIsFinalized);
+      grid.refresh();
+    } catch (thrown) {
+      setNoticeError(thrown instanceof Error ? thrown.message : 'The block could not be updated.');
+    } finally {
+      setFinalizing(false);
+    }
+  }
+
+  async function handleSendNotices(options: {
+    sendToCoordinators: boolean;
+    notifyResidents: boolean;
+  }): Promise<RotationNoticeDispatchResult> {
+    if (!noticeBlockId) {
+      throw new Error('Choose a block with assignments before sending notices.');
+    }
+    const result = await sendRotationNotices({
+      program_id: programId,
+      block_id: noticeBlockId,
+      send_to_coordinators: options.sendToCoordinators,
+      notify_residents: options.notifyResidents,
+    });
+    // The grid is refreshed after the sheet closes rather than here: the run
+    // writes letters, not assignments, so nothing on screen changes until the
+    // coordinator leaves — and a refresh mid-sheet would reload the summary
+    // they are still reading.
+    setNoticeOutcome(describeDispatchOutcome(result));
+    return result;
+  }
+
   const gridPreview = useMemo(() => {
     const first = blockWindow(1, startDate);
     const last = blockWindow(BLOCK_NUMBERS[BLOCK_NUMBERS.length - 1], startDate);
@@ -658,6 +753,83 @@ export default function MasterGridScreen() {
         accessibilityHint="Download this master rotation grid as Excel, PDF, Word or an image."
       />
 
+      {/* Notice dispatch. The block picker, the finalize toggle and the send
+          button sit together because they are one workflow in that order: pick
+          the block, declare it settled, then announce it. Sending is gated on
+          finalization rather than merely warned about, so a schedule still being
+          edited cannot be announced to another hospital by a stray tap. */}
+      {blocksWithAssignments.length > 0 ? (
+        <Card>
+          <View style={styles.noticeBlock}>
+            <Text variant="label" uppercase tone="secondary">
+              Notice letters
+            </Text>
+
+            <SheetSelectField
+              label="Block"
+              value={noticeBlock ? String(noticeBlock.block_number) : ''}
+              onChange={(value) => setNoticeBlockNumber(Number(value))}
+              placeholder="Choose a block"
+              options={blocksWithAssignments.map((number) => {
+                const block = blocksByNumber.get(number);
+                const finalized = Number(block?.is_finalized ?? 0) === 1;
+                return {
+                  value: String(number),
+                  label: `Block ${number}${finalized ? ' (finalized)' : ' (draft)'}`,
+                };
+              })}
+              hint="Blocks listed here have scheduled assignments. Only a finalized block can be sent."
+            />
+
+            {noticeBlock ? (
+              <View style={styles.noticeActions}>
+                <StatusBadge
+                  label={noticeIsFinalized ? 'Finalized' : 'Draft'}
+                  tone={noticeIsFinalized ? 'success' : 'warning'}
+                />
+                <Text variant="bodySmall" tone="secondary">
+                  {noticeIsFinalized
+                    ? 'This block is settled and its notices may be sent.'
+                    : 'Finalize this block before its notices can be sent.'}
+                </Text>
+              </View>
+            ) : null}
+
+            <Button
+              label={noticeIsFinalized ? 'Return to draft' : 'Finalize block'}
+              variant={noticeIsFinalized ? 'outline' : 'secondary'}
+              loading={finalizing}
+              disabled={!noticeBlockId || finalizing}
+              onPress={() => void handleToggleFinalized()}
+              accessibilityHint={
+                noticeIsFinalized
+                  ? 'Reopen the block for scheduling edits.'
+                  : 'Declare this block settled so its notices can be sent.'
+              }
+            />
+
+            <Button
+              label="Send Notice Letter"
+              icon={Mail}
+              disabled={!noticeBlockId || !noticeIsFinalized}
+              onPress={() => {
+                setNoticeOutcome(null);
+                setNoticeSheetOpen(true);
+              }}
+              accessibilityHint="Generate rotation notice letters for this block's departments and notify the residents involved."
+            />
+
+            {noticeError ? (
+              <Banner tone="danger" title="Notice dispatch failed" message={noticeError} />
+            ) : null}
+
+            {noticeOutcome ? (
+              <Banner tone="success" title="Notices sent" message={noticeOutcome} />
+            ) : null}
+          </View>
+        </Card>
+      ) : null}
+
       <ImportTools
         template="master"
         uploadLabel="Upload Master Rotation Grid"
@@ -741,6 +913,26 @@ export default function MasterGridScreen() {
       <View style={styles.hiddenReport} pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
         <ScheduleReportView ref={reportRef} report={reportModel} />
       </View>
+
+      <NoticeDispatchSheet
+        visible={noticeSheetOpen}
+        onClose={() => {
+          setNoticeSheetOpen(false);
+          grid.refresh();
+        }}
+        programId={programId}
+        scope={{ blockId: noticeBlockId ?? undefined }}
+        scopeLabel={
+          noticeBlock
+            ? `Block ${noticeBlock.block_number} · ${academicYear}`
+            : academicYear
+        }
+        onPreviewTemplate={() => {
+          setNoticeSheetOpen(false);
+          router.push('/program/(tabs)/letters');
+        }}
+        onConfirm={handleSendNotices}
+      />
 
       <Sheet
         visible={assignSheetOpen}
@@ -1295,6 +1487,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceMuted,
+  },
+  /** The notice-dispatch controls, grouped as the ordered workflow they are. */
+  noticeBlock: {
+    gap: spacing.sm,
+  },
+  noticeActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    flexWrap: 'wrap',
   },
   footnote: {
     marginTop: spacing.sm,

@@ -1,6 +1,7 @@
 const RotationService = require('../services/rotationService');
 const LongitudinalService = require('../services/longitudinalService');
 const RotationCapacityService = require('../services/rotationCapacityService');
+const ReleaseLetterService = require('../services/releaseLetterService');
 const db = require('../config/db');
 const { isCheckConstraintViolation } = require('../utils/mysqlErrors');
 
@@ -345,6 +346,124 @@ class RotationController {
       return res
         .status(500)
         .json({ success: false, error: 'Failed to fetch longitudinal matrix', details: error.message });
+    }
+  }
+
+  /**
+   * `PATCH /rotations/blocks/:block_id/finalized`
+   *
+   * Marks a block's schedule settled so its notices may be dispatched, or
+   * returns it to draft. The body is `{ is_finalized: boolean }`.
+   */
+  static async setBlockFinalized(req, res) {
+    try {
+      const { block_id } = req.params;
+      if (req.body?.is_finalized === undefined) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Missing required body field: is_finalized' });
+      }
+      const data = await RotationService.setBlockFinalized(block_id, Boolean(req.body.is_finalized));
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode === 404) {
+        return res.status(404).json({ success: false, error: error.message });
+      }
+      if (error.statusCode === 409) {
+        return res.status(409).json({ success: false, error: error.message });
+      }
+      console.error('Error in setBlockFinalized controller:', error.message);
+      return res
+        .status(500)
+        .json({ success: false, error: 'Failed to update finalization', details: error.message });
+    }
+  }
+
+  /**
+   * `POST /rotations/grid/notices/preview`
+   *
+   * The confirmation summary: how many residents and departments a dispatch
+   * would cover, and which blocks are still draft. Reads only.
+   */
+  static async previewRotationNotices(req, res) {
+    try {
+      const { program_id, block_id, start_date, end_date, academic_year } = req.body ?? {};
+      if (!program_id) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Missing required body field: program_id' });
+      }
+      const data = await ReleaseLetterService.planRotationNotices({
+        program_id,
+        block_id,
+        start_date,
+        end_date,
+        academic_year,
+      });
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      console.error('Error in previewRotationNotices controller:', error.message);
+      return res
+        .status(500)
+        .json({ success: false, error: 'Failed to preview notices', details: error.message });
+    }
+  }
+
+  /**
+   * `POST /rotations/grid/send-notices`
+   *
+   * Dispatch the rotation notices for a block or window: one stored letter per
+   * assignment plus a resident notification each.
+   */
+  static async sendRotationNotices(req, res) {
+    try {
+      const {
+        program_id,
+        block_id,
+        start_date,
+        end_date,
+        academic_year,
+        template_code,
+        send_to_coordinators,
+        notify_residents,
+        sent_by_user_id,
+        recipient_dept_head,
+        coordinator_name,
+        program_director_name,
+        regenerate,
+      } = req.body ?? {};
+
+      if (!program_id) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Missing required body field: program_id' });
+      }
+
+      const data = await ReleaseLetterService.dispatchRotationNotices({
+        program_id,
+        block_id,
+        start_date,
+        end_date,
+        academic_year,
+        template_code,
+        send_to_coordinators: send_to_coordinators !== false,
+        notify_residents: notify_residents !== false,
+        sent_by_user_id,
+        recipient_dept_head,
+        coordinator_name,
+        program_director_name,
+        regenerate: Boolean(regenerate),
+      });
+
+      return res.status(201).json({ success: true, data });
+    } catch (error) {
+      if (error.statusCode === 400) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+      console.error('Error in sendRotationNotices controller:', error.message);
+      return res
+        .status(500)
+        .json({ success: false, error: 'Failed to dispatch notices', details: error.message });
     }
   }
 }
