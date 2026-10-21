@@ -41,6 +41,7 @@ interface NoticeDispatchSheetProps {
   /** Shown in the subtitle so the coordinator knows which view they are sending from. */
   scopeLabel: string;
   onPreviewTemplate?: () => void;
+  onManageContacts?: () => void;
   onConfirm: (options: { sendToCoordinators: boolean; notifyResidents: boolean }) => Promise<RotationNoticeDispatchResult>;
 }
 
@@ -51,6 +52,7 @@ export function NoticeDispatchSheet({
   scope,
   scopeLabel,
   onPreviewTemplate,
+  onManageContacts,
   onConfirm,
 }: NoticeDispatchSheetProps) {
   const [sendToCoordinators, setSendToCoordinators] = useState(true);
@@ -184,11 +186,19 @@ export function NoticeDispatchSheet({
             {noRecipient.length > 0 ? (
               <View style={[styles.banner, styles.warning]}>
                 <Text variant="bodySmall" style={styles.warningText}>
-                  {noRecipient.length === 1
-                    ? '1 department has no coordinator address on file.'
-                    : `${noRecipient.length} departments have no coordinator address on file.`}{' '}
-                  Their letters are still generated and logged, but nothing is delivered to them.
+                  💡 **Missing Coordinator Contact Emails** — {noRecipient.length} hospital department
+                  {noRecipient.length === 1 ? '' : 's'} do not have a coordinator email on file. Letters will
+                  still be generated and recorded in the Release Letters log, but email dispatches cannot be
+                  delivered until contacts are added.
                 </Text>
+                {onPreviewTemplate ? (
+                  <Button
+                    label="[ ⚙️ Manage Department Contacts ]"
+                    variant="outline"
+                    onPress={onManageContacts ?? onPreviewTemplate}
+                    accessibilityHint="Open the department contacts management area."
+                  />
+                ) : null}
               </View>
             ) : null}
 

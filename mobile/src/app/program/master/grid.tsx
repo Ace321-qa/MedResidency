@@ -935,6 +935,10 @@ export default function MasterGridScreen() {
           setNoticeSheetOpen(false);
           router.push('/program/(tabs)/letters');
         }}
+        onManageContacts={() => {
+          setNoticeSheetOpen(false);
+          router.push('/program/rotations/catalogue');
+        }}
         onConfirm={handleSendNotices}
       />
 
