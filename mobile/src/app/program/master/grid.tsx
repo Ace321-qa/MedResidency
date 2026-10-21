@@ -21,6 +21,7 @@ import {
   NoticeDispatchSheet,
   ScheduleReportView,
   Screen,
+  SectionHeader,
   SegmentedControl,
   SelectField,
   Sheet,
@@ -112,10 +113,73 @@ interface GridResident {
   pgy_level: number | null;
   contact_number: string | null;
   program_code: string;
+  /**
+   * Cross-programme provenance, carried through from the cohort API. An
+   * external resident is enrolled elsewhere and only rotates *into* this
+   * programme's departments, so they are rendered in their own section with a
+   * home-programme badge rather than mixed into the enrolled cohort.
+   */
+  is_external: boolean;
+  home_program_name: string | null;
+  home_program_code: string | null;
 }
 
 function cellKey(residentId: number, blockId: number): string {
   return `${residentId}:${blockId}`;
+}
+
+/**
+ * Split matrix rows into this programme's own residents and visiting ones.
+ *
+ * The two cohorts share one row builder — every cell's logic is identical
+ * regardless of who enrols the resident — so the partition happens after the
+ * fact, keyed on the frozen row's `resident-<id>` id (stable by construction
+ * where this is the only writer of that key). Enrolled residents keep the
+ * leading table; visitors render under their own section header.
+ */
+function splitRowsByExternal(
+  rows: MatrixRowDef[],
+  externalIds: ReadonlySet<number>,
+): { internal: MatrixRowDef[]; external: MatrixRowDef[] } {
+  const internal: MatrixRowDef[] = [];
+  const external: MatrixRowDef[] = [];
+  for (const row of rows) {
+    const residentId = Number(String(row.key).replace('resident-', ''));
+    (externalIds.has(residentId) ? external : internal).push(row);
+  }
+  return { internal, external };
+}
+
+/**
+ * The frozen "resident" cell, shared by the block and the weekly table.
+ *
+ * A visiting resident carries an extra badge naming their home programme
+ * ("FM Resident") beside their PGY level — what marks them as external even
+ * when the two sections of the grid are scrolled apart. Module-scope so the
+ * row memos below do not depend on a function recreated each render.
+ */
+function residentFrozenHeader(resident: GridResident) {
+  const dayCode = academicDayForPgy(resident.pgy_level);
+  const academicDay = ACADEMIC_DAYS.find((day) => day.code === dayCode);
+  return (
+    <View style={styles.residentCell}>
+      <Text variant="bodySmall" numberOfLines={1}>
+        {resident.resident_name}
+      </Text>
+      <View style={styles.residentMeta}>
+        <Text variant="caption" tone="secondary">
+          {resident.pgy_level ? `PGY-${resident.pgy_level}` : 'PGY —'}
+        </Text>
+        {academicDay ? <StatusBadge label={academicDay.label} tone={rowAccentTone(dayCode)} /> : null}
+        {resident.is_external ? (
+          <StatusBadge label={`${resident.home_program_code ?? 'EXT'} Resident`} tone="info" />
+        ) : null}
+      </View>
+      <Text variant="caption" tone="muted" numberOfLines={1}>
+        {resident.contact_number ?? 'No mobile recorded'}
+      </Text>
+    </View>
+  );
 }
 
 function assignedRows(cell: CohortGridCell[] | undefined): CohortGridCell[] {
@@ -264,6 +328,9 @@ export default function MasterGridScreen() {
           pgy_level: row.pgy_level,
           contact_number: row.contact_number,
           program_code: row.program_code,
+          is_external: row.is_external === true || Number(row.is_external) === 1,
+          home_program_name: row.home_program_name ?? null,
+          home_program_code: row.home_program_code ?? null,
         });
       }
       const key = cellKey(row.resident_id, row.block_id);
@@ -314,7 +381,6 @@ export default function MasterGridScreen() {
     () =>
       residents.map((resident) => {
         const dayCode = academicDayForPgy(resident.pgy_level);
-        const academicDay = ACADEMIC_DAYS.find((day) => day.code === dayCode);
         const cells: Record<string, React.ReactNode> = {};
 
         for (const blockNumber of BLOCK_NUMBERS) {
@@ -341,22 +407,7 @@ export default function MasterGridScreen() {
             dayCode === 'PGY1' ? 'info' : dayCode === 'PGY2' ? 'success' : dayCode === 'PGY3' ? 'warning' : undefined,
           onPress: () => router.push(`/program/resident/${resident.resident_id}`),
           accessibilityLabel: `${resident.resident_name}, ${resident.pgy_level ? `PGY-${resident.pgy_level}` : 'PGY not set'}. Opens the resident.`,
-          frozenContent: (
-            <View style={styles.residentCell}>
-              <Text variant="bodySmall" numberOfLines={1}>
-                {resident.resident_name}
-              </Text>
-              <View style={styles.residentMeta}>
-                <Text variant="caption" tone="secondary">
-                  {resident.pgy_level ? `PGY-${resident.pgy_level}` : 'PGY —'}
-                </Text>
-                {academicDay ? <StatusBadge label={academicDay.label} tone={rowAccentTone(dayCode)} /> : null}
-              </View>
-              <Text variant="caption" tone="muted" numberOfLines={1}>
-                {resident.contact_number ?? 'No mobile recorded'}
-              </Text>
-            </View>
-          ),
+          frozenContent: residentFrozenHeader(resident),
           cells,
         };
       }),
@@ -367,7 +418,6 @@ export default function MasterGridScreen() {
     () =>
       residents.map((resident) => {
         const dayCode = academicDayForPgy(resident.pgy_level);
-        const academicDay = ACADEMIC_DAYS.find((day) => day.code === dayCode);
         const cells: Record<string, React.ReactNode> = {};
 
         const weekToAssignments = new Map<number, CohortGridCell[]>();
@@ -405,26 +455,31 @@ export default function MasterGridScreen() {
             dayCode === 'PGY1' ? 'info' : dayCode === 'PGY2' ? 'success' : dayCode === 'PGY3' ? 'warning' : undefined,
           onPress: () => router.push(`/program/resident/${resident.resident_id}`),
           accessibilityLabel: `${resident.resident_name}, ${resident.pgy_level ? `PGY-${resident.pgy_level}` : 'PGY not set'}. Opens the resident.`,
-          frozenContent: (
-            <View style={styles.residentCell}>
-              <Text variant="bodySmall" numberOfLines={1}>
-                {resident.resident_name}
-              </Text>
-              <View style={styles.residentMeta}>
-                <Text variant="caption" tone="secondary">
-                  {resident.pgy_level ? `PGY-${resident.pgy_level}` : 'PGY —'}
-                </Text>
-                {academicDay ? <StatusBadge label={academicDay.label} tone={rowAccentTone(dayCode)} /> : null}
-              </View>
-              <Text variant="caption" tone="muted" numberOfLines={1}>
-                {resident.contact_number ?? 'No mobile recorded'}
-              </Text>
-            </View>
-          ),
+          frozenContent: residentFrozenHeader(resident),
           cells,
         };
       }),
     [residents, blocksByNumber, cellFor, startDate],
+  );
+
+  // The grid draws two cohorts from one row build: residents enrolled in this
+  // programme, and residents visiting from another (a Family Medicine PGY-5
+  // on this programme's wards for Block 6). The split is by row key, so the
+  // enrolled table keeps leading and the visitors render under their own
+  // section header without any of the cell logic branching on provenance.
+  const externalResidentIds = useMemo(
+    () => new Set(residents.filter((resident) => resident.is_external).map((resident) => resident.resident_id)),
+    [residents],
+  );
+
+  const blockRows = useMemo(
+    () => splitRowsByExternal(rowsBlock, externalResidentIds),
+    [rowsBlock, externalResidentIds],
+  );
+
+  const weeklyRows = useMemo(
+    () => splitRowsByExternal(rowsWeekly, externalResidentIds),
+    [rowsWeekly, externalResidentIds],
   );
 
   /**
@@ -706,7 +761,7 @@ export default function MasterGridScreen() {
     <Screen onRefresh={grid.refresh} refreshing={grid.isRefreshing}>
       <AppHeader
         title="Master Rotation Grid"
-        subtitle={`${formatAcademicYearForHeader(academicYear)} · ${residents.length} resident${residents.length === 1 ? '' : 's'}`}
+        subtitle={`${formatAcademicYearForHeader(academicYear)} · ${residents.length} resident${residents.length === 1 ? '' : 's'}${externalResidentIds.size > 0 ? ` · ${externalResidentIds.size} visiting` : ''}`}
         onBack={goBack}
       />
 
@@ -869,30 +924,68 @@ export default function MasterGridScreen() {
         </Card>
       ) : hasContent ? (
         <>
-          {viewMode === 'block' ? (
-            <MatrixTable
-              columns={columnsBlock}
-              rows={rowsBlock}
-              frozenHeader="Resident"
-              frozenWidth={220}
-              rowHeight={58}
-              autoHeight
-              emptyTitle="No blocks to map"
-              emptyMessage="Create an academic block to start building the rota."
-            />
-          ) : (
-            <MatrixTable
-              columns={columnsWeekly}
-              rows={rowsWeekly}
-              columnGroups={weeklyGroups}
-              frozenHeader="Resident"
-              frozenWidth={220}
-              rowHeight={58}
-              autoHeight
-              emptyTitle="No weeks to map"
-              emptyMessage="Create an academic block to start building the rota."
-            />
-          )}
+          {blockRows.internal.length > 0 ? (
+            viewMode === 'block' ? (
+              <MatrixTable
+                columns={columnsBlock}
+                rows={blockRows.internal}
+                frozenHeader="Resident"
+                frozenWidth={220}
+                rowHeight={58}
+                autoHeight
+                emptyTitle="No blocks to map"
+                emptyMessage="Create an academic block to start building the rota."
+              />
+            ) : (
+              <MatrixTable
+                columns={columnsWeekly}
+                rows={weeklyRows.internal}
+                columnGroups={weeklyGroups}
+                frozenHeader="Resident"
+                frozenWidth={220}
+                rowHeight={58}
+                autoHeight
+                emptyTitle="No weeks to map"
+                emptyMessage="Create an academic block to start building the rota."
+              />
+            )
+          ) : null}
+
+          {/* External / visiting residents — same columns, own section, so a
+              coordinator hosting a partner programme's resident sees them
+              without mistaking them for their own cohort. */}
+          {externalResidentIds.size > 0 ? (
+            <>
+              <SectionHeader
+                title="External / Visiting Residents"
+                trailing={`${externalResidentIds.size} from partner programmes`}
+              />
+              {viewMode === 'block' ? (
+                <MatrixTable
+                  columns={columnsBlock}
+                  rows={blockRows.external}
+                  frozenHeader="Resident"
+                  frozenWidth={220}
+                  rowHeight={58}
+                  autoHeight
+                  emptyTitle="No visitors to map"
+                  emptyMessage="Residents from partner programmes appear here once assigned to a block."
+                />
+              ) : (
+                <MatrixTable
+                  columns={columnsWeekly}
+                  rows={weeklyRows.external}
+                  columnGroups={weeklyGroups}
+                  frozenHeader="Resident"
+                  frozenWidth={220}
+                  rowHeight={58}
+                  autoHeight
+                  emptyTitle="No visitors to map"
+                  emptyMessage="Residents from partner programmes appear here once assigned to a block."
+                />
+              )}
+            </>
+          ) : null}
 
           {missingBlocks.length > 0 ? (
         <Text variant="caption" tone="muted" style={styles.footnote}>

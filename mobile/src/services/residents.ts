@@ -8,6 +8,7 @@ import type {
   Resident,
   ResidentListItem,
   UpdateResidentPayload,
+  VisitingResident,
 } from '../types/api';
 
 /**
@@ -27,6 +28,20 @@ export async function fetchResidentList(params?: {
   })}`;
 
   const response = await request<ApiListResponse<ResidentListItem>>(path);
+  return response.data ?? [];
+}
+
+/**
+ * `GET /residents/external?program_id=` — visiting residents from other
+ * programmes who rotate into this one's departments.
+ *
+ * The Roster's "Visiting / External" tab reads this: one row per person with
+ * their home-programme identity and the departments, rotations and dates of
+ * their postings here.
+ */
+export async function fetchExternalResidents(programId: number): Promise<VisitingResident[]> {
+  const path = `/residents/external${queryString({ program_id: programId })}`;
+  const response = await request<ApiListResponse<VisitingResident>>(path);
   return response.data ?? [];
 }
 

@@ -117,6 +117,45 @@ async function getAllResidents(req, res) {
 }
 
 /**
+ * GET /api/v1/residents/external?program_id=X
+ * Visiting / external residents — people enrolled in another programme who
+ * rotate into this one's departments. The Roster's third tab reads this.
+ *
+ * Mounted before '/:id' in the router so "external" is never parsed as a
+ * resident id.
+ */
+async function getExternalResidents(req, res) {
+  try {
+    const { program_id, limit, offset } = req.query;
+    if (!program_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required query parameter: program_id',
+      });
+    }
+
+    const residents = await residentService.getExternalResidents({
+      program_id: Number(program_id),
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: residents.length,
+      data: residents,
+    });
+  } catch (error) {
+    console.error('Error fetching visiting residents:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch visiting residents',
+      error: error.message,
+    });
+  }
+}
+
+/**
  * GET /api/v1/residents/:id
  * Controller to retrieve single resident profile
  */
@@ -381,6 +420,7 @@ async function removeEnrollment(req, res) {
 module.exports = {
   onboardResident,
   getAllResidents,
+  getExternalResidents,
   getResidentById,
   updateResident,
   deleteResident,

@@ -92,6 +92,133 @@ const EMAIL_IDENTIFIER_SQL = `
     LIMIT 1
   )`;
 
+/**
+ * The shared column list of the two cohort-grid queries.
+ *
+ * The enrolled cohort is driven from `rotation_blocks` (every resident/block
+ * cell exists even when nothing is assigned) while the visiting cohort is
+ * driven from `resident_rotation_assignments` (a visitor only has cells where
+ * they actually rotate), but both project the same aliases — `re` is the
+ * resident's relevant enrolment, `rb` the block, `rra`/`rot` the assignment and
+ * its rotation — so one list serves both and the two row shapes can never
+ * drift apart.
+ *
+ * `is_external` falls out of the aliases themselves: the enrolled query joins
+ * `re` on `re.program_id = rb.program_id` (so the expression is 0), while the
+ * visiting query joins the resident's *home* enrolment in another programme
+ * (so it is 1). The home-programme name and code ride along for the badge the
+ * grid draws beside a visitor, e.g. "FM Resident".
+ */
+const COHORT_GRID_COLUMNS = `
+        re.resident_id,
+        CONCAT(r.first_name, ' ', COALESCE(r.middle_initial, ''), ' ', r.last_name) AS resident_name,
+        r.first_name,
+        r.last_name,
+        ${PRIMARY_IDENTIFIER_SQL} AS employee_id,
+        ${CONTACT_IDENTIFIER_SQL} AS contact_number,
+        ${EMAIL_IDENTIFIER_SQL} AS email,
+        re.year_in_program AS pgy_level,
+        re.resident_status,
+        -- Cross-programme provenance. Derived from the aliases above rather
+        -- than hardcoded per query, so both rows answer it the same way.
+        (re.program_id <> rb.program_id) AS is_external,
+        re.program_id AS home_program_id,
+        rb.program_id AS host_program_id,
+        (
+          SELECT hp.program_name FROM programs hp WHERE hp.id = re.program_id
+        ) AS home_program_name,
+        (
+          SELECT hp.program_code FROM programs hp WHERE hp.id = re.program_id
+        ) AS home_program_code,
+        rb.program_id,
+        p.program_code,
+        p.specialty_name,
+        p.week_start_day,
+        rb.id AS block_id,
+        rb.block_number,
+        rb.block_name,
+        rb.academic_year,
+        rb.is_finalized,
+        rb.start_date AS block_start_date,
+        rb.end_date AS block_end_date,
+        DATE_FORMAT(rb.start_date, '%Y-%m-%d') AS block_start_date_iso,
+        DATE_FORMAT(rb.end_date, '%Y-%m-%d') AS block_end_date_iso,
+        DAYNAME(rb.start_date) AS block_start_day,
+        DAYNAME(rb.end_date) AS block_end_day,
+        DATEDIFF(rb.end_date, rb.start_date) + 1 AS block_days,
+        rra.id AS assignment_id,
+        rra.rotation_id,
+        rot.rotation_code,
+        rot.rotation_name,
+        rot.department_name,
+        -- The departmental seat limit travels with the cell so the grid can show
+        -- (n/capacity) without a second request per cell. NULL means the rotation
+        -- has no limit, which is the ordinary case, not a zero.
+        rot.max_capacity AS rotation_max_capacity,
+        rot.capacity_locked AS rotation_capacity_locked,
+        -- Distinct residents standing in this rotation during this block. Counted
+        -- per block rather than per week: it is the figure a cell can show, and
+        -- it is the same number the capacity engine reports as the peak when a
+        -- block is fully held by one rotation. A partial block shows the whole
+        -- block's occupancy, which is deliberate — the tag answers "how full is
+        -- this department" at the granularity the grid draws.
+        (
+          SELECT COUNT(DISTINCT occ_rra.resident_id)
+          FROM resident_rotation_assignments occ_rra
+          WHERE occ_rra.rotation_id = rra.rotation_id
+            AND occ_rra.start_date <= rb.end_date
+            AND occ_rra.end_date >= rb.start_date
+        ) AS rotation_block_occupancy,
+        rra.start_date,
+        rra.end_date,
+        DATE_FORMAT(rra.start_date, '%Y-%m-%d') AS assignment_start_date_iso,
+        DATE_FORMAT(rra.end_date, '%Y-%m-%d') AS assignment_end_date_iso,
+        rra.assigned_weeks,
+        rra.assignment_type,
+        rra.notes,
+        (rra.id IS NOT NULL) AS is_assigned,
+        (
+          SELECT COUNT(*)
+          FROM resident_rotation_assignments cell_rra
+          WHERE cell_rra.resident_id = re.resident_id
+            AND cell_rra.rotation_block_id = rb.id
+        ) AS assignment_count,
+        -- Concurrent clinic releases. A clinic request is approved without
+        -- touching the block rota (it is a release, not a posting), so the grid
+        -- is where the two are put back together: the hospital rotation stays in
+        -- the cell and each clinic session rides alongside it as a notation.
+        -- Aggregated one row per cell because the badge is part of the cell, and
+        -- a per-release row would multiply the resident's block across the grid.
+        (
+          SELECT GROUP_CONCAT(
+                   CONCAT_WS('|', COALESCE(lct.clinic_code, ''), COALESCE(rla.day_of_week, ''), COALESCE(rla.clinic_days, ''), COALESCE(rla.summary, ''))
+                   ORDER BY rla.start_date ASC, rla.id ASC SEPARATOR ';;'
+                 )
+          FROM resident_longitudinal_assignments rla
+          LEFT JOIN longitudinal_clinic_types lct ON lct.id = rla.clinic_type_id
+          WHERE rla.resident_id = re.resident_id
+            AND rla.is_active = 1
+            AND rla.start_date <= rb.end_date
+            AND rla.end_date >= rb.start_date
+        ) AS concurrent_clinics,
+        (
+          SELECT COUNT(*)
+          FROM resident_longitudinal_assignments cell_rla
+          WHERE cell_rla.resident_id = re.resident_id
+            AND cell_rla.is_active = 1
+            AND cell_rla.start_date <= rb.end_date
+            AND cell_rla.end_date >= rb.start_date
+        ) AS clinic_count,
+        (
+          SELECT COUNT(*)
+          FROM resident_longitudinal_assignments cell_rla
+          WHERE cell_rla.resident_id = re.resident_id
+            AND cell_rla.source_request_id IS NULL
+            AND cell_rla.is_active = 1
+            AND cell_rla.start_date <= rb.end_date
+            AND cell_rla.end_date >= rb.start_date
+        ) AS standing_clinic_count`;
+
 /** The three-letter form of a weekday, for a badge that has ~110pt to fit in. */
 const SHORT_DAY = {
   SUNDAY: 'Sun',
@@ -959,6 +1086,14 @@ class RotationService {
    * `DESC` is both correct and cheaper than the string-matching `CASE ... LIKE`
    * a free-text PGY column would require.
    *
+   * Cross-programme rows ride along as well: residents *enrolled elsewhere*
+   * who hold an assignment in one of this programme's rotations come back
+   * flagged `is_external`, with `home_program_name` / `home_program_code`
+   * carrying the programme they belong to. The receiving programme's grid
+   * therefore shows the visitors it has to host (e.g. a Family Medicine
+   * PGY-5 on Internal Medicine Inpatient Wards for Block 6), and the client
+   * can draw them in a separate section with a home-programme badge.
+   *
    * @param {object} filters
    * @param {string} filters.academic_year - Required. Accepts "2026/2027" or "2026-2027".
    * @param {number} [filters.program_id]  - Restrict to one program.
@@ -970,105 +1105,16 @@ class RotationService {
     const yearValues = academicYearMatchValues(filters.academic_year);
     await this.ensureFinalizedColumn();
 
+    // One year list, reused by both queries below.
+    const yearInList = yearValues.map(() => '?').join(', ');
+
+    // --- The enrolled cohort ---------------------------------------------
+    // Driven from `rotation_blocks`: every resident/block cell is present even
+    // when nothing is assigned yet, because that missing assignment is the
+    // signal the grid exists to surface.
     let query = `
       SELECT
-        re.resident_id,
-        CONCAT(r.first_name, ' ', COALESCE(r.middle_initial, ''), ' ', r.last_name) AS resident_name,
-        r.first_name,
-        r.last_name,
-        ${PRIMARY_IDENTIFIER_SQL} AS employee_id,
-        ${CONTACT_IDENTIFIER_SQL} AS contact_number,
-        ${EMAIL_IDENTIFIER_SQL} AS email,
-        re.year_in_program AS pgy_level,
-        re.resident_status,
-        rb.program_id,
-        p.program_code,
-        p.specialty_name,
-        p.week_start_day,
-        rb.id AS block_id,
-        rb.block_number,
-        rb.block_name,
-        rb.academic_year,
-        rb.is_finalized,
-        rb.start_date AS block_start_date,
-        rb.end_date AS block_end_date,
-        DATE_FORMAT(rb.start_date, '%Y-%m-%d') AS block_start_date_iso,
-        DATE_FORMAT(rb.end_date, '%Y-%m-%d') AS block_end_date_iso,
-        DAYNAME(rb.start_date) AS block_start_day,
-        DAYNAME(rb.end_date) AS block_end_day,
-        DATEDIFF(rb.end_date, rb.start_date) + 1 AS block_days,
-        rra.id AS assignment_id,
-        rra.rotation_id,
-        rot.rotation_code,
-        rot.rotation_name,
-        rot.department_name,
-        -- The departmental seat limit travels with the cell so the grid can show
-        -- (n/capacity) without a second request per cell. NULL means the rotation
-        -- has no limit, which is the ordinary case, not a zero.
-        rot.max_capacity AS rotation_max_capacity,
-        rot.capacity_locked AS rotation_capacity_locked,
-        -- Distinct residents standing in this rotation during this block. Counted
-        -- per block rather than per week: it is the figure a cell can show, and
-        -- it is the same number the capacity engine reports as the peak when a
-        -- block is fully held by one rotation. A partial block shows the whole
-        -- block's occupancy, which is deliberate — the tag answers "how full is
-        -- this department" at the granularity the grid draws.
-        (
-          SELECT COUNT(DISTINCT occ_rra.resident_id)
-          FROM resident_rotation_assignments occ_rra
-          WHERE occ_rra.rotation_id = rra.rotation_id
-            AND occ_rra.start_date <= rb.end_date
-            AND occ_rra.end_date >= rb.start_date
-        ) AS rotation_block_occupancy,
-        rra.start_date,
-        rra.end_date,
-        DATE_FORMAT(rra.start_date, '%Y-%m-%d') AS assignment_start_date_iso,
-        DATE_FORMAT(rra.end_date, '%Y-%m-%d') AS assignment_end_date_iso,
-        rra.assigned_weeks,
-        rra.assignment_type,
-        rra.notes,
-        (rra.id IS NOT NULL) AS is_assigned,
-        (
-          SELECT COUNT(*)
-          FROM resident_rotation_assignments cell_rra
-          WHERE cell_rra.resident_id = re.resident_id
-            AND cell_rra.rotation_block_id = rb.id
-        ) AS assignment_count,
-        -- Concurrent clinic releases. A clinic request is approved without
-        -- touching the block rota (it is a release, not a posting), so the grid
-        -- is where the two are put back together: the hospital rotation stays in
-        -- the cell and each clinic session rides alongside it as a notation.
-        -- Aggregated one row per cell because the badge is part of the cell, and
-        -- a per-release row would multiply the resident's block across the grid.
-        (
-          SELECT GROUP_CONCAT(
-                   CONCAT_WS('|', COALESCE(lct.clinic_code, ''), COALESCE(rla.day_of_week, ''), COALESCE(rla.clinic_days, ''), COALESCE(rla.summary, ''))
-                   ORDER BY rla.start_date ASC, rla.id ASC SEPARATOR ';;'
-                 )
-          FROM resident_longitudinal_assignments rla
-          LEFT JOIN longitudinal_clinic_types lct ON lct.id = rla.clinic_type_id
-          WHERE rla.resident_id = re.resident_id
-            AND rla.is_active = 1
-            AND rla.start_date <= rb.end_date
-            AND rla.end_date >= rb.start_date
-        ) AS concurrent_clinics,
-        (
-          SELECT COUNT(*)
-          FROM resident_longitudinal_assignments cell_rla
-          WHERE cell_rla.resident_id = re.resident_id
-            AND cell_rla.is_active = 1
-            AND cell_rla.start_date <= rb.end_date
-            AND cell_rla.end_date >= rb.start_date
-        ) AS clinic_count,
-        (
-          SELECT COUNT(*)
-          FROM resident_longitudinal_assignments cell_rla
-          WHERE cell_rla.resident_id = re.resident_id
-            AND cell_rla.source_request_id IS NULL
-            AND cell_rla.is_active = 1
-            AND cell_rla.start_date <= rb.end_date
-            AND cell_rla.end_date >= rb.start_date
-        ) AS standing_clinic_count
+        ${COHORT_GRID_COLUMNS}
       FROM rotation_blocks rb
       JOIN programs p ON p.id = rb.program_id
       JOIN residency_enrollments re ON re.program_id = rb.program_id
@@ -1076,7 +1122,7 @@ class RotationService {
       LEFT JOIN resident_rotation_assignments rra
         ON rra.resident_id = re.resident_id AND rra.rotation_block_id = rb.id
       LEFT JOIN rotations rot ON rot.id = rra.rotation_id
-      WHERE rb.academic_year IN (${yearValues.map(() => '?').join(', ')})
+      WHERE rb.academic_year IN (${yearInList})
     `;
     const params = [...yearValues];
 
@@ -1085,8 +1131,56 @@ class RotationService {
     if (resident_status) { query += ' AND re.resident_status = ?'; params.push(resident_status); }
     query += ' ORDER BY rb.block_number ASC, re.year_in_program DESC, r.first_name ASC, r.last_name ASC';
 
-    const [rows] = await db.query(query, params);
-    return rows.map((row) => ({ ...row, ...decodeClinicColumns(row) }));
+    const [internalRows] = await db.query(query, params);
+
+    // --- The visiting cohort ---------------------------------------------
+    // Cross-programme visibility: a Family Medicine resident posted onto an
+    // Internal Medicine ward must appear on the *receiving* programme's grid
+    // for that block, or the department that has to host them cannot see them
+    // at all. Driven from the assignments themselves — a visitor only has
+    // cells where they actually rotate — but projected through the exact same
+    // column list, so both row shapes are interchangeable to a client.
+    //
+    // A visitor is a resident whose *home* enrolment (their most recent
+    // enrolment outside this programme) points elsewhere, who holds at least
+    // one assignment in a rotation this programme owns, inside a block this
+    // programme owns. Residents who also hold an enrolment in the viewing
+    // programme are excluded — they are already in the cohort above, and
+    // showing them twice would double their rows.
+    let externalRows = [];
+    if (program_id) {
+      let externalQuery = `
+        SELECT
+          ${COHORT_GRID_COLUMNS}
+        FROM resident_rotation_assignments rra
+        JOIN rotations rot ON rot.id = rra.rotation_id AND rot.program_id = ?
+        JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id AND rb.program_id = rot.program_id
+        JOIN programs p ON p.id = rb.program_id
+        JOIN residents r ON r.id = rra.resident_id
+        JOIN residency_enrollments re ON re.id = (
+          SELECT re2.id FROM residency_enrollments re2
+          WHERE re2.resident_id = r.id AND re2.program_id <> rb.program_id
+          ORDER BY re2.created_at DESC, re2.id DESC
+          LIMIT 1
+        )
+        WHERE rb.academic_year IN (${yearInList})
+          AND NOT EXISTS (
+            SELECT 1 FROM residency_enrollments re_int
+            WHERE re_int.resident_id = r.id AND re_int.program_id = rb.program_id
+          )
+      `;
+      const externalParams = [program_id, ...yearValues];
+      // The cohort filter applies to the visitor's *home* PGY level, so a
+      // PGY-5 filter surfaces the FM PGY-5 rotating in, not a phantom level.
+      if (pgy_level) { externalQuery += ' AND re.year_in_program = ?'; externalParams.push(pgy_level); }
+      if (resident_status) { externalQuery += ' AND re.resident_status = ?'; externalParams.push(resident_status); }
+      externalQuery += ' ORDER BY rb.block_number ASC, re.year_in_program DESC, r.first_name ASC, r.last_name ASC';
+
+      const [rows] = await db.query(externalQuery, externalParams);
+      externalRows = rows;
+    }
+
+    return [...internalRows, ...externalRows].map((row) => ({ ...row, ...decodeClinicColumns(row) }));
   }
 
   /**

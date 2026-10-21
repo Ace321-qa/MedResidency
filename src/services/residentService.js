@@ -155,6 +155,110 @@ async function getAllResidents({ program_id, limit = 50, offset = 0 } = {}) {
 }
 
 /**
+ * Visiting / external residents: people enrolled in *another* programme who
+ * hold at least one rotation assignment inside this programme's departments.
+ *
+ * One row per person — the grain the roster card wants — with their home
+ * programme identity and an aggregate of where they rotate here: the distinct
+ * department and rotation names, the assignment count, and the full date span
+ * of their postings (15 Nov – 12 Dec 2026 for a single Block 6 visit).
+ *
+ * The home enrolment is reached through a correlated subquery rather than a
+ * plain JOIN, for the same reason the grid uses one: a resident may hold
+ * several enrolments, and a join would multiply the roster. A resident who
+ * *also* holds an enrolment in this programme is excluded — they belong on the
+ * enrolled roster, not the visiting one, and appearing on both would be a
+ * double count.
+ *
+ * @param {object} input
+ * @param {number} input.program_id - The receiving programme (required).
+ * @param {number} [input.limit]
+ * @param {number} [input.offset]
+ */
+async function getExternalResidents({ program_id, limit = 500, offset = 0 } = {}) {
+  if (!program_id) {
+    const error = new Error('program_id is required to list visiting residents.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const query = `
+    SELECT
+      r.id AS resident_id,
+      r.first_name,
+      r.middle_initial,
+      r.last_name,
+      re.year_in_program AS pgy_level,
+      re.resident_status,
+      hp.id AS home_program_id,
+      hp.program_code AS home_program_code,
+      hp.program_name AS home_program_name,
+      hp.specialty_name AS home_specialty_name,
+      (
+        SELECT ri.identifier_value
+        FROM resident_identifiers ri
+        WHERE ri.resident_id = r.id AND ri.identifier_type = 'CORPORATE_ID'
+        ORDER BY ri.is_primary DESC, ri.id ASC
+        LIMIT 1
+      ) AS corporate_id,
+      (
+        SELECT ri.identifier_value
+        FROM resident_identifiers ri
+        WHERE ri.resident_id = r.id AND ri.identifier_type = 'EMAIL'
+        ORDER BY ri.is_primary DESC, ri.id ASC
+        LIMIT 1
+      ) AS email,
+      (
+        SELECT ri.identifier_value
+        FROM resident_identifiers ri
+        WHERE ri.resident_id = r.id AND ri.identifier_type = 'MOBILE'
+        ORDER BY ri.is_primary DESC, ri.id ASC
+        LIMIT 1
+      ) AS mobile,
+      COUNT(DISTINCT rra.id) AS assignment_count,
+      GROUP_CONCAT(DISTINCT rot.department_name
+        ORDER BY rot.department_name SEPARATOR ' · ') AS department_names,
+      GROUP_CONCAT(DISTINCT rot.rotation_name
+        ORDER BY rot.rotation_name SEPARATOR ' · ') AS rotation_names,
+      DATE_FORMAT(MIN(rra.start_date), '%Y-%m-%d') AS assignment_start_date,
+      DATE_FORMAT(MAX(rra.end_date), '%Y-%m-%d') AS assignment_end_date
+    FROM resident_rotation_assignments rra
+    JOIN rotations rot ON rot.id = rra.rotation_id
+    JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id
+    JOIN residents r ON r.id = rra.resident_id
+    JOIN residency_enrollments re ON re.id = (
+      SELECT re2.id FROM residency_enrollments re2
+      WHERE re2.resident_id = r.id AND re2.program_id <> ?
+      ORDER BY re2.created_at DESC, re2.id DESC
+      LIMIT 1
+    )
+    JOIN programs hp ON hp.id = re.program_id
+    WHERE rb.program_id = ?
+      AND rot.program_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM residency_enrollments re_int
+        WHERE re_int.resident_id = r.id AND re_int.program_id = ?
+      )
+    GROUP BY
+      r.id, r.first_name, r.middle_initial, r.last_name,
+      re.year_in_program, re.resident_status,
+      hp.id, hp.program_code, hp.program_name, hp.specialty_name
+    ORDER BY r.last_name ASC, r.first_name ASC
+    LIMIT ? OFFSET ?;
+  `;
+
+  const [rows] = await pool.query(query, [
+    program_id,
+    program_id,
+    program_id,
+    program_id,
+    Number(limit),
+    Number(offset),
+  ]);
+  return rows;
+}
+
+/**
  * Identifier types the edit form may write, keyed by the API field that carries
  * them. Email and mobile have no columns on `residents`; they live beside the
  * corporate id in `resident_identifiers`, which is also where the onboarding
@@ -420,6 +524,7 @@ async function getResidentById(residentId) {
 module.exports = {
   onboardResident,
   getAllResidents,
+  getExternalResidents,
   getResidentById,
   updateResident,
   deleteResident,

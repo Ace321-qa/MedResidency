@@ -159,15 +159,19 @@ class ReleaseLetterController {
   }
 
   /**
-   * GET /api/v1/letters?program_id=X
+   * GET /api/v1/letters?program_id=X&box=sent|received
    *
-   * The coordinator's dispatch log: every letter merged from the programme's
-   * templates, addressed to hospital department heads.
+   * Two boxes over the same rows. `box=sent` (the default) is the dispatch
+   * log: every letter merged from this programme's templates. `box=received`
+   * is the inbox: letters other programmes dispatched that concern this
+   * programme — a partner's rotation notice for a visiting resident, or a
+   * letter about one of our own residents issued elsewhere.
    */
   static async listLetters(req, res) {
     try {
       const program_id = req.query.program_id ? Number(req.query.program_id) : null;
-      const letters = await ReleaseLetterService.getLettersByProgram(program_id);
+      const box = req.query.box === 'received' ? 'received' : 'sent';
+      const letters = await ReleaseLetterService.getLettersByProgram(program_id, { box });
 
       return res.status(200).json({
         success: true,

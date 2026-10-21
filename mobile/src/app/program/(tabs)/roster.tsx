@@ -3,31 +3,35 @@ import { Pressable, StyleSheet, View } from 'react-native';
 
 import {
   AppHeader,
+  ExternalRosterTab,
   FacultyRosterTab,
   ResidentRosterTab,
   Screen,
   Text,
 } from '../../../components';
 import { useApiResource, useSession } from '../../../hooks';
-import { fetchResidentList } from '../../../services/residents';
+import { fetchExternalResidents, fetchResidentList } from '../../../services/residents';
 import { fetchFacultySupervisors } from '../../../services/longitudinal';
 import { colors, radius, spacing } from '../../../theme';
 
 /**
  * Roster — the Roster Management Hub for the signed-in programme.
  *
- * One section, two rosters: the *residents* enrolled in the programme and the
- * *faculty preceptors* who supervise them. They are kept on one screen rather
- * than two tabs in the tab bar because they answer the same question — "who is
- * part of this programme" — and a coordinator maintaining the teaching faculty
- * expects to find them beside the people they teach.
+ * One section, three rosters: the *residents* enrolled in the programme, the
+ * *visiting* residents enrolled elsewhere who rotate into this programme's
+ * departments, and the *faculty preceptors* who supervise them. They are kept
+ * on one screen rather than separate tabs in the tab bar because they answer
+ * the same question — "who is part of this programme" — and a coordinator
+ * maintaining the teaching faculty expects to find them beside the people they
+ * teach. Visitors sit between the two because they are people, but people this
+ * programme hosts rather than owns.
  *
- * The hub owns the two fetches and the count badges, so a tab's list and its
+ * The hub owns the three fetches and the count badges, so a tab's list and its
  * badge can never disagree about how many people are on that roster. Each tab
  * component owns its own search, filters, forms and mutations.
  */
 
-type RosterTab = 'residents' | 'faculty';
+type RosterTab = 'residents' | 'visiting' | 'faculty';
 
 export default function RosterScreen() {
   const { session } = useSession();
@@ -37,6 +41,13 @@ export default function RosterScreen() {
 
   const residents = useApiResource(
     () => fetchResidentList({ programId, limit: 100 }),
+    [programId],
+  );
+  // Visitors: enrolled in a partner programme, rotating into this one's
+  // departments. Fetched even though they are not ours to manage — a
+  // hosting coordinator has to be able to see who is on their wards.
+  const visiting = useApiResource(
+    () => fetchExternalResidents(programId),
     [programId],
   );
   // Faculty are pulled with inactive people included so the tab can filter to
@@ -67,22 +78,29 @@ export default function RosterScreen() {
         countLabel: 'residents',
       },
       {
+        value: 'visiting' as const,
+        label: 'Visiting',
+        count: visiting.data?.length ?? 0,
+        countLabel: 'external',
+      },
+      {
         value: 'faculty' as const,
         label: 'Faculty Preceptors',
         count: (faculty.data ?? []).filter((row) => row.is_active === 1).length,
         countLabel: 'active',
       },
     ],
-    [residents.data, faculty.data],
+    [residents.data, visiting.data, faculty.data],
   );
 
   return (
     <Screen
       onRefresh={() => {
         residents.refresh();
+        visiting.refresh();
         faculty.refresh();
       }}
-      refreshing={residents.isRefreshing || faculty.isRefreshing}
+      refreshing={residents.isRefreshing || visiting.isRefreshing || faculty.isRefreshing}
       bottomGutter={spacing.xxl}
     >
       <AppHeader title="Roster" subtitle={headerSubtitle} />
@@ -116,6 +134,8 @@ export default function RosterScreen() {
 
       {activeTab === 'residents' ? (
         <ResidentRosterTab resource={residents} programId={programId} />
+      ) : activeTab === 'visiting' ? (
+        <ExternalRosterTab resource={visiting} />
       ) : (
         <FacultyRosterTab resource={faculty} programId={programId} />
       )}

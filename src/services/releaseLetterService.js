@@ -795,6 +795,25 @@ class ReleaseLetterService {
   }
 
   /**
+   * The dispatching programme's display name, for the cross-programme inbox
+   * notification ("*Family Medicine* dispatched a rotation notice …"). Null
+   * when the programme is unknown — the notification then falls back to a
+   * neutral phrase rather than naming the wrong sender.
+   */
+  static async resolveProgramName(programId) {
+    if (!programId) return null;
+    try {
+      const [rows] = await db.query(
+        `SELECT program_name FROM programs WHERE id = ? LIMIT 1;`,
+        [programId]
+      );
+      return pickName(rows[0] && rows[0].program_name);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
    * Resolve every value a template can reference. Shared by generation and the
    * live preview, so what the coordinator sees before dispatch is exactly what
    * the letter will contain afterwards.
@@ -1198,7 +1217,7 @@ class ReleaseLetterService {
     };
   }
 
-  /** The select shared by the resident view and the coordinator's log. */
+  /** The select shared by the resident view, the coordinator's sent log and the inbox. */
   static get LETTER_SELECT() {
     return `
       SELECT
@@ -1221,6 +1240,21 @@ class ReleaseLetterService {
         rlt.template_code,
         rlt.template_name,
         rlt.subject_line AS letter_subject,
+        -- Whose template merged this letter, i.e. which programme dispatched
+        -- it. This is the pivot the two-box inbox/sent split turns on: our own
+        -- dispatches are the Sent tab, another programme's dispatch addressed
+        -- to us is the Inbox.
+        rlt.program_id AS dispatching_program_id,
+        (SELECT dp.program_name FROM programs dp WHERE dp.id = rlt.program_id) AS dispatching_program_name,
+        (SELECT dp.program_code FROM programs dp WHERE dp.id = rlt.program_id) AS dispatching_program_code,
+        -- The programme that owns the rotation this letter is anchored to (the
+        -- *host* department's programme), and the resident's home programme
+        -- from their latest enrolment (the re alias is already resolved below).
+        rot.program_id AS host_program_id,
+        re.program_id AS resident_program_id,
+        grl.dispatch_type,
+        grl.recipient_coord_email,
+        grl.sent_by_user_id,
         grl.recipient_dept_head,
         grl.hospital_department_name,
         grl.supervising_faculty,
@@ -1287,16 +1321,39 @@ class ReleaseLetterService {
   }
 
   /**
-   * The coordinator's dispatch log: every letter merged from one of the
-   * programme's templates, newest first.
+   * The coordinator's letter boxes: what this programme dispatched (Sent), or
+   * what arrived here from other programmes (Inbox).
+   *
+   * - `box: 'sent'` (the default) — every letter merged from one of *this*
+   *   programme's templates. The historical behaviour, unchanged.
+   * - `box: 'received'` — letters another programme dispatched that concern
+   *   this programme. Two situations land here, and both are the same event
+   *   seen from the receiving side: a partner programme's rotation notice for
+   *   a resident rotating *into* one of our departments (`host_program_id`
+   *   is us), or a letter another programme issued about one of *our*
+   *   residents (`resident_program_id` is us). The dispatching programme's
+   *   name travels with each row so the inbox can say who sent it.
+   *
+   * A programme's own letters can never appear in its own inbox: the
+   * `rlt.program_id <> ?` guard is what keeps the two boxes disjoint.
+   *
+   * @param {number|null} programId
+   * @param {{box?: 'sent'|'received'}} [options]
    */
-  static async getLettersByProgram(programId) {
+  static async getLettersByProgram(programId, options = {}) {
     await ensureSchema();
+    const box = options.box === 'received' ? 'received' : 'sent';
     const params = [];
     let where = '';
     if (programId) {
-      where = ' WHERE rlt.program_id = ?';
-      params.push(programId);
+      if (box === 'received') {
+        where = ` WHERE rlt.program_id <> ?
+          AND (rot.program_id = ? OR re.program_id = ?)`;
+        params.push(programId, programId, programId);
+      } else {
+        where = ' WHERE rlt.program_id = ?';
+        params.push(programId);
+      }
     }
     const [rows] = await db.query(
       `${this.LETTER_SELECT}${where} ORDER BY grl.created_at DESC;`,
@@ -1784,6 +1841,63 @@ class ReleaseLetterService {
       notified.push(...written);
     }
 
+    // Cross-programme inbox routing. A notice run may cover residents who
+    // belong to *another* programme and are rotating into one of ours — the
+    // Family Medicine coordinator finalizing Block 6 for a resident posted to
+    // Internal Medicine Inpatient Wards. The host programme's coordinator is
+    // told the dispatch happened, with the wording the Letters inbox mirrors,
+    // so the receiving side has the letter in its inbox *and* a notification
+    // pointing at it.
+    //
+    // Deliberately outside the transaction and best-effort, exactly like the
+    // resident notifications: the letters are already committed, and a
+    // notification that cannot be delivered must never fail the dispatch.
+    const coordinatorsNotified = [];
+    if (send_to_coordinators && letters.length > 0) {
+      const dispatchingProgramName = await this.resolveProgramName(program_id);
+      const seen = new Set();
+      for (let index = 0; index < letters.length; index += 1) {
+        const letter = letters[index];
+        const hostProgramId = letter.host_program_id ? Number(letter.host_program_id) : null;
+        // Internal postings reuse the same letters but are not a cross-
+        // programme event: the host is the sender, so there is no inbox on
+        // the other side to route to.
+        if (!hostProgramId || hostProgramId === Number(program_id)) continue;
+        // One notification per resident per host programme, not per letter:
+        // a split block produces several letters for the same person and the
+        // coordinator must not receive the same arrival several times.
+        const dedupeKey = `${hostProgramId}:${stored[index]?.resident_id ?? letter.target.resident_id}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        const storedLetter = stored[index];
+        const pgy = letter.target.year_in_program ? `PGY-${letter.target.year_in_program}` : null;
+        const blockLabel = formatBlockLabel(letter.target.block_number);
+        const department = storedLetter?.hospital_department_name || letter.target.department_name || null;
+        const home = dispatchingProgramName || 'A partner programme';
+
+        const notification = await NotificationService.notifyProgramCoordinatorSafe(hostProgramId, {
+          type: 'ROTATION_APPROVAL',
+          title: 'Incoming Rotation Acceptance Notice',
+          message:
+            `📩 ${home} dispatched a rotation notice for Dr. ${letter.target.resident_name}` +
+            `${pgy ? ` (${pgy})` : ''} for ${blockLabel}` +
+            `${department ? ` (${department})` : ''}.`,
+          reference_id: storedLetter?.letter_id ?? letter.target.rotation_assignment_id,
+          reference_type: 'generated_release_letters',
+        });
+        if (notification) {
+          coordinatorsNotified.push({
+            host_program_id: hostProgramId,
+            host_program_name: letter.host_program_name,
+            resident_id: letter.target.resident_id,
+            resident_name: letter.target.resident_name,
+            notification_id: notification.id ?? null,
+          });
+        }
+      }
+    }
+
     return {
       program_id,
       template_code: code,
@@ -1800,6 +1914,10 @@ class ReleaseLetterService {
       letters_without_recipient: stored.filter((letter) => !letter.has_recipient).length,
       residents_notified: notified.length,
       notifications: notified,
+      // Cross-programme arrivals, so the dispatch summary can say how many
+      // partner programmes were told their visiting resident is expected.
+      coordinators_notified: coordinatorsNotified.length,
+      cross_program_notices: coordinatorsNotified,
       skipped,
     };
   }
@@ -1929,6 +2047,11 @@ class ReleaseLetterService {
         existing,
         recipient_coord_email: recipient.email || null,
         has_recipient: Boolean(recipient.has_recipient),
+        // Which programme receives this letter's resident. Kept on the letter
+        // (not re-derived at dispatch time) so the cross-programme inbox
+        // notification can route per letter without another query.
+        host_program_id: rotation.host_program_id ?? null,
+        host_program_name: rotation.host_program_name ?? null,
         composed: {
           anchor,
           template,
@@ -2021,7 +2144,13 @@ class ReleaseLetterService {
          rra.end_date,
          rra.notes,
          rot.rotation_name,
-         rot.department_name
+         rot.department_name,
+         -- The programme that owns the rotation, i.e. the *receiving* side of
+         -- a cross-programme posting. Dispatch uses it to route the inbox
+         -- notification to the host coordinator; a rotation with no owning
+         -- programme simply reports null and routes nothing.
+         rot.program_id AS host_program_id,
+         (SELECT hp.program_name FROM programs hp WHERE hp.id = rot.program_id) AS host_program_name
        FROM resident_rotation_assignments rra
        JOIN rotations rot ON rot.id = rra.rotation_id
        WHERE rra.id IN (?);`,

@@ -8,6 +8,11 @@ router.post('/onboard', residentController.onboardResident);
 // GET /api/v1/residents - List residents (supports ?program_id=1&limit=50&offset=0)
 router.get('/', residentController.getAllResidents);
 
+// GET /api/v1/residents/external - Visiting residents from other programmes.
+// Registered before '/:id' deliberately: Express matches in order, so '/external'
+// would otherwise be captured as a resident id and answer 404/NaN.
+router.get('/external', residentController.getExternalResidents);
+
 // GET /api/v1/residents/:id - Single resident detailed profile
 router.get('/:id', residentController.getResidentById);
 

@@ -663,6 +663,23 @@ export interface ReleaseLetter {
   template_id: number;
   template_code: string;
   template_name: string;
+  /**
+   * Which programme merged this letter (its template), i.e. the *sender*.
+   * In the Sent box this is the signed-in programme; in the Inbox it names
+   * the partner programme whose notice arrived, and the two companion fields
+   * back the "From" line on an inbox row.
+   */
+  dispatching_program_id?: number | null;
+  dispatching_program_name?: string | null;
+  dispatching_program_code?: string | null;
+  /** The programme owning the rotation this letter is anchored to (the host). */
+  host_program_id?: number | null;
+  /** The resident's home programme from their latest enrolment. */
+  resident_program_id?: number | null;
+  /** Which action produced the row, e.g. `FINALIZED_MASTER_GRID`. */
+  dispatch_type?: string | null;
+  recipient_coord_email?: string | null;
+  sent_by_user_id?: number | null;
   letter_subject: string;
   recipient_dept_head: string;
   hospital_department_name: string | null;
@@ -1046,6 +1063,18 @@ export interface CohortGridCell {
   email?: string | null;
   pgy_level: number | null;
   resident_status: string;
+  /**
+   * Cross-programme provenance. `is_external` is 1 when the resident is
+   * enrolled in a *different* programme and rotates into this one's
+   * department; the home-programme name and code back the visiting badge
+   * ("FM Resident") the grid draws beside the name. Internal rows carry 0 and
+   * nulls, so a client can split sections without a second request.
+   */
+  is_external?: number | boolean;
+  home_program_id?: number | null;
+  host_program_id?: number | null;
+  home_program_name?: string | null;
+  home_program_code?: string | null;
   program_id: number;
   program_code: string;
   week_start_day: string | null;
@@ -1106,6 +1135,39 @@ export interface CohortGridCell {
   rotation_max_capacity?: number | null;
   rotation_capacity_locked?: number | null;
   rotation_block_occupancy?: number | null;
+}
+
+/**
+ * `GET /residents/external?program_id=` — one row per visiting resident.
+ *
+ * The person enrolled in *another* programme who rotates into this one's
+ * departments, projected for the Roster's visiting tab: home-programme
+ * identity plus an aggregate of where they rotate here (distinct departments
+ * and rotations, assignment count, and the full date span of their postings).
+ */
+export interface VisitingResident {
+  resident_id: number;
+  first_name: string;
+  middle_initial: string | null;
+  last_name: string;
+  /** Their PGY level *at the home programme* — e.g. PGY-5 at Family Medicine. */
+  pgy_level: number | null;
+  resident_status: string;
+  home_program_id: number;
+  home_program_code: string | null;
+  home_program_name: string;
+  home_specialty_name: string | null;
+  corporate_id?: string | null;
+  email?: string | null;
+  mobile?: string | null;
+  assignment_count: number;
+  /** `·`-separated department names this resident rotates into here. */
+  department_names: string | null;
+  /** `·`-separated rotation names for those postings. */
+  rotation_names: string | null;
+  /** `YYYY-MM-DD` span across every posting here, e.g. one Block 6 visit. */
+  assignment_start_date: CalendarDateString | null;
+  assignment_end_date: CalendarDateString | null;
 }
 
 /** One recurring clinic release riding alongside a resident's block rotation. */
@@ -1463,6 +1525,15 @@ export interface RotationNoticeDispatchResult {
   letters_without_recipient: number;
   residents_notified: number;
   notifications: { notification_id: number; resident_id: number; resident_name: string }[];
+  /** Partner-programme coordinators told their visiting resident is expected. */
+  coordinators_notified?: number;
+  cross_program_notices?: {
+    host_program_id: number;
+    host_program_name: string | null;
+    resident_id: number;
+    resident_name: string;
+    notification_id: number | null;
+  }[];
   skipped: RotationNoticeSkip[];
 }
 

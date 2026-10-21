@@ -15,12 +15,25 @@ export async function fetchReleaseLetters(residentId: number): Promise<ReleaseLe
 }
 
 /**
- * The coordinator's dispatch log: every letter merged from the programme's
- * templates, addressed to hospital department heads.
+ * The coordinator's two letter boxes.
+ *
+ * - `sent` (default) — every letter merged from the programme's own templates.
+ * - `received` — the inbox: letters *other* programmes dispatched that concern
+ *   this one (a partner's rotation notice for a visiting resident, or a letter
+ *   about one of our residents issued elsewhere). Each row carries the
+ *   dispatching programme's name so the inbox can say who it is from.
  */
-export async function fetchDispatchedLetters(programId?: number): Promise<ReleaseLetter[]> {
-  const path = programId ? `/letters?program_id=${programId}` : '/letters';
-  const response = await request<ApiListResponse<ReleaseLetter>>(path);
+export async function fetchDispatchedLetters(
+  programId?: number,
+  box: 'sent' | 'received' = 'sent',
+): Promise<ReleaseLetter[]> {
+  const params = new URLSearchParams();
+  if (programId) params.set('program_id', String(programId));
+  if (box !== 'sent') params.set('box', box);
+  const query = params.toString();
+  const response = await request<ApiListResponse<ReleaseLetter>>(
+    query ? `/letters?${query}` : '/letters',
+  );
   return response.data ?? [];
 }
 
