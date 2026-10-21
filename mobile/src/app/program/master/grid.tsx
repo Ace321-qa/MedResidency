@@ -172,7 +172,7 @@ function residentFrozenHeader(resident: GridResident) {
         </Text>
         {academicDay ? <StatusBadge label={academicDay.label} tone={rowAccentTone(dayCode)} /> : null}
         {resident.is_external ? (
-          <StatusBadge label={`${resident.home_program_code ?? 'EXT'} Resident`} tone="info" />
+          <StatusBadge label="[Visiting]" tone="info" />
         ) : null}
       </View>
       <Text variant="caption" tone="muted" numberOfLines={1}>

@@ -13,6 +13,9 @@ router.get('/', residentController.getAllResidents);
 // would otherwise be captured as a resident id and answer 404/NaN.
 router.get('/external', residentController.getExternalResidents);
 
+// POST /api/v1/residents/visiting - Create a new visiting resident profile
+router.post('/visiting', residentController.createVisitingResident);
+
 // GET /api/v1/residents/:id - Single resident detailed profile
 router.get('/:id', residentController.getResidentById);
 

@@ -264,6 +264,122 @@ async function getExternalResidents({ program_id, limit = 500, offset = 0 } = {}
 }
 
 /**
+ * Create a new visiting resident profile.
+ * Only corporate_id is mandatory; first_name, last_name, mobile, email are optional.
+ * All other legal fields (DOB, citizenship) must be optional/NULLable for external guests.
+ */
+async function createVisitingResident({ corporate_id, first_name, last_name, mobile, email, home_program_name, program_id }) {
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    // 1. Insert Core Personal Information for visiting resident
+    // Allow NULL values for date_of_birth, sex, nationality, citizenship_status for external guests
+    const [resResult] = await connection.query(
+      `INSERT INTO residents 
+       (first_name, middle_initial, last_name, date_of_birth, sex, nationality, citizenship_status, race_ethnicity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        first_name || null,
+        null,
+        last_name || null,
+        null,  // date_of_birth - optional for visiting residents
+        null,  // sex - optional for visiting residents
+        null,  // nationality - optional for visiting residents
+        null,  // citizenship_status - optional for visiting residents
+        null,  // race_ethnicity - optional for visiting residents
+      ]
+    );
+
+    const residentId = resResult.insertId;
+
+    // 2. Insert Corporate/Guest ID identifier (MANDATORY for visiting residents)
+    await connection.query(
+      `INSERT INTO resident_identifiers 
+       (resident_id, identifier_type, identifier_value, issuing_country, is_primary)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        residentId,
+        'CORPORATE_ID',
+        corporate_id,
+        'QA',
+        1,
+      ]
+    );
+
+    // 3. Insert optional identifiers (mobile, email) if provided
+    if (mobile) {
+      await connection.query(
+        `INSERT INTO resident_identifiers 
+         (resident_id, identifier_type, identifier_value, issuing_country, is_primary)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          residentId,
+          'MOBILE',
+          mobile,
+          'QA',
+          0,
+        ]
+      );
+    }
+
+    if (email) {
+      await connection.query(
+        `INSERT INTO resident_identifiers 
+         (resident_id, identifier_type, identifier_value, issuing_country, is_primary)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          residentId,
+          'EMAIL',
+          email,
+          null,
+          0,
+        ]
+      );
+    }
+
+    // 4. Insert Program Enrollment for visiting resident
+    // Visiting residents are enrolled in the receiving program with a special status
+    const [enrollResult] = await connection.query(
+      `INSERT INTO residency_enrollments
+       (resident_id, program_id, resident_status, position_type, year_in_program,
+        start_date, expected_completion_date, started_program_at_year_one,
+        previous_education_documented, prior_training_years, comments)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        residentId,
+        program_id,
+        'ACTIVE_FULL_TIME',  // visiting residents default to active full-time
+        'VISITING',
+        null,  // year_in_program - optional for visiting
+        null,  // start_date - optional
+        null,  // expected_completion_date - optional
+        0,     // started_program_at_year_one - 0 for visiting
+        0,     // previous_education_documented - 0 for visiting
+        'Onboarded as visiting resident via MedResidency API',
+        null,  // prior_training_years - optional
+      ]
+    );
+
+    await connection.commit();
+
+    return {
+      resident_id: residentId,
+      corporate_id,
+      first_name,
+      last_name,
+      status: 'VISITING_CREATED_SUCCESSFULLY',
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+/**
  * Identifier types the edit form may write, keyed by the API field that carries
  * them. Email and mobile have no columns on `residents`; they live beside the
  * corporate id in `resident_identifiers`, which is also where the onboarding
@@ -530,9 +646,9 @@ module.exports = {
   onboardResident,
   getAllResidents,
   getExternalResidents,
+  createVisitingResident,
   getResidentById,
   updateResident,
   deleteResident,
-  getResidentDependencies,
   removeEnrollment,
 };

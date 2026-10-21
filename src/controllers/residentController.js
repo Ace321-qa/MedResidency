@@ -156,6 +156,48 @@ async function getExternalResidents(req, res) {
 }
 
 /**
+ * POST /api/v1/residents/visiting
+ * Create a new visiting resident profile.
+ * Only corporate_id is mandatory; first_name, last_name, mobile, email are optional.
+ */
+async function createVisitingResident(req, res) {
+  try {
+    const { corporate_id, first_name, last_name, mobile, email, home_program_name } = req.body;
+    const program_id = req.query.program_id ? Number(req.query.program_id) : null;
+
+    if (!corporate_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Corporate/Guest ID is required',
+      });
+    }
+
+    const result = await residentService.createVisitingResident({
+      corporate_id,
+      first_name,
+      last_name,
+      mobile,
+      email,
+      home_program_name,
+      program_id,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Visiting resident created successfully',
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error creating visiting resident:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create visiting resident',
+      error: error.message,
+    });
+  }
+}
+
+/**
  * GET /api/v1/residents/:id
  * Controller to retrieve single resident profile
  */
