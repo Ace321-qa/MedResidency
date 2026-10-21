@@ -12,6 +12,7 @@ import {
   ErrorState,
   IconButton,
   ImportTools,
+  ProgramPicker,
   Screen,
   SearchInput,
   SectionHeader,
@@ -28,6 +29,7 @@ import {
   fetchRotationCatalogue,
   updateCatalogueRotation,
 } from '../../../services/rotationCatalogue';
+import { fetchPrograms } from '../../../services/programs';
 import { uploadCatalogue } from '../../../services/excelTemplates';
 import { useInAppNotifications } from '../../../services/inAppNotifications';
 import { colors, radius, spacing } from '../../../theme';
@@ -59,7 +61,15 @@ import type { RotationCatalogueEntry } from '../../../types/api';
 
 interface FormState {
   fullName: string;
+  /** Display label derived from the linked programme; refined by hand if needed. */
   department: string;
+  /**
+   * The registered programme account this rotation is hosted by.
+   *
+   * `null` means "not linked", which the form rejects — a rotation that is not
+   * bound to an account is the free-text state this picker exists to remove.
+   */
+  targetProgramId: number | null;
   abbreviation: string;
   /** Kept as text: an empty field means "no limit", which is not the number 0. */
   maxCapacity: string;
@@ -70,6 +80,7 @@ interface FormState {
 interface FieldErrors {
   fullName?: string;
   department?: string;
+  targetProgramId?: string;
   abbreviation?: string;
   maxCapacity?: string;
   coordinatorEmail?: string;
@@ -78,11 +89,31 @@ interface FieldErrors {
 const EMPTY_FORM: FormState = {
   fullName: '',
   department: '',
+  targetProgramId: null,
   abbreviation: '',
   maxCapacity: '',
   capacityLocked: false,
   coordinatorEmail: '',
 };
+
+/**
+ * The department label a programme account implies.
+ *
+ * The account is named after its *specialty* — "Internal Medicine Residency
+ * Program" — while the department it hosts is named after the place: "Internal
+ * Medicine". The trailing words name the account type rather than any ward, so
+ * they are stripped for the label while the account id stays on the record as
+ * the real link.
+ *
+ * A name with no recognised suffix passes through untouched: a programme
+ * registered as just "Pediatrics" should not have its only word deleted, and a
+ * heuristic that always trims something would do exactly that.
+ */
+function departmentLabelFromProgram(programName: string): string {
+  const trimmed = programName.trim();
+  const stripped = trimmed.replace(/\s+(Residency|Fellowship)?\s*Program$/i, '').trim();
+  return stripped || trimmed;
+}
 
 const MAX_NAME_LENGTH = 255;
 const MAX_ABBREVIATION_LENGTH = 50;
@@ -107,6 +138,10 @@ export default function RotationsCatalogueScreen() {
   const programId = session?.programId ?? 0;
 
   const catalogue = useApiResource(() => fetchRotationCatalogue(programId), [programId]);
+
+  /** The picker's option list: every registered, still-active programme account. */
+  const programs = useApiResource(() => fetchPrograms({ activeOnly: true }), []);
+  const programOptions = useMemo(() => programs.data ?? [], [programs.data]);
 
   const [query, setQuery] = useState('');
 
@@ -135,12 +170,6 @@ export default function RotationsCatalogueScreen() {
     [entries, needle],
   );
 
-  /** Departments already in use, offered as a hint under the department field. */
-  const departments = useMemo(
-    () => [...new Set(entries.map((entry) => entry.department))].sort((a, b) => a.localeCompare(b)),
-    [entries],
-  );
-
   function openCreate() {
     setEditingId(null);
     setForm(EMPTY_FORM);
@@ -153,7 +182,13 @@ export default function RotationsCatalogueScreen() {
     setEditingId(entry.id);
     setForm({
       fullName: entry.full_name,
+      // The stored label is kept verbatim rather than re-derived: a rotation
+      // linked to Internal Medicine may still legitimately read "Internal
+      // Medicine Inpatient Wards", and re-deriving on open would silently
+      // rewrite it the moment the coordinator tapped Save for an unrelated
+      // reason. The label only follows the picker when the pick itself changes.
       department: entry.department,
+      targetProgramId: entry.target_program_id ?? null,
       abbreviation: entry.abbreviation,
       maxCapacity: entry.max_capacity === null ? '' : String(entry.max_capacity),
       capacityLocked: entry.capacity_locked === 1,
@@ -162,6 +197,35 @@ export default function RotationsCatalogueScreen() {
     setFieldErrors({});
     setSaveError(null);
     setSheetOpen(true);
+  }
+
+  /**
+   * Pick (or clear) the programme that hosts this rotation.
+   *
+   * Choosing an account refills the department label from its name, because
+   * the label's job is to read as a place and the account's job is to be an
+   * identity — picking should leave both consistent without a second edit.
+   * Clearing restores the empty label so a stale place name cannot survive
+   * without an account behind it.
+   */
+  function pickProgram(targetProgramId: number | null) {
+    setForm((current) => {
+      if (targetProgramId === null) return { ...current, targetProgramId: null, department: '' };
+      const chosen = programOptions.find((option) => option.id === targetProgramId);
+      if (!chosen) return { ...current, targetProgramId };
+      return {
+        ...current,
+        targetProgramId,
+        department: departmentLabelFromProgram(chosen.program_name),
+      };
+    });
+    setFieldErrors((current) => {
+      if (!current.targetProgramId && !current.department) return current;
+      const next = { ...current };
+      delete next.targetProgramId;
+      delete next.department;
+      return next;
+    });
   }
 
   function closeSheet() {
@@ -199,6 +263,14 @@ export default function RotationsCatalogueScreen() {
     if (!department) errors.department = 'A hospital department is required.';
     else if (department.length > MAX_NAME_LENGTH) {
       errors.department = `Keep the department to ${MAX_NAME_LENGTH} characters or fewer.`;
+    }
+
+    // The link is the point of the field, so an unlinked rotation is refused
+    // here rather than saved as another unattributable department string. The
+    // label check above still runs independently: a pick always fills it, but
+    // a cleared picker must not let an empty label through on its own.
+    if (form.targetProgramId === null) {
+      errors.targetProgramId = 'Select the programme that hosts this rotation.';
     }
 
     if (!abbreviation) errors.abbreviation = 'An abbreviation is required.';
@@ -245,6 +317,10 @@ export default function RotationsCatalogueScreen() {
       program_id: programId,
       full_name: form.fullName.trim(),
       department: form.department.trim(),
+      // The identity behind the label: which registered account hosts this
+      // rotation. Nothing downstream may read the label as a link — the notice
+      // router and the visiting roster both resolve the programme from this id.
+      target_program_id: form.targetProgramId,
       abbreviation: form.abbreviation.trim().toUpperCase(),
       max_capacity: form.maxCapacity.trim() === '' ? null : Number(form.maxCapacity.trim()),
       capacity_locked: form.capacityLocked,
@@ -502,18 +578,27 @@ export default function RotationsCatalogueScreen() {
             error={fieldErrors.fullName}
           />
 
-          <TextField
-            label="Hospital Department"
+          {/*
+            The department is no longer typed — it is chosen. A free-text box
+            let three spellings of one ward exist with no identity behind any
+            of them, which is why a notice could not be routed to the department
+            it concerned. The picker binds the rotation to a registered account
+            (`target_program_id`) and derives the stored label from that
+            account's name, so the display text and the link cannot drift apart.
+          */}
+          <ProgramPicker
+            label="Hosted by Department / Programme"
             required
-            value={form.department}
-            onChangeText={(value) => setForm((current) => ({ ...current, department: value }))}
-            placeholder="Department of Surgery"
-            autoCapitalize="words"
-            error={fieldErrors.department}
+            value={form.targetProgramId}
+            options={programOptions}
+            onChange={pickProgram}
+            loading={programs.isLoading}
+            error={fieldErrors.targetProgramId ?? fieldErrors.department}
+            accessibilityLabel="Select the registered programme that hosts this rotation"
             hint={
-              editingId === null && departments.length > 0
-                ? `In use: ${departments.slice(0, 4).join(', ')}${departments.length > 4 ? '…' : ''}`
-                : undefined
+              form.targetProgramId !== null
+                ? `Department label stored as “${form.department.trim()}”`
+                : 'Choosing an account fills the department label it is stored under.'
             }
           />
 

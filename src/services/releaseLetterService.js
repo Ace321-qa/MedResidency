@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const NotificationService = require('./notificationService');
+const { ensureTargetProgramColumn } = require('../utils/ensureTargetProgram');
 
 const DEFAULT_TEMPLATE_CODE = 'STANDARD-RELEASE';
 
@@ -264,6 +265,11 @@ function ensureSchema() {
 }
 
 async function applySchema() {
+  // The letter rows now name the programme that receives them, which for a
+  // rotation with an explicit host is `rotations.target_program_id` — the
+  // shared guard adds that column wherever it is missing.
+  await ensureTargetProgramColumn();
+
   // --- release_letter_templates ------------------------------------------
   const templateColumns = await tableColumns('release_letter_templates');
   const templateNames = new Set(templateColumns.map((row) => row.COLUMN_NAME));
@@ -318,6 +324,40 @@ async function applySchema() {
     await db.query(
       'ALTER TABLE generated_release_letters ADD COLUMN supervising_faculty VARCHAR(191) NULL AFTER hospital_department_name;'
     );
+  }
+
+  // --- dual-inbox columns ---------------------------------------------------
+  // Each dispatched letter is now filed twice when it crosses a programme
+  // boundary: once in the *sender's* mailbox (`program_id` = the dispatching
+  // programme, `folder` = 'SENT') and once in the *receiving* programme's
+  // (`program_id` = the host programme, `folder` = 'INBOX'). The two rows share
+  // the same template, assignment and body — only the mailbox differs — so a
+  // programme's Letters tab can read its own folder without the derived
+  // "letters about us" predicate that used to decide the inbox.
+  //
+  // Every row written before this column existed was, by construction, the
+  // sender's own dispatch log, so the backfill claims them all for the
+  // programme that owns their template, filed as SENT. It runs exactly once —
+  // on the boot that adds the column — because afterwards no row has a NULL
+  // folder, and a permanent `WHERE folder IS NULL` scan on an unindexed column
+  // would be a cost paid forever to move zero rows.
+  const hadFolderColumn = letterNames.has('folder');
+  await addMetadataColumn('generated_release_letters', letterNames, 'program_id', 'BIGINT UNSIGNED NULL', 'template_id');
+  await addMetadataColumn('generated_release_letters', letterNames, 'folder', "VARCHAR(8) NOT NULL DEFAULT 'SENT'", 'program_id');
+  if (!hadFolderColumn) {
+    await db.query(
+      `UPDATE generated_release_letters grl
+         JOIN release_letter_templates rlt ON rlt.id = grl.template_id
+        SET grl.program_id = rlt.program_id, grl.folder = 'SENT'
+        WHERE grl.program_id IS NULL;`
+    );
+    try {
+      await db.query(
+        'ALTER TABLE generated_release_letters ADD INDEX idx_grl_mailbox (program_id, folder);'
+      );
+    } catch (error) {
+      if (error.code !== 'ER_DUP_KEYNAME') throw error;
+    }
   }
 
   // The dispatch/destination metadata a mail-merged letter now carries:
@@ -735,10 +775,16 @@ class ReleaseLetterService {
 
     params.push(templateId, LIVE_SENT_STATES);
 
+    // Restricted to the dispatcher's own copy: a cross-programme letter is now
+    // filed in two mailboxes, and a duplicate check must answer "did *we*
+    // already dispatch this", not "does some row exist". It also pins the
+    // LIMIT 1 — without the folder filter the query has two live candidates and
+    // would pick one of them arbitrarily.
     const [rows] = await db.query(
       `SELECT id, sent_status FROM generated_release_letters
        WHERE (${conditions.join(' OR ')}) AND template_id = ?
          AND sent_status IN (?)
+         AND COALESCE(folder, 'SENT') = 'SENT'
        LIMIT 1;`,
       params
     );
@@ -1054,13 +1100,19 @@ class ReleaseLetterService {
     try {
       await connection.beginTransaction();
 
+      // Filed into the dispatching programme's Sent box at the same moment it
+      // is written. `program_id` is the mailbox owner, so a row with a NULL one
+      // matches neither box and a single-generated letter would appear nowhere —
+      // the template's programme is who is dispatching, which is exactly what
+      // the one-time backfill assumes for every older row.
       const [insertResult] = await connection.query(
         `INSERT INTO generated_release_letters
            (longitudinal_assignment_id, rotation_assignment_id, resident_id, template_id,
             recipient_dept_head, hospital_department_name, supervising_faculty,
             destination_supervising_faculty, coordinator_name, program_director_name,
-            letter_issue_date, generated_letter_body, sent_status, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+            letter_issue_date, generated_letter_body, sent_status, sent_at,
+            program_id, folder)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENT');`,
         [
           anchor.longitudinal_assignment_id,
           anchor.rotation_assignment_id,
@@ -1079,6 +1131,7 @@ class ReleaseLetterService {
           body.merged,
           nextStatus,
           DISPATCHED_STATUSES.includes(nextStatus) ? new Date() : null,
+          template.program_id ?? null,
         ]
       );
 
@@ -1094,11 +1147,34 @@ class ReleaseLetterService {
       // Superseding is a takeover, not a second live letter: the one being
       // replaced loses its SENT/DELIVERED state so the department head is only
       // ever being asked to act on the newest version.
+      //
+      // Matched on the anchor and template rather than on `existing.id`,
+      // because the superseded dispatch was filed in two mailboxes and
+      // `findExistingLetter` only reports the sender's row. Revoking the pair
+      // keeps a partner programme's inbox from holding a letter this programme
+      // has already replaced. The new row is written before this statement, so
+      // it is excluded by id — otherwise the letter just stored would revoke
+      // itself.
       if (existing && regenerate) {
-        await connection.query(
-          `UPDATE generated_release_letters SET sent_status = 'REVOKED' WHERE id = ?;`,
-          [existing.id]
-        );
+        const anchorConditions = [];
+        const anchorParams = [];
+        if (anchor.longitudinal_assignment_id) {
+          anchorConditions.push('longitudinal_assignment_id = ?');
+          anchorParams.push(anchor.longitudinal_assignment_id);
+        }
+        if (anchor.rotation_assignment_id) {
+          anchorConditions.push('rotation_assignment_id = ?');
+          anchorParams.push(anchor.rotation_assignment_id);
+        }
+        if (anchorConditions.length > 0) {
+          await connection.query(
+            `UPDATE generated_release_letters SET sent_status = 'REVOKED'
+              WHERE id <> ? AND template_id = ?
+                AND (${anchorConditions.join(' OR ')})
+                AND sent_status IN (?);`,
+            [insertResult.insertId, template.id, ...anchorParams, LIVE_SENT_STATES]
+          );
+        }
       }
 
       await connection.commit();
@@ -1240,17 +1316,26 @@ class ReleaseLetterService {
         rlt.template_code,
         rlt.template_name,
         rlt.subject_line AS letter_subject,
-        -- Whose template merged this letter, i.e. which programme dispatched
-        -- it. This is the pivot the two-box inbox/sent split turns on: our own
-        -- dispatches are the Sent tab, another programme's dispatch addressed
-        -- to us is the Inbox.
+        -- Whose template merged this letter, i.e. which programme authored it.
+        -- Still the sender's name even on a receiving copy, so an inbox row can
+        -- say "From Family Medicine"; which mailbox the row lives in is the
+        -- separate pair of columns below.
         rlt.program_id AS dispatching_program_id,
         (SELECT dp.program_name FROM programs dp WHERE dp.id = rlt.program_id) AS dispatching_program_name,
         (SELECT dp.program_code FROM programs dp WHERE dp.id = rlt.program_id) AS dispatching_program_code,
-        -- The programme that owns the rotation this letter is anchored to (the
-        -- *host* department's programme), and the resident's home programme
-        -- from their latest enrolment (the re alias is already resolved below).
-        rot.program_id AS host_program_id,
+        -- The mailbox this row is filed in. program_id + folder are the two
+        -- columns the dual-inbox split reads: a programme's Sent tab is its
+        -- own rows filed 'SENT', its Inbox is the copies filed 'INBOX' under
+        -- its own id. mailbox_program_id is the *row's* owner, which for an
+        -- inbox copy is the receiving programme rather than whoever merged
+        -- the letter.
+        grl.program_id AS mailbox_program_id,
+        grl.folder AS mailbox_folder,
+        -- The programme that receives this letter's resident. A rotation may
+        -- name a host programme explicitly (target_program_id); otherwise
+        -- the rotation's owning programme is the host, which is what every
+        -- pre-link row means.
+        COALESCE(rot.target_program_id, rot.program_id) AS host_program_id,
         re.program_id AS resident_program_id,
         grl.dispatch_type,
         grl.recipient_coord_email,
@@ -1321,21 +1406,15 @@ class ReleaseLetterService {
   }
 
   /**
-   * The coordinator's letter boxes: what this programme dispatched (Sent), or
-   * what arrived here from other programmes (Inbox).
+   * The coordinator's two letter boxes, read straight off each row's mailbox.
    *
-   * - `box: 'sent'` (the default) — every letter merged from one of *this*
-   *   programme's templates. The historical behaviour, unchanged.
-   * - `box: 'received'` — letters another programme dispatched that concern
-   *   this programme. Two situations land here, and both are the same event
-   *   seen from the receiving side: a partner programme's rotation notice for
-   *   a resident rotating *into* one of our departments (`host_program_id`
-   *   is us), or a letter another programme issued about one of *our*
-   *   residents (`resident_program_id` is us). The dispatching programme's
-   *   name travels with each row so the inbox can say who sent it.
-   *
-   * A programme's own letters can never appear in its own inbox: the
-   * `rlt.program_id <> ?` guard is what keeps the two boxes disjoint.
+   * A dispatch files one row per programme it crosses: `program_id` is the
+   * mailbox owner and `folder` is 'SENT' for the dispatcher's own copy or
+   * 'INBOX' for the receiving programme's. So each box is a single indexed
+   * lookup on `(program_id, folder)` rather than the derived predicate that
+   * used to work out "letters about us" from the rotation and the resident's
+   * home enrolment — that derivation could not see a letter that had been
+   * *addressed* to a programme, which is the thing an inbox is for.
    *
    * @param {number|null} programId
    * @param {{box?: 'sent'|'received'}} [options]
@@ -1346,14 +1425,13 @@ class ReleaseLetterService {
     const params = [];
     let where = '';
     if (programId) {
-      if (box === 'received') {
-        where = ` WHERE rlt.program_id <> ?
-          AND (rot.program_id = ? OR re.program_id = ?)`;
-        params.push(programId, programId, programId);
-      } else {
-        where = ' WHERE rlt.program_id = ?';
-        params.push(programId);
-      }
+      // `COALESCE` on the folder keeps rows written before the dual-inbox
+      // columns existed (all of them the sender's own dispatches) in the Sent
+      // box where they belong, rather than dropping out of both.
+      where = box === 'received'
+        ? ' WHERE grl.program_id = ? AND grl.folder = ?'
+        : ' WHERE grl.program_id = ? AND COALESCE(grl.folder, \'SENT\') = ?';
+      params.push(programId, box === 'received' ? 'INBOX' : 'SENT');
     }
     const [rows] = await db.query(
       `${this.LETTER_SELECT}${where} ORDER BY grl.created_at DESC;`,
@@ -1776,19 +1854,30 @@ class ReleaseLetterService {
     try {
       await connection.beginTransaction();
 
-      // One multi-row INSERT for the whole run, then one UPDATE to revoke the
-      // letters this run supersedes. Both inside the single transaction, so a
-      // run either lands entirely or not at all.
-      const insertedIds = await this.insertNoticeLetters(connection, letters, {
+      // Supersede first, then write. Revoking before the insert matters now
+      // that a letter is filed into two mailboxes: the revoke targets every
+      // live row sharing a superseded letter's assignment and template, which
+      // is both the old SENT row and its old INBOX twin, and doing it first
+      // means those are the only rows that pair can match — the new dispatch's
+      // rows do not exist yet.
+      await this.revokeSupersededLetters(connection, letters);
+
+      // One multi-row INSERT per mailbox for the whole run, still inside the
+      // single transaction, so a run either lands entirely or not at all.
+      const { sentIds, inboxIds } = await this.insertNoticeLetters(connection, letters, {
         sent_by_user_id,
         headName: recipient_dept_head || 'Head of Department',
+        programId: program_id,
       });
-      await this.revokeSupersededLetters(connection, letters);
 
       letters.forEach((letter, index) => {
         const { target, composed } = letter;
         stored.push({
-          letter_id: insertedIds[index],
+          letter_id: sentIds[index],
+          // The copy filed in the *receiving* programme's inbox, when this
+          // letter crossed a programme boundary. Null for an internal posting,
+          // where there is no second mailbox to file into.
+          inbox_letter_id: inboxIds[index] ?? null,
           resident_id: target.resident_id,
           resident_name: target.resident_name,
           pgy_level: target.year_in_program ? `PGY-${target.year_in_program}` : null,
@@ -1873,17 +1962,22 @@ class ReleaseLetterService {
         const storedLetter = stored[index];
         const pgy = letter.target.year_in_program ? `PGY-${letter.target.year_in_program}` : null;
         const blockLabel = formatBlockLabel(letter.target.block_number);
-        const department = storedLetter?.hospital_department_name || letter.target.department_name || null;
+        const rotationName = letter.target.rotation_name || storedLetter?.rotation_name || 'their rotation';
+        const window = storedLetter?.release_start_date && storedLetter?.release_end_date
+          ? ` (${storedLetter.release_start_date} to ${storedLetter.release_end_date})`
+          : '';
         const home = dispatchingProgramName || 'A partner programme';
 
         const notification = await NotificationService.notifyProgramCoordinatorSafe(hostProgramId, {
           type: 'ROTATION_APPROVAL',
           title: 'Incoming Rotation Acceptance Notice',
           message:
-            `📩 ${home} dispatched a rotation notice for Dr. ${letter.target.resident_name}` +
-            `${pgy ? ` (${pgy})` : ''} for ${blockLabel}` +
-            `${department ? ` (${department})` : ''}.`,
-          reference_id: storedLetter?.letter_id ?? letter.target.rotation_assignment_id,
+            `📩 ${home} dispatched an official rotation notice for ${letter.target.resident_name}` +
+            `${pgy ? ` (${pgy})` : ''} assigned to ${rotationName} for ${blockLabel}${window}.`,
+          // Point at the copy filed in *this* programme's inbox, so tapping the
+          // notification opens the row the coordinator can actually read, rather
+          // than a letter that lives in the partner's Sent box.
+          reference_id: storedLetter?.inbox_letter_id ?? storedLetter?.letter_id ?? letter.target.rotation_assignment_id,
           reference_type: 'generated_release_letters',
         });
         if (notification) {
@@ -1892,6 +1986,7 @@ class ReleaseLetterService {
             host_program_name: letter.host_program_name,
             resident_id: letter.target.resident_id,
             resident_name: letter.target.resident_name,
+            inbox_letter_id: storedLetter?.inbox_letter_id ?? null,
             notification_id: notification.id ?? null,
           });
         }
@@ -2145,12 +2240,14 @@ class ReleaseLetterService {
          rra.notes,
          rot.rotation_name,
          rot.department_name,
-         -- The programme that owns the rotation, i.e. the *receiving* side of
-         -- a cross-programme posting. Dispatch uses it to route the inbox
-         -- notification to the host coordinator; a rotation with no owning
-         -- programme simply reports null and routes nothing.
-         rot.program_id AS host_program_id,
-         (SELECT hp.program_name FROM programs hp WHERE hp.id = rot.program_id) AS host_program_name
+         -- The programme that receives this letter's resident: the rotation's
+         -- explicit host when it names one, otherwise the programme that owns
+         -- the rotation, which is what every pre-link row means. Dispatch uses
+         -- it to decide whether a letter crosses a programme boundary and so
+         -- deserves a second row in the receiving programme's inbox.
+         COALESCE(rot.target_program_id, rot.program_id) AS host_program_id,
+         (SELECT hp.program_name FROM programs hp
+           WHERE hp.id = COALESCE(rot.target_program_id, rot.program_id)) AS host_program_name
        FROM resident_rotation_assignments rra
        JOIN rotations rot ON rot.id = rra.rotation_id
        WHERE rra.id IN (?);`,
@@ -2192,78 +2289,141 @@ class ReleaseLetterService {
    *
    * Chunked rather than one statement per row: MySQL caps a statement's
    * placeholders, and a run of a few hundred rows would otherwise exceed it.
+   *
+   * A letter that crosses a programme boundary is filed *twice*, because an
+   * inbox has to be a row rather than a query-time inference: once for the
+   * dispatcher (`program_id` = the sending programme, `folder` = 'SENT') and
+   * once for the programme receiving the resident (`program_id` = the host
+   * programme, `folder` = 'INBOX'). The two rows are otherwise identical —
+   * same assignment, template, body and status — so either mailbox renders
+   * the same letter, and a programme reading its own folder sees the copy
+   * addressed to it rather than a row it has to reinterpret.
+   *
+   * @returns {Promise<{sentIds: number[], inboxIds: (number|null)[]}>}
+   *   Parallel to `letters`: `sentIds[i]` is letter *i*'s own dispatch row and
+   *   `inboxIds[i]` its receiving copy, or `null` where the letter stayed
+   *   inside the sending programme and no copy was filed.
    */
-  static async insertNoticeLetters(connection, letters, { sent_by_user_id = null, headName = 'Head of Department' } = {}) {
-    const insertedIds = [];
-    if (letters.length === 0) return insertedIds;
+  static async insertNoticeLetters(connection, letters, { sent_by_user_id = null, headName = 'Head of Department', programId = null } = {}) {
+    const sentIds = [];
+    const inboxIds = [];
+    if (letters.length === 0) return { sentIds, inboxIds };
 
-    const COLUMNS = 16;
+    const COLUMNS = 18;
     const chunkSize = Math.max(1, Math.floor(60000 / COLUMNS));
 
-    for (let start = 0; start < letters.length; start += chunkSize) {
-      const chunk = letters.slice(start, start + chunkSize);
-      const values = [];
-      const placeholders = [];
+    /** The column values for one letter filed into one programme's mailbox. */
+    const rowValues = (letter, mailboxProgramId, folder) => {
+      const { target, composed, recipient_coord_email } = letter;
+      return [
+        composed.anchor.rotation_assignment_id,
+        target.resident_id,
+        composed.template.id,
+        headName,
+        composed.hospitalDept,
+        composed.destinationFaculty,
+        composed.destinationFaculty,
+        composed.coordinatorName,
+        composed.programDirectorName,
+        composed.issueDate,
+        composed.body.merged,
+        new Date(),
+        DISPATCH_TYPE_MASTER_GRID,
+        recipient_coord_email,
+        sent_by_user_id,
+        mailboxProgramId,
+        folder,
+      ];
+    };
 
-      for (const letter of chunk) {
-        const { target, composed, recipient_coord_email } = letter;
-        placeholders.push(`(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENT', ?, ?, ?, ?)`);
-        values.push(
-          composed.anchor.rotation_assignment_id,
-          target.resident_id,
-          composed.template.id,
-          headName,
-          composed.hospitalDept,
-          composed.destinationFaculty,
-          composed.destinationFaculty,
-          composed.coordinatorName,
-          composed.programDirectorName,
-          composed.issueDate,
-          composed.body.merged,
-          new Date(),
-          DISPATCH_TYPE_MASTER_GRID,
-          recipient_coord_email,
-          sent_by_user_id
+    /** Chunked multi-row insert over a prepared list, returning the new ids. */
+    const insertRows = async (rows) => {
+      const ids = [];
+      for (let start = 0; start < rows.length; start += chunkSize) {
+        const chunk = rows.slice(start, start + chunkSize);
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENT', ?, ?, ?, ?, ?, ?)`);
+
+        const [result] = await connection.query(
+          `INSERT INTO generated_release_letters
+             (rotation_assignment_id, resident_id, template_id,
+              recipient_dept_head, hospital_department_name, supervising_faculty,
+              destination_supervising_faculty, coordinator_name, program_director_name,
+              letter_issue_date, generated_letter_body, sent_status, sent_at,
+              dispatch_type, recipient_coord_email, sent_by_user_id,
+              program_id, folder)
+           VALUES ${placeholders.join(', ')};`,
+          chunk.flat()
         );
+
+        // MySQL hands back the first auto-increment id and the count; the chunk
+        // is contiguous, so every id follows from those two numbers.
+        const first = result.insertId;
+        for (let index = 0; index < chunk.length; index += 1) ids.push(first + index);
       }
+      return ids;
+    };
 
-      const [result] = await connection.query(
-        `INSERT INTO generated_release_letters
-           (rotation_assignment_id, resident_id, template_id,
-            recipient_dept_head, hospital_department_name, supervising_faculty,
-            destination_supervising_faculty, coordinator_name, program_director_name,
-            letter_issue_date, generated_letter_body, sent_status, sent_at,
-            dispatch_type, recipient_coord_email, sent_by_user_id)
-         VALUES ${placeholders.join(', ')};`,
-        values
-      );
+    // One pass to work out the two mailboxes each letter is filed into, so the
+    // id arrays stay aligned with `letters` even though the rows are written in
+    // two grouped, chunked statements.
+    const sentRows = [];
+    const inboxRows = [];
+    const inboxIndexOf = [];
+    letters.forEach((letter) => {
+      const hostId = letter.host_program_id ? Number(letter.host_program_id) : null;
+      sentRows.push(rowValues(letter, programId, 'SENT'));
+      if (hostId && programId && hostId !== Number(programId)) {
+        inboxIndexOf.push(inboxRows.length);
+        inboxRows.push(rowValues(letter, hostId, 'INBOX'));
+      } else {
+        inboxIndexOf.push(null);
+      }
+    });
 
-      // MySQL hands back the first auto-increment id and the count; the chunk is
-      // contiguous, so every id follows from those two numbers.
-      const first = result.insertId;
-      for (let index = 0; index < chunk.length; index += 1) insertedIds.push(first + index);
-    }
+    const writtenSent = await insertRows(sentRows);
+    const writtenInbox = inboxRows.length > 0 ? await insertRows(inboxRows) : [];
 
-    return insertedIds;
+    letters.forEach((_, index) => {
+      sentIds.push(writtenSent[index]);
+      const mapped = inboxIndexOf[index];
+      inboxIds.push(mapped === null ? null : writtenInbox[mapped] ?? null);
+    });
+
+    return { sentIds, inboxIds };
   }
 
   /**
    * Revoke the letters this run supersedes, in one statement.
    *
-   * Superseding is a takeover, not a second live letter: the row being replaced
-   * loses its SENT/DELIVERED state so the department is only ever asked to act
-   * on the newest version.
+   * Superseding is a takeover, not a second live letter: the rows being
+   * replaced lose their SENT/DELIVERED state so the department is only ever
+   * asked to act on the newest version.
+   *
+   * Matched on the superseded letter's assignment and template rather than on
+   * its id, because a cross-programme letter is now filed in two mailboxes and
+   * only one of those rows was tracked as "existing". The pair catches both
+   * the sender's row and the receiving programme's inbox copy, so a
+   * regenerated notice does not leave a revoked letter still sitting live in a
+   * partner's inbox. This runs before the new dispatch is inserted, so the
+   * pair cannot match the rows this run is about to write.
    */
   static async revokeSupersededLetters(connection, letters) {
-    const ids = letters
-      .map((letter) => letter.existing && letter.existing.id)
-      .filter((id) => id !== null && id !== undefined);
-    if (ids.length === 0) return;
+    const anchors = letters
+      .filter((letter) => letter.existing)
+      .map((letter) => [letter.existing.rotation_assignment_id, letter.existing.template_id]);
+    if (anchors.length === 0) return;
 
-    await connection.query(
-      `UPDATE generated_release_letters SET sent_status = 'REVOKED' WHERE id IN (?);`,
-      [ids]
-    );
+    // De-duplicate: a resident split across two rotations in one block can
+    // produce several letters, and the same anchor should not be matched twice.
+    const unique = [...new Map(anchors.map(([assignmentId, templateId]) => [`${assignmentId}:${templateId}`, [assignmentId, templateId]])).values()];
+
+    for (const [assignmentId, templateId] of unique) {
+      await connection.query(
+        `UPDATE generated_release_letters SET sent_status = 'REVOKED'
+          WHERE rotation_assignment_id = ? AND template_id = ? AND sent_status IN (?);`,
+        [assignmentId, templateId, LIVE_SENT_STATES]
+      );
+    }
   }
 
   static async ensureReady() {

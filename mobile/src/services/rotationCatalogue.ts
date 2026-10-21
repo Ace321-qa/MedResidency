@@ -24,7 +24,7 @@ import type {
 export type CatalogueRotationUpdate = Partial<
   Pick<
     CatalogueRotationPayload,
-    'full_name' | 'department' | 'abbreviation' | 'max_capacity' | 'capacity_locked'
+    'full_name' | 'department' | 'abbreviation' | 'max_capacity' | 'capacity_locked' | 'target_program_id'
   >
 >;
 

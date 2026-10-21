@@ -265,6 +265,14 @@ export interface RotationDefinition {
 export interface RotationCatalogueEntry {
   id: number;
   program_id: number;
+  /**
+   * The registered programme account this rotation is hosted by — e.g. the
+   * Internal Medicine Residency Program behind an "Internal Medicine" ward
+   * rotation. `null` for a rotation that is not linked to any programme (every
+   * rotation before this column existed, and anything created by the Excel
+   * import), which is why the picker can be left empty.
+   */
+  target_program_id?: number | null;
   full_name: string;
   department: string;
   abbreviation: string;
@@ -284,6 +292,8 @@ export interface CatalogueRotationPayload {
   program_id: number;
   full_name: string;
   department: string;
+  /** The programme the rotation is hosted by; `null` or omitted means none. */
+  target_program_id?: number | null;
   /** Sent upper-cased; the API enforces one per programme. */
   abbreviation: string;
   /** `null` or omitted means unlimited. */
@@ -676,6 +686,14 @@ export interface ReleaseLetter {
   host_program_id?: number | null;
   /** The resident's home programme from their latest enrolment. */
   resident_program_id?: number | null;
+  /**
+   * The dual-inbox mailbox this row is filed in. `mailbox_program_id` is the
+   * row's owner — for an inbox copy that is the *receiving* programme, not the
+   * one whose template merged the letter — and `mailbox_folder` is 'SENT' or
+   * 'INBOX'.
+   */
+  mailbox_program_id?: number | null;
+  mailbox_folder?: string | null;
   /** Which action produced the row, e.g. `FINALIZED_MASTER_GRID`. */
   dispatch_type?: string | null;
   recipient_coord_email?: string | null;
@@ -1494,6 +1512,12 @@ export interface RotationNoticeLetter {
   has_recipient: boolean;
   sent_status: string;
   dispatched_to_coordinator: boolean;
+  /**
+   * The copy filed in the *receiving* programme's inbox when this letter
+   * crossed a programme boundary; `null` for an internal posting, where there
+   * is no second mailbox to file into.
+   */
+  inbox_letter_id?: number | null;
   /** Tokens the merge could not fill; a letter with any is not sendable as-is. */
   unresolved_placeholders: string[];
 }
@@ -1532,6 +1556,8 @@ export interface RotationNoticeDispatchResult {
     host_program_name: string | null;
     resident_id: number;
     resident_name: string;
+    /** The row filed in the receiving programme's inbox, when one was filed. */
+    inbox_letter_id?: number | null;
     notification_id: number | null;
   }[];
   skipped: RotationNoticeSkip[];

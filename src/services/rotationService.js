@@ -3,6 +3,7 @@ const db = require('../config/db');
 const NotificationService = require('./notificationService');
 const ProgramConnectionService = require('./programConnectionService');
 const RotationCapacityService = require('./rotationCapacityService');
+const { ensureTargetProgramColumn } = require('../utils/ensureTargetProgram');
 const {
   academicYearForDate,
   academicYearMatchValues,
@@ -603,11 +604,22 @@ class RotationService {
     return { academic_year: year, created, skipped, duration_weeks: durationWeeks };
   }
 
+  /**
+   * The rotations a programme may schedule onto — its own catalogue plus the
+   * ones other programmes have targeted *at* it.
+   *
+   * A Family Medicine ward rotation linked to the Internal Medicine Residency
+   * Program (`target_program_id`) has to appear on Internal Medicine's
+   * assignment sheet as well as Family Medicine's own, or the receiving
+   * programme could never place a visiting resident onto the ward it hosts.
+   */
   static async getRotationsByProgram(programId) {
+    await ensureTargetProgramColumn();
     const query = `
       SELECT
         r.id AS rotation_id,
         r.program_id,
+        r.target_program_id,
         r.rotation_code,
         r.rotation_name,
         r.department_name,
@@ -617,10 +629,10 @@ class RotationService {
         r.max_capacity,
         r.capacity_locked
       FROM rotations r
-      WHERE r.program_id = ? AND r.is_active = TRUE
+      WHERE (r.program_id = ? OR r.target_program_id = ?) AND r.is_active = TRUE
       ORDER BY r.rotation_name ASC;
     `;
-    const [rows] = await db.query(query, [programId]);
+    const [rows] = await db.query(query, [programId, programId]);
     return rows;
   }
 
@@ -1149,12 +1161,13 @@ class RotationService {
     // showing them twice would double their rows.
     let externalRows = [];
     if (program_id) {
+      await ensureTargetProgramColumn();
       let externalQuery = `
         SELECT
           ${COHORT_GRID_COLUMNS}
         FROM resident_rotation_assignments rra
-        JOIN rotations rot ON rot.id = rra.rotation_id AND rot.program_id = ?
-        JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id AND rb.program_id = rot.program_id
+        JOIN rotations rot ON rot.id = rra.rotation_id AND (rot.program_id = ? OR rot.target_program_id = ?)
+        JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id AND rb.program_id = ?
         JOIN programs p ON p.id = rb.program_id
         JOIN residents r ON r.id = rra.resident_id
         JOIN residency_enrollments re ON re.id = (
@@ -1169,7 +1182,12 @@ class RotationService {
             WHERE re_int.resident_id = r.id AND re_int.program_id = rb.program_id
           )
       `;
-      const externalParams = [program_id, ...yearValues];
+      // A rotation counts for this programme when the programme owns it *or*
+      // when another programme has targeted it here (`target_program_id`), so
+      // a Family Medicine ward rotation linked to Internal Medicine lights up
+      // the Internal Medicine grid. The block must still be this programme's
+      // own — cells are drawn against the viewing programme's calendar.
+      const externalParams = [program_id, program_id, program_id, ...yearValues];
       // The cohort filter applies to the visitor's *home* PGY level, so a
       // PGY-5 filter surfaces the FM PGY-5 rotating in, not a phantom level.
       if (pgy_level) { externalQuery += ' AND re.year_in_program = ?'; externalParams.push(pgy_level); }

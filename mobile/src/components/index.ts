@@ -21,6 +21,7 @@ export {
   type SelectOption,
 } from './Form';
 export { FacultyPicker, type FacultyOption } from './FacultyPicker';
+export { ProgramPicker, programOptionLabel, type ProgramOption } from './ProgramPicker';
 export { Avatar, DetailRow, ListRow } from './ListRow';
 export { FacultyRosterTab } from './FacultyRosterTab';
 export { ExternalRosterTab } from './ExternalRosterTab';

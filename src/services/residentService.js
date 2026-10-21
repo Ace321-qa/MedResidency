@@ -182,6 +182,10 @@ async function getExternalResidents({ program_id, limit = 500, offset = 0 } = {}
     throw error;
   }
 
+  // The rotation-ownership test below reads `target_program_id`, which the
+  // shared guard adds on first use (see utils/ensureTargetProgram).
+  await ensureTargetProgramColumn();
+
   const query = `
     SELECT
       r.id AS resident_id,
@@ -234,7 +238,7 @@ async function getExternalResidents({ program_id, limit = 500, offset = 0 } = {}
     )
     JOIN programs hp ON hp.id = re.program_id
     WHERE rb.program_id = ?
-      AND rot.program_id = ?
+      AND (rot.program_id = ? OR rot.target_program_id = ?)
       AND NOT EXISTS (
         SELECT 1 FROM residency_enrollments re_int
         WHERE re_int.resident_id = r.id AND re_int.program_id = ?
@@ -248,6 +252,7 @@ async function getExternalResidents({ program_id, limit = 500, offset = 0 } = {}
   `;
 
   const [rows] = await pool.query(query, [
+    program_id,
     program_id,
     program_id,
     program_id,

@@ -5,6 +5,7 @@ const {
   MAX_ABBREVIATION_LENGTH,
   MAX_NAME_LENGTH,
 } = require('../utils/excel/catalogue');
+const { ensureTargetProgramColumn } = require('../utils/ensureTargetProgram');
 
 /**
  * Rotations Catalogue — the programme's registry of hospital and clinic
@@ -25,13 +26,14 @@ const {
  */
 
 const VIEW_COLUMNS =
-  'id, program_id, full_name, department, abbreviation, is_active, default_duration_weeks, ' +
+  'id, program_id, target_program_id, full_name, department, abbreviation, is_active, default_duration_weeks, ' +
   'max_capacity, capacity_locked, coordinator_email, created_at, updated_at';
 
 const CREATE_VIEW_SQL = `
   CREATE OR REPLACE VIEW rotations_catalogue AS
   SELECT id,
          program_id,
+         target_program_id,
          rotation_name AS full_name,
          department_name AS department,
          rotation_code AS abbreviation,
@@ -62,6 +64,12 @@ const CREATE_VIEW_SQL = `
  * working because the view's `CREATE OR REPLACE` runs after the columns exist.
  */
 async function ensureCapacityColumns() {
+  // The cross-programme link (`target_program_id`) lives in a shared guard —
+  // the cohort grid and the notice dispatcher read the same column — but is
+  // triggered from here too, so the catalogue view below is created after the
+  // column it projects exists.
+  await ensureTargetProgramColumn();
+
   const [capacity] = await db.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rotations' AND COLUMN_NAME = 'max_capacity'`,
@@ -256,11 +264,50 @@ function normalizeEntry(input, options = {}) {
   Object.assign(values, capacity.values);
   errors.push(...capacity.errors);
 
+  const target = normalizeTargetProgram(input, partial);
+  Object.assign(values, target.values);
+  errors.push(...target.errors);
+
   const email = normalizeEmail(input, partial);
   Object.assign(values, email.values);
   errors.push(...email.errors);
 
   return { values, errors };
+}
+
+/**
+ * Normalise the optional link to a registered programme account.
+ *
+ * Kept apart from the text fields because it is an identity, not a label: the
+ * picker writes the programme's id, and `null` is a real answer meaning "this
+ * rotation is not hosted by any registered programme" — which is where every
+ * rotation stood before this column existed, and where the Excel import still
+ * puts its rows. The existence check lives in the controller, which is already
+ * holding a connection for the rest of the create/update path.
+ *
+ * @param {object} input
+ * @param {boolean} partial - when true, an absent field is left untouched.
+ * @returns {{values: object, errors: string[]}}
+ */
+function normalizeTargetProgram(input, partial) {
+  if (!Object.prototype.hasOwnProperty.call(input, 'target_program_id') || input.target_program_id === undefined) {
+    if (partial) return { values: {}, errors: [] };
+    return { values: { target_program_id: null }, errors: [] };
+  }
+
+  const raw = input.target_program_id;
+  if (raw === null || raw === '') {
+    return { values: { target_program_id: null }, errors: [] };
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return {
+      values: {},
+      errors: ['Linked Programme must be the id of a registered programme, or empty'],
+    };
+  }
+  return { values: { target_program_id: parsed }, errors: [] };
 }
 
 async function programExists(programId) {
@@ -335,6 +382,12 @@ class RotationCatalogueController {
           .status(400)
           .json({ success: false, error: `Programme ${programId} does not exist` });
       }
+      if (values.target_program_id != null && !(await programExists(values.target_program_id))) {
+        return res.status(400).json({
+          success: false,
+          error: `Linked programme ${values.target_program_id} does not exist`,
+        });
+      }
       if (await abbreviationTaken(programId, values.abbreviation)) {
         return res.status(409).json({
           success: false,
@@ -344,10 +397,11 @@ class RotationCatalogueController {
 
       await ensureCatalogueSchema();
       const [result] = await db.query(
-        `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation, max_capacity, capacity_locked, coordinator_email)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO rotations_catalogue (program_id, target_program_id, full_name, department, abbreviation, max_capacity, capacity_locked, coordinator_email)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           programId,
+          values.target_program_id ?? null,
           values.full_name,
           values.department,
           values.abbreviation,
@@ -402,7 +456,14 @@ class RotationCatalogueController {
             ...Object.keys(FIELD_LABELS),
             'max_capacity',
             'capacity_locked',
+            'target_program_id',
           ].join(', ')}`,
+        });
+      }
+      if (values.target_program_id != null && !(await programExists(values.target_program_id))) {
+        return res.status(400).json({
+          success: false,
+          error: `Linked programme ${values.target_program_id} does not exist`,
         });
       }
 

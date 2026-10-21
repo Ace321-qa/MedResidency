@@ -35,19 +35,21 @@ import type { LetterTemplate, ReleaseLetter } from '../../../../types/api';
  *
  * Three jobs a coordinator does with letters live side by side:
  *
- * - **Inbox (Received)** — notices *other* programmes dispatched that concern
- *   this one: a partner's rotation acceptance notice for a resident rotating
- *   into our departments, or a letter about one of our own residents issued
- *   elsewhere. Each row says which programme it came from, so a Family Medicine
- *   notice for a visiting PGY-5 reads as exactly that.
+ * - **Inbox (Received)** — notices *addressed to* this programme: each row is a
+ *   copy a dispatch filed here because one of its rotations is hosted by this
+ *   programme, so a Family Medicine notice for a visiting PGY-5 rotating onto
+ *   an Internal Medicine ward arrives in Internal Medicine's inbox and reads as
+ *   exactly that, with the dispatching programme named on the row.
  * - **Sent Items** — every letter merged from this programme's own templates,
  *   the dispatch log, plus the generator's entry point.
  * - **Letter Templates** — the mail-merge templates both boxes' letters are
  *   authored from.
  *
- * The boxes are disjoint by construction (the server excludes our own
- * dispatches from our inbox), so nothing can appear twice. Tapping a letter in
- * either box opens it exactly as the recipient received it.
+ * The boxes are disjoint because they are different rows: a dispatch writes one
+ * copy into the sender's Sent box and, where the rotation is hosted elsewhere,
+ * a second into the host's Inbox. Nothing has to be excluded by a predicate, so
+ * nothing can appear twice. Tapping a letter in either box opens it exactly as
+ * the recipient received it.
  */
 
 type LettersTab = 'inbox' | 'sent' | 'templates';
