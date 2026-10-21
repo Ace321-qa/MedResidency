@@ -90,6 +90,7 @@ async function loadRotation(conn, rotationId, forUpdate = false) {
 async function loadConcurrentAssignments(conn, rotationId, proposal, forUpdate = false) {
   const [rows] = await conn.query(
     `SELECT id AS assignment_id,
+            resident_id,
             DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
             DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date
        FROM resident_rotation_assignments
@@ -145,6 +146,11 @@ async function checkPlacement(conn, input) {
     locked: rotation.capacity_locked,
     week_start_day: weekStartDay,
     excludeAssignmentId: input.excludeAssignmentId ?? null,
+    // The person being placed. Without it the engine counts the proposal as an
+    // anonymous extra, which is right for a "what would this look like" preview
+    // but wrong when the caller knows who they are placing — the resident's own
+    // existing rows would then be counted against them.
+    residentId: input.resident_id ?? input.proposal?.resident_id ?? null,
   });
 
   return { rotation, result };

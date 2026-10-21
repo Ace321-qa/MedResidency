@@ -132,6 +132,8 @@ export async function checkAssignmentCapacity(payload: {
   start_date: string;
   end_date: string;
   program_id?: number;
+  /** The resident being placed, so their own existing rows do not count against them. */
+  resident_id?: number;
   exclude_assignment_id?: number;
 }): Promise<CapacityVerdict> {
   const response = await request<ApiResponse<CapacityVerdict>>(

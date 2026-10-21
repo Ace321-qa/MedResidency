@@ -135,9 +135,23 @@ async function main() {
       if (result.status !== 201) throw new Error(`cannot place resident ${resident}`);
       check(`resident ${resident} is green`, result.body.data.capacity.status, 'GREEN');
     }
-    const c1 = await assign(r1);
-    check('placing a 4th is refused without a rationale', c1.status, 409);
+    // A *fourth distinct* resident is over the limit. Re-placing r1 would not
+    // be: a resident already in the rotation is the same person, so counting
+    // their row twice would be the phantom overcapacity this engine now avoids.
+    const c1 = await assign(r4);
+    check('placing a 4th resident is refused without a rationale', c1.status, 409);
     check('and the verdict is not green', c1.body.capacity.status !== 'GREEN', true);
+
+    console.log('\n-- a resident already in the rotation does not count twice --');
+    const repl = await assign(r1);
+    check('re-placing an existing resident is allowed', repl.status, 201);
+    check('and stays green, because it is the same person', repl.body.data.capacity.status, 'GREEN');
+    check('the peak is the three distinct residents', repl.body.data.capacity.peak, 3);
+    // Remove the row the re-place just added so the rest of the run sees three.
+    await db.query(
+      'DELETE FROM resident_rotation_assignments WHERE id = ?',
+      [repl.body.data.assignment_id],
+    );
 
     console.log('\n-- Test 2: a 4th resident for one week is Amber --');
     const [weekOneStart] = block.s.split('-');
@@ -180,7 +194,15 @@ async function main() {
     console.log('\n-- the preview endpoint agrees with the write --');
     const preview = await api('/rotations/assignments/check-capacity', {
       method: 'POST',
-      body: { rotation_id: rotationId, program_id: 1, start_date: block.s, end_date: oneWeekEnd },
+      body: {
+        rotation_id: rotationId,
+        program_id: 1,
+        // The resident being proposed, so the preview counts people exactly as
+        // the write does.
+        resident_id: r5,
+        start_date: block.s,
+        end_date: oneWeekEnd,
+      },
     });
     check('the preview succeeds', preview.status, 200);
     check('and returns the same tier the write did', preview.body.data.status, 'RED');

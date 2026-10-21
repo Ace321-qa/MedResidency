@@ -214,6 +214,8 @@ function isFiniteCapacity(capacity) {
  * @param {string|number} [input.week_start_day] - programme week start.
  * @param {number} [input.excludeAssignmentId] - an assignment being moved or
  *   re-saved, so it is not counted against itself.
+ * @param {number|string} [input.residentId] - the resident being placed. Used
+ *   instead of `proposal.resident_id` when both are present.
  * @param {Map<string, number>} [input.existingById] - id → count, for the above.
  * @returns {{
  *   status: string,
@@ -238,6 +240,11 @@ function evaluateOccupancy(input = {}) {
     locked = false,
     week_start_day = 0,
     excludeAssignmentId = null,
+    // The person being placed. A caller that knows who the proposal belongs to
+    // passes it here; otherwise it is read off the proposal. Naming the resident
+    // matters when they already hold a row in this rotation — without it their
+    // own existing row would be counted as a second, different person.
+    residentId = null,
   } = input;
 
   const proposalWeeks = weeksForWindow(
@@ -263,11 +270,26 @@ function evaluateOccupancy(input = {}) {
     };
   }
 
-  // Count residents per week. The proposal is seeded at 1 so the busiest week it
-  // creates already includes the resident being placed: a proposal into an empty
-  // rotation is occupancy 1, not 0.
+  // Count residents per week. Each week holds a *set* of resident ids rather
+  // than a running total, because the unit of capacity is the person, not the
+  // row. A resident can legitimately hold more than one assignment row in the
+  // same rotation and window — a split block saved twice, a re-save, imported
+  // data — and counting rows would report a department of two as a department
+  // of five, producing an overcapacity warning against people who do not
+  // exist. The set makes duplicates free and keeps the count a headcount.
+  //
+  // The proposal is seeded with its own resident (or a placeholder when no id
+  // is supplied, which is the case for a pure "what would happen if" preview)
+  // so a proposal into an empty rotation is occupancy 1, not 0.
+  const proposalResidentId =
+    (residentId ?? proposal?.resident_id) !== undefined &&
+    (residentId ?? proposal?.resident_id) !== null
+      ? `r:${residentId ?? proposal.resident_id}`
+      : null;
   const counts = new Map();
-  for (const week of proposalWeeks) counts.set(week, 1);
+  for (const week of proposalWeeks) {
+    counts.set(week, new Set([proposalResidentId ?? `__proposal__`]));
+  }
 
   for (const assignment of existing) {
     if (
@@ -282,16 +304,31 @@ function evaluateOccupancy(input = {}) {
       assignment?.end_date,
       week_start_day,
     );
+    // Identify the person this row belongs to. When the caller supplies no
+    // resident id the row's own assignment id is used, so an older caller that
+    // has not been taught about residents still counts each row once instead of
+    // silently collapsing every row into a single anonymous one.
+    const key =
+      assignment?.resident_id !== undefined && assignment?.resident_id !== null
+        ? `r:${assignment.resident_id}`
+        : `a:${assignment?.assignment_id ?? weeks[0] ?? 'unknown'}`;
     for (const week of weeks) {
       // Only weeks the proposal touches can affect the decision, and limiting
       // the map to those keeps a whole-programme scan proportional to the
       // proposal's own length rather than the roster's.
-      if (counts.has(week)) counts.set(week, counts.get(week) + 1);
+      const set = counts.get(week);
+      if (set) set.add(key);
     }
   }
 
+  // When the caller named the resident being placed, their membership is what
+  // makes the proposal count: the set already holds them, so a proposal into an
+  // empty rotation reads 1 and a re-save of an existing posting does not add a
+  // second. When no resident was named the seed was a bare placeholder, which is
+  // not a person, so it is subtracted here rather than counted.
   const weeks = proposalWeeks.map((weekStart) => {
-    const count = counts.get(weekStart) ?? 0;
+    const set = counts.get(weekStart) ?? new Set();
+    const count = Math.max(0, proposalResidentId === null ? set.size - 1 : set.size);
     return {
       week_start: weekStart,
       week_end: isoDate(new Date(parseDate(weekStart).getTime() + 6 * 24 * 60 * 60 * 1000)),

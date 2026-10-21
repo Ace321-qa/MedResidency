@@ -1,6 +1,7 @@
 // Step 1: Import our Hostinger MySQL connection pool
 const db = require('../config/db');
 const NotificationService = require('./notificationService');
+const ProgramConnectionService = require('./programConnectionService');
 const RotationCapacityService = require('./rotationCapacityService');
 const {
   academicYearForDate,
@@ -562,6 +563,9 @@ class RotationService {
       const check = await RotationCapacityService.checkPlacement(conn, {
         rotation_id,
         program_id: programId,
+        // The resident being placed: their own existing rows in this rotation
+        // are the same person, not fellow occupants, so the count is a headcount.
+        resident_id,
         proposal: { start_date, end_date },
         // Serialise concurrent placements into this rotation: the lock is held
         // until the commit below, so a second coordinator's count includes this
@@ -636,6 +640,18 @@ class RotationService {
           .replace(/_/g, ' ')} rotation from ${start_date} to ${end_date}.`,
         reference_id: result.insertId,
         reference_type: 'resident_rotation_assignments',
+      });
+
+      // And tell the receiving department, when it belongs to another programme.
+      // Best-effort for the same reason — the placement is already committed —
+      // and silent when the rotation is the resident's own programme.
+      await ProgramConnectionService.noticifyReceivingProgram({
+        rotation_id,
+        resident_id,
+        block_id: rotation_block_id,
+        start_date,
+        end_date,
+        assignment_id: result.insertId,
       });
 
       return {

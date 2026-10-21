@@ -12,16 +12,19 @@ const NotificationService = require('../services/notificationService');
  * Resolve the notification owner from the request.
  *
  * The resident-scoped routes carry `:resident_id` in the path; the auth-style
- * root routes carry `resident_id` or `user_id` in the query (GET) or body
- * (PATCH). The service accepts either because it maps a resident to the
- * internal `users.id`.
+ * root routes carry `resident_id`, `user_id` or `program_id` in the query (GET)
+ * or body (PATCH). The service accepts any of them because it maps each to the
+ * internal `users.id` — a programme id resolves to that programme's coordinator,
+ * which is how the cross-programme inbox is read.
  */
 function resolveOwner(req) {
   const residentId = req.params?.resident_id ?? req.query?.resident_id ?? req.body?.resident_id;
   const userId = req.query?.user_id ?? req.body?.user_id;
+  const programId = req.query?.program_id ?? req.body?.program_id;
   return {
     resident_id: residentId ? Number(residentId) : null,
     user_id: userId ? Number(userId) : null,
+    program_id: programId ? Number(programId) : null,
   };
 }
 
@@ -246,10 +249,10 @@ class NotificationController {
   static async list(req, res) {
     try {
       const owner = resolveOwner(req);
-      if (!owner.resident_id && !owner.user_id) {
+      if (!owner.resident_id && !owner.user_id && !owner.program_id) {
         return res.status(400).json({
           success: false,
-          error: 'Pass resident_id or user_id to identify the notification owner.',
+          error: 'Pass resident_id, user_id or program_id to identify the notification owner.',
         });
       }
 
@@ -266,6 +269,7 @@ class NotificationController {
       const result = await NotificationService.list({
         resident_id: owner.resident_id,
         user_id: owner.user_id,
+        program_id: owner.program_id,
         type,
         unread_only: unreadOnly,
         limit,
@@ -299,16 +303,16 @@ class NotificationController {
   }
 
   /**
-   * GET /api/v1/notifications/unread-count?resident_id=1 (or ?user_id=1)
+   * GET /api/v1/notifications/unread-count?resident_id=1 (or ?user_id=1, ?program_id=1)
    * The badge count. Never 404s on an unknown recipient — it reports zero.
    */
   static async unreadCountByOwner(req, res) {
     try {
       const owner = resolveOwner(req);
-      if (!owner.resident_id && !owner.user_id) {
+      if (!owner.resident_id && !owner.user_id && !owner.program_id) {
         return res.status(400).json({
           success: false,
-          error: 'Pass resident_id or user_id to identify the notification owner.',
+          error: 'Pass resident_id, user_id or program_id to identify the notification owner.',
         });
       }
 
@@ -325,15 +329,15 @@ class NotificationController {
   }
 
   /**
-   * PATCH /api/v1/notifications/read-all?resident_id=1 (or body { user_id })
+   * PATCH /api/v1/notifications/read-all?resident_id=1 (or body { user_id }, { program_id })
    */
   static async markAllReadByOwner(req, res) {
     try {
       const owner = resolveOwner(req);
-      if (!owner.resident_id && !owner.user_id) {
+      if (!owner.resident_id && !owner.user_id && !owner.program_id) {
         return res.status(400).json({
           success: false,
-          error: 'Pass resident_id or user_id to identify the notification owner.',
+          error: 'Pass resident_id, user_id or program_id to identify the notification owner.',
         });
       }
 

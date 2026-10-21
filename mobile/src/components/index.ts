@@ -36,6 +36,7 @@ export { ProgramEditorSheet, type ProgramEditorSheetProps } from './ProgramEdito
 export { CreateSpecializedClinicSheet } from './CreateSpecializedClinicSheet';
 export { Sheet } from './Sheet';
 export { NoticeDispatchSheet } from './NoticeDispatchSheet';
+export { ProgramConnectionsSheet } from './ProgramConnectionsSheet';
 export { EmptyState, ErrorState, LoadingState, SkeletonList } from './StateView';
 export { ExportMenu } from './ExportMenu';
 export { ScheduleReportView } from './ScheduleReportView';

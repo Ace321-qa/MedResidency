@@ -264,6 +264,78 @@ class NotificationService {
   }
 
   /**
+   * The coordinator `users.id` for a programme, provisioning a row when the
+   * programme has none.
+   *
+   * A resident is resolved by identity — `residents.id` is unique on `users` —
+   * but a coordinator has no such anchor: the role belongs to the *programme*,
+   * not to a person, because this platform has no coordinator accounts yet.
+   * So the programme is the key. `program_id` is not unique on `users` (residents
+   * carry it too), which is why the lookup filters on the role as well.
+   *
+   * The name is compiled from the programme so a notification list reads
+   * "Family Medicine Coordinator" rather than an empty row, and
+   * `ON DUPLICATE KEY` is deliberately absent: `program_id` has no unique index,
+   * so an insert here always creates the one coordinator row for the programme
+   * the first time it is needed. The `SELECT` guard is what keeps it single.
+   */
+  static async resolveUserIdForProgramCoordinator(programId, executor = db) {
+    const id = toPositiveInt(programId);
+    if (!id) return null;
+
+    const [existing] = await executor.query(
+      `SELECT id FROM users
+        WHERE program_id = ? AND role = 'COORDINATOR' AND is_active = 1
+        ORDER BY id ASC
+        LIMIT 1;`,
+      [id],
+    );
+    if (existing.length > 0) return Number(existing[0].id);
+
+    const [programs] = await executor.query(
+      `SELECT program_name FROM programs WHERE id = ? LIMIT 1;`,
+      [id],
+    );
+    if (programs.length === 0) return null;
+
+    const fullName = `${programs[0].program_name} Coordinator`.trim();
+
+    const [result] = await executor.query(
+      `INSERT INTO users (role, program_id, full_name, is_active)
+       VALUES ('COORDINATOR', ?, ?, 1);`,
+      [id, fullName],
+    );
+
+    const userId = Number(result.insertId);
+    return userId > 0 ? userId : null;
+  }
+
+  /**
+   * Notify a programme's coordinator, provisioning their row on first use.
+   *
+   * The trigger-facing counterpart to `notifyResidentSafe`: a cross-programme
+   * routing notice is a courtesy on top of an assignment that has already
+   * committed, so a delivery problem must never undo it.
+   */
+  static async notifyProgramCoordinatorSafe(programId, payload, executor = db) {
+    try {
+      await ensureSchema();
+      const userId = await NotificationService.resolveUserIdForProgramCoordinator(
+        programId,
+        executor,
+      );
+      if (!userId) return null;
+      return NotificationService.create({ user_id: userId, ...payload }, executor);
+    } catch (error) {
+      console.error(
+        `[notifications] could not record "${payload && payload.type}" for programme ${programId}:`,
+        error.message,
+      );
+      return null;
+    }
+  }
+
+  /**
    * List a user's notifications, newest first, with the totals the badge needs.
    *
    * Accepts either `user_id` or `resident_id`; the latter is resolved through
@@ -279,6 +351,7 @@ class NotificationService {
 
     let userId = toPositiveInt(options.user_id);
     if (!userId) userId = await NotificationService.resolveUserIdForResident(options.resident_id);
+    if (!userId) userId = await NotificationService.resolveUserIdForProgramCoordinator(options.program_id);
     if (!userId) {
       return { user_id: null, data: [], total: 0, unread: 0, limit, offset };
     }
@@ -329,6 +402,7 @@ class NotificationService {
 
     let userId = toPositiveInt(options.user_id);
     if (!userId) userId = await NotificationService.resolveUserIdForResident(options.resident_id);
+    if (!userId) userId = await NotificationService.resolveUserIdForProgramCoordinator(options.program_id);
     if (!userId) return 0;
 
     const [[row]] = await db.query(
@@ -351,6 +425,7 @@ class NotificationService {
 
     let userId = toPositiveInt(options.user_id);
     if (!userId) userId = await NotificationService.resolveUserIdForResident(options.resident_id);
+    if (!userId) userId = await NotificationService.resolveUserIdForProgramCoordinator(options.program_id);
     if (!userId) return { found: false, changed: false, notification: null };
 
     const [rows] = await db.query(
@@ -376,6 +451,7 @@ class NotificationService {
 
     let userId = toPositiveInt(options.user_id);
     if (!userId) userId = await NotificationService.resolveUserIdForResident(options.resident_id);
+    if (!userId) userId = await NotificationService.resolveUserIdForProgramCoordinator(options.program_id);
     if (!userId) return { changed: 0, unread: 0 };
 
     const [result] = await db.query(

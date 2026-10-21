@@ -215,7 +215,7 @@ class RotationController {
    */
   static async checkCapacity(req, res) {
     try {
-      const { rotation_id, start_date, end_date, program_id, exclude_assignment_id } = req.body ?? {};
+      const { rotation_id, start_date, end_date, program_id, resident_id, exclude_assignment_id } = req.body ?? {};
       if (!rotation_id || !start_date || !end_date) {
         return res.status(400).json({
           success: false,
@@ -225,6 +225,9 @@ class RotationController {
       const outcome = await RotationCapacityService.checkPlacement(db, {
         rotation_id,
         program_id: program_id ?? null,
+        // The resident being placed, so their own existing rows in this rotation
+        // are not counted as other people — the same promise the write makes.
+        resident_id: resident_id ?? null,
         proposal: { start_date, end_date },
         excludeAssignmentId: exclude_assignment_id ?? null,
       });

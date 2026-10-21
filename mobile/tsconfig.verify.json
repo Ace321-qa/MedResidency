@@ -24,6 +24,8 @@
     "src/utils/cccMatrix.ts",
     "src/utils/clinicRotationRequest.ts",
     "src/utils/capacityRules.ts",
+    "src/utils/noticeDispatch.ts",
+    "src/utils/networkDiagram.ts",
     "scripts/verify-date-calc.ts",
     "scripts/verify-date-boundaries.ts",
     "scripts/verify-date-normalize.ts",
@@ -32,6 +34,8 @@
     "scripts/verify-ccc-matrix.ts",
     "scripts/verify-clinic-rotation-request.ts",
     "scripts/verify-capacity.ts",
+    "scripts/verify-notice-dispatch.ts",
+    "scripts/verify-network-diagram.ts",
     "../scripts/date-parity-cases.js"
   ]
 }

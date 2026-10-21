@@ -48,6 +48,22 @@ function window(start, end, extra = {}) {
   return { start_date: start, end_date: end, ...extra };
 }
 
+/**
+ * A resident's posting, the way the loader hands them over.
+ *
+ * Every fixture now names its resident, because that is what the engine counts.
+ * A fixture without one still works — the row id keeps it distinct — but it
+ * would no longer be describing people, which is the whole subject here.
+ */
+function posting(start, end, residentId, extra = {}) {
+  return { start_date: start, end_date: end, resident_id: residentId, ...extra };
+}
+
+/** `n` distinct residents all standing for the same window, ids 9001 upward. */
+function cohort(start, end, n) {
+  return Array.from({ length: n }, (_, index) => posting(start, end, 9001 + index));
+}
+
 /* ------------------------------------------------------------------ *
  * Week arithmetic
  * ------------------------------------------------------------------ */
@@ -134,16 +150,12 @@ const BLOCK_5 = window('2026-10-18', '2026-11-14');
 const BLOCK_6 = window('2026-11-15', '2026-12-12');
 
 // Three residents already on Block 5, capacity 3.
-const threeOnBlock5 = [
-  window('2026-10-18', '2026-11-14'),
-  window('2026-10-18', '2026-11-14'),
-  window('2026-10-18', '2026-11-14'),
-];
+const threeOnBlock5 = cohort('2026-10-18', '2026-11-14', 3);
 
 {
   const result = evaluateOccupancy({
     existing: threeOnBlock5,
-    proposal: BLOCK_5,
+    proposal: posting('2026-10-18', '2026-11-14', 9104),
     capacity: 3,
   });
   check('the fixture itself is the 4-resident case', result.peak, 4);
@@ -161,12 +173,8 @@ console.log('\n-- one week only: the amber case from the brief --');
 {
   // Three standing for the whole block; the proposal is a single week.
   const result = evaluateOccupancy({
-    existing: [
-      window('2026-10-18', '2026-11-14'),
-      window('2026-10-18', '2026-11-14'),
-      window('2026-10-18', '2026-11-14'),
-    ],
-    proposal: window('2026-10-18', '2026-10-24'),
+    existing: threeOnBlock5,
+    proposal: posting('2026-10-18', '2026-10-24', 9104),
     capacity: 3,
   });
   check('a single over-capacity week is amber', result.status, 'AMBER');
@@ -178,12 +186,8 @@ console.log('\n-- one week only: the amber case from the brief --');
 console.log('\n-- two weeks: review --');
 {
   const result = evaluateOccupancy({
-    existing: [
-      window('2026-10-18', '2026-11-14'),
-      window('2026-10-18', '2026-11-14'),
-      window('2026-10-18', '2026-11-14'),
-    ],
-    proposal: window('2026-10-25', '2026-11-07'),
+    existing: threeOnBlock5,
+    proposal: posting('2026-10-25', '2026-11-07', 9104),
     capacity: 3,
   });
   check('two weeks over is review', result.status, 'REVIEW');
@@ -193,10 +197,9 @@ console.log('\n-- two weeks: review --');
 
 console.log('\n-- the fifth resident: two over in every week --');
 {
-  const fourOnBlock5 = [...threeOnBlock5, window('2026-10-18', '2026-11-14')];
   const result = evaluateOccupancy({
-    existing: fourOnBlock5,
-    proposal: BLOCK_5,
+    existing: cohort('2026-10-18', '2026-11-14', 4),
+    proposal: posting('2026-10-18', '2026-11-14', 9105),
     capacity: 3,
   });
   check('5 residents against 3 is red', result.status, 'RED');
@@ -204,11 +207,47 @@ console.log('\n-- the fifth resident: two over in every week --');
   check('the peak is 5', result.peak, 5);
 }
 
+console.log('\n-- duplicate rows for one resident are one person --');
+{
+  // The phantom overcapacity: a resident whose posting was saved several times,
+  // or imported alongside itself. The rows are real, the people are not, and
+  // the engine must count the people.
+  const duplicated = [
+    posting('2026-10-18', '2026-11-14', 9201, { assignment_id: 701 }),
+    posting('2026-10-18', '2026-11-14', 9201, { assignment_id: 702 }),
+    posting('2026-10-18', '2026-11-14', 9201, { assignment_id: 703 }),
+    posting('2026-10-18', '2026-11-14', 9201, { assignment_id: 704 }),
+  ];
+  const result = evaluateOccupancy({
+    existing: duplicated,
+    proposal: posting('2026-10-18', '2026-11-14', 9202),
+    capacity: 3,
+  });
+  check('four rows for one resident plus a colleague is two people', result.peak, 2);
+  check('so it is green, not red', result.status, 'GREEN');
+  check('every week counts two', result.weeks.every((week) => week.count === 2), true);
+}
+{
+  // Re-saving a resident: their own earlier rows must not count against them,
+  // whether or not the caller excludes the row being edited.
+  const result = evaluateOccupancy({
+    existing: [
+      posting('2026-10-18', '2026-11-14', 9201, { assignment_id: 801 }),
+      posting('2026-10-18', '2026-11-14', 9202),
+      posting('2026-10-18', '2026-11-14', 9203),
+    ],
+    proposal: posting('2026-10-18', '2026-11-14', 9201),
+    capacity: 3,
+  });
+  check('a resident already in the rotation does not count twice', result.peak, 3);
+  check('and the re-save is green', result.status, 'GREEN');
+}
+
 console.log('\n-- adjacency and hand-over are NOT conflicts --');
 {
   const result = evaluateOccupancy({
-    existing: [BLOCK_5, BLOCK_5, BLOCK_5],
-    proposal: BLOCK_6,
+    existing: threeOnBlock5,
+    proposal: posting('2026-11-15', '2026-12-12', 9104),
     capacity: 3,
   });
   check('a resident on the next block is green', result.status, 'GREEN');
@@ -217,11 +256,11 @@ console.log('\n-- adjacency and hand-over are NOT conflicts --');
 }
 {
   // Two residents hold weeks 1-2 each; the proposal takes weeks 3-4.
-  const firstHalf = window('2026-10-18', '2026-10-31');
-  const secondHalf = window('2026-11-01', '2026-11-14');
+  const firstHalf = cohort('2026-10-18', '2026-10-31', 2);
+  const secondHalf = cohort('2026-11-01', '2026-11-14', 2);
   const result = evaluateOccupancy({
-    existing: [firstHalf, firstHalf, secondHalf, secondHalf],
-    proposal: secondHalf,
+    existing: [...firstHalf, ...secondHalf],
+    proposal: posting('2026-11-01', '2026-11-14', 9301),
     capacity: 3,
   });
   check('half-block hand-over is green at capacity 3', result.status, 'GREEN');
@@ -230,7 +269,11 @@ console.log('\n-- adjacency and hand-over are NOT conflicts --');
 
 console.log('\n-- a proposal into an empty rotation counts itself --');
 {
-  const result = evaluateOccupancy({ existing: [], proposal: BLOCK_5, capacity: 3 });
+  const result = evaluateOccupancy({
+    existing: [],
+    proposal: posting('2026-10-18', '2026-11-14', 9104),
+    capacity: 3,
+  });
   check('one resident alone is green', result.status, 'GREEN');
   check('the count is 1, not 0', result.peak, 1);
   check('every week counts one', result.weeks.every((week) => week.count === 1), true);
@@ -240,7 +283,7 @@ console.log('\n-- unlimited and locked --');
 {
   const unlimited = evaluateOccupancy({
     existing: threeOnBlock5,
-    proposal: BLOCK_5,
+    proposal: posting('2026-10-18', '2026-11-14', 9104),
     capacity: null,
   });
   check('unlimited stays green however many', unlimited.status, 'GREEN');
@@ -248,7 +291,7 @@ console.log('\n-- unlimited and locked --');
 
   const locked = evaluateOccupancy({
     existing: threeOnBlock5,
-    proposal: BLOCK_5,
+    proposal: posting('2026-10-18', '2026-11-14', 9104),
     capacity: 3,
     locked: true,
   });
@@ -260,20 +303,42 @@ console.log('\n-- unlimited and locked --');
 console.log('\n-- re-saving an assignment does not count it against itself --');
 {
   const existing = [
-    window('2026-10-18', '2026-11-14', { assignment_id: 501 }),
-    window('2026-10-18', '2026-11-14', { assignment_id: 502 }),
-    window('2026-10-18', '2026-11-14', { assignment_id: 503 }),
+    posting('2026-10-18', '2026-11-14', 9401, { assignment_id: 501 }),
+    posting('2026-10-18', '2026-11-14', 9402, { assignment_id: 502 }),
+    posting('2026-10-18', '2026-11-14', 9403, { assignment_id: 503 }),
   ];
-  const naive = evaluateOccupancy({ existing, proposal: BLOCK_5, capacity: 3 });
+  // Somebody else joins: four people, one over the limit.
+  const naive = evaluateOccupancy({
+    existing,
+    proposal: posting('2026-10-18', '2026-11-14', 9404),
+    capacity: 3,
+  });
   check('counting itself makes 4', naive.peak, 4);
   const excluded = evaluateOccupancy({
     existing,
-    proposal: BLOCK_5,
+    proposal: posting('2026-10-18', '2026-11-14', 9404, { assignment_id: 504 }),
     capacity: 3,
-    excludeAssignmentId: 501,
+    excludeAssignmentId: 503,
   });
   check('excluding itself makes 3', excluded.peak, 3);
   check('and is green', excluded.status, 'GREEN');
+}
+
+console.log('\n-- an unnamed row is still counted once, not collapsed --');
+{
+  // An older caller that has not been taught about residents must not have its
+  // rows silently merged into one person.
+  const result = evaluateOccupancy({
+    existing: [
+      window('2026-10-18', '2026-11-14', { assignment_id: 601 }),
+      window('2026-10-18', '2026-11-14', { assignment_id: 602 }),
+      window('2026-10-18', '2026-11-14', { assignment_id: 603 }),
+    ],
+    proposal: posting('2026-10-18', '2026-11-14', 9501),
+    capacity: 3,
+  });
+  check('three anonymous rows are three people', result.peak, 4);
+  check('and the fourth is over the limit', result.status, 'RED');
 }
 
 console.log('\n-- unreadable dates degrade to "allowed", never to a crash --');
@@ -288,16 +353,20 @@ console.log('\n-- the message names the shape of the problem --');
 {
   const amber = evaluateOccupancy({
     existing: threeOnBlock5,
-    proposal: window('2026-10-18', '2026-10-24'),
+    proposal: posting('2026-10-18', '2026-10-24', 9104),
     capacity: 3,
   });
   check('amber says temporary and asks for a rationale', /Temporary overcapacity/.test(amber.message), true);
-  const red = evaluateOccupancy({ existing: threeOnBlock5, proposal: BLOCK_5, capacity: 3 });
+  const red = evaluateOccupancy({
+    existing: threeOnBlock5,
+    proposal: posting('2026-10-18', '2026-11-14', 9104),
+    capacity: 3,
+  });
   check('red asks for a lead override', /programme-lead override/.test(red.message), true);
   check('the message carries the numbers', /4 residents against a limit of 3/.test(red.message), true);
   const blocked = evaluateOccupancy({
     existing: threeOnBlock5,
-    proposal: BLOCK_5,
+    proposal: posting('2026-10-18', '2026-11-14', 9104),
     capacity: 3,
     locked: true,
   });

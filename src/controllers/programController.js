@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const ProgramConnectionService = require('../services/programConnectionService');
 
 /**
  * Programmes — the registry of residency programmes the platform serves.
@@ -361,6 +362,122 @@ class ProgramController {
         .status(500)
         .json({ success: false, error: 'The programme could not be deleted', details: error.message });
     }
+  }
+
+  /**
+   * `GET /programs/network` — the citywide residency map.
+   *
+   * Programmes as nodes, declared partnerships as edges, and the cross-programme
+   * postings actually standing today as observed ties. Declared and observed are
+   * reported separately rather than merged, because "we agreed to exchange" and
+   * "we are exchanging" are different facts and a coordinator needs to see a
+   * partnership that has not been used yet as exactly that.
+   */
+  static async getNetwork(req, res) {
+    try {
+      const network = await ProgramConnectionService.getNetwork();
+      return res.status(200).json({ success: true, data: network });
+    } catch (error) {
+      console.error('Error in getNetwork controller:', error.message);
+      return res
+        .status(500)
+        .json({ success: false, error: 'The residency network could not be loaded', details: error.message });
+    }
+  }
+
+  /** `GET /programs/:id/connections` — one programme's partnerships. */
+  static async getProgramConnections(req, res) {
+    try {
+      const id = parseId(req.params.id);
+      if (!id) {
+        return res.status(400).json({ success: false, error: 'A numeric programme id is required' });
+      }
+      const [rows] = await ProgramConnectionService.ensureSchema().then(() =>
+        db.query(
+          `SELECT
+             pc.id,
+             pc.source_program_id,
+             src.program_name AS source_program_name,
+             pc.target_program_id,
+             tgt.program_name AS target_program_name,
+             pc.connection_type,
+             pc.is_active,
+             DATE_FORMAT(pc.created_at, '%Y-%m-%d %H:%i') AS created_at
+           FROM program_connections pc
+             JOIN programs src ON src.id = pc.source_program_id
+             JOIN programs tgt ON tgt.id = pc.target_program_id
+           WHERE (pc.source_program_id = ? OR pc.target_program_id = ?)
+           ORDER BY pc.is_active DESC, pc.id DESC;`,
+          [id, id],
+        ),
+      );
+      return res.status(200).json({ success: true, count: rows.length, data: rows });
+    } catch (error) {
+      console.error('Error in getProgramConnections controller:', error.message);
+      return res
+        .status(500)
+        .json({ success: false, error: 'The connections could not be loaded', details: error.message });
+    }
+  }
+
+  /**
+   * `POST /programs/connections` — declare a partnership.
+   *
+   * Accepts either orientation: the caller says "this programme connects to
+   * that one", and the pair is stored once (see the service), so a re-declaration
+   * from the other side does not create a second, mirrored row.
+   */
+  static async createConnection(req, res) {
+    try {
+      const { source_program_id, target_program_id, connection_type } = req.body ?? {};
+      const outcome = await ProgramConnectionService.connect(
+        source_program_id,
+        target_program_id,
+        connection_type,
+      );
+      if (!outcome.ok) {
+        return res.status(outcome.status).json({ success: false, error: outcome.error });
+      }
+      return res.status(outcome.status).json({
+        success: true,
+        message: outcome.message,
+        data: outcome.data,
+      });
+    } catch (error) {
+      console.error('Error in createConnection controller:', error.message);
+      return res
+        .status(500)
+        .json({ success: false, error: 'The connection could not be created', details: error.message });
+    }
+  }
+
+  /** `DELETE /programs/connections/:id` — withdraw a partnership. */
+  static async deleteConnection(req, res) {
+    try {
+      const outcome = await ProgramConnectionService.disconnect(req.params.id);
+      if (!outcome.ok) {
+        return res.status(outcome.status).json({ success: false, error: outcome.error });
+      }
+      return res.status(200).json({ success: true, message: outcome.message, data: outcome.data });
+    } catch (error) {
+      console.error('Error in deleteConnection controller:', error.message);
+      return res
+        .status(500)
+        .json({ success: false, error: 'The connection could not be removed', details: error.message });
+    }
+  }
+
+  /**
+   * `GET /programs/connection-types` — the partnership kinds the screen offers.
+   *
+   * Served rather than hard-coded in the app so the enum lives in one place: a
+   * type added here reaches the form without a client release.
+   */
+  static async getConnectionTypes(req, res) {
+    return res.status(200).json({
+      success: true,
+      data: ProgramConnectionService.getConnectionTypes(),
+    });
   }
 }
 

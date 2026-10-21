@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router';
 import {
   BookUser,
   Building2,
+  Link2,
   Pencil,
   Plus,
   Stethoscope,
@@ -19,6 +20,7 @@ import {
   ErrorState,
   IconButton,
   ListRow,
+  ProgramConnectionsSheet,
   ProgramEditorSheet,
   Screen,
   SearchInput,
@@ -78,6 +80,8 @@ export default function SignInScreen() {
   const [editorProgram, setEditorProgram] = useState<Program | null>(null);
   const [editorSeq, setEditorSeq] = useState(0);
   const [pendingDelete, setPendingDelete] = useState<Program | null>(null);
+  /** The programme whose "Connect to other programme" sheet is open. */
+  const [connectionsProgram, setConnectionsProgram] = useState<Program | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const residents = roster.data ?? (EMPTY_ARRAY as ResidentListItem[]);
@@ -298,6 +302,12 @@ export default function SignInScreen() {
                         accessibilityLabel={`Open ${program.program_name}`}
                       />
                       <IconButton
+                        icon={Link2}
+                        tone="primary"
+                        accessibilityLabel={`Connect ${program.program_name} to another programme`}
+                        onPress={() => setConnectionsProgram(program)}
+                      />
+                      <IconButton
                         icon={Pencil}
                         tone="primary"
                         accessibilityLabel={`Edit ${program.program_name}`}
@@ -355,6 +365,17 @@ export default function SignInScreen() {
         program={editorProgram}
         onClose={() => setEditorOpen(false)}
         onSaved={() => programs.refresh()}
+      />
+
+      {/* Keyed on the programme so opening the sheet from a different card
+          remounts it with that programme's connections rather than showing the
+          previous card's list. */}
+      <ProgramConnectionsSheet
+        key={`connections-${connectionsProgram?.id ?? 'none'}`}
+        visible={connectionsProgram !== null}
+        program={connectionsProgram}
+        onClose={() => setConnectionsProgram(null)}
+        onChanged={() => programs.refresh()}
       />
 
       <Sheet

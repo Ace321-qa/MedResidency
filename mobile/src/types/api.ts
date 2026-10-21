@@ -126,6 +126,73 @@ export interface DeleteProgramResult {
   program: Program | null;
 }
 
+/** The kinds of partnership a programme may declare. Mirrors the server enum. */
+export type ProgramConnectionType =
+  | 'HOSPITAL_ROTATION'
+  | 'CLINIC_EXCHANGE'
+  | 'ACADEMIC_PARTNERSHIP';
+
+/** One declared partnership between two programmes. */
+export interface ProgramConnection {
+  id: number;
+  source_program_id: number;
+  source_program_name: string;
+  source_program_code?: string;
+  target_program_id: number;
+  target_program_name: string;
+  target_program_code?: string;
+  connection_type: ProgramConnectionType;
+  /** 1 = active, 0 = withdrawn. */
+  is_active: number;
+  created_at?: IsoDateString;
+}
+
+/** A programme as a node on the citywide map, with its place and its traffic. */
+export interface NetworkNode {
+  id: number;
+  program_code: string;
+  program_name: string;
+  specialty_name: string | null;
+  institution_name: string | null;
+  resident_count: number;
+  /** Percentage coordinates (0–100), so the layout scales to any screen. */
+  position: { x: number; y: number };
+  /** Residents from this programme currently posted into another programme. */
+  residents_out: number;
+  /** Residents from other programmes currently posted into this one. */
+  residents_in: number;
+  partner_count: number;
+}
+
+/**
+ * A cross-programme posting actually standing today: residents enrolled in one
+ * programme and assigned to a rotation owned by another. Derived, never stored.
+ */
+export interface NetworkCrossRotation {
+  home_program_id: number;
+  home_program_name: string;
+  host_program_id: number;
+  host_program_name: string;
+  resident_count: number;
+  assignment_count: number;
+  rotation_names: string[];
+  department_names: string[];
+  latest_block_number: number | null;
+}
+
+/** `GET /programs/network` — the whole city at a glance. */
+export interface ResidencyNetwork {
+  nodes: NetworkNode[];
+  connections: ProgramConnection[];
+  cross_rotations: NetworkCrossRotation[];
+  totals: {
+    programmes: number;
+    connections: number;
+    cross_rotations: number;
+    residents_on_cross_rotation: number;
+  };
+}
+
 /** `GET /rotations/blocks?program_id=`. */
 export interface RotationBlock {
   block_id: number;

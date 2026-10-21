@@ -484,6 +484,10 @@ export default function MasterGridScreen() {
     checkAssignmentCapacity({
       rotation_id: assignRotationId,
       program_id: programId ?? undefined,
+      // Who is being placed. Without it the server counts the resident's own
+      // existing rows as other people, so the banner would report a phantom
+      // overcapacity the seat tag beside it disagrees with.
+      resident_id: selected?.residentId ?? undefined,
       start_date: targetWindow.start,
       end_date: targetWindow.end,
     })
@@ -502,7 +506,7 @@ export default function MasterGridScreen() {
     return () => {
       cancelled = true;
     };
-  }, [assignSheetOpen, assignRotationId, programId, targetWindow, capacityAttempt]);
+  }, [assignSheetOpen, assignRotationId, programId, selected?.residentId, targetWindow, capacityAttempt]);
 
   /**
    * The verdict, but only while it still describes the current selection.
