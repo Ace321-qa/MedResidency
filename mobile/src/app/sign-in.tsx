@@ -273,11 +273,14 @@ export default function SignInScreen() {
 
             {programList.map((program, index) => {
               const active = program.is_active === 1;
+              const subtitle = program.coordinator_email
+                ? `${program.program_code} · ${program.coordinator_email}`
+                : program.program_code;
               return (
                 <ListRow
                   key={program.id}
                   title={program.program_name}
-                  subtitle={program.program_code}
+                  subtitle={subtitle}
                   meta={
                     `${program.resident_count} resident${program.resident_count === 1 ? '' : 's'}` +
                     (active ? '' : ' · Hidden from sign-in')

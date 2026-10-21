@@ -30,13 +30,17 @@ import type { Program } from '../types/api';
 interface FormState {
   code: string;
   name: string;
+  coordinatorEmail: string;
   active: string;
 }
 
 interface FieldErrors {
   code?: string;
   name?: string;
+  coordinatorEmail?: string;
 }
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export interface ProgramEditorSheetProps {
   visible: boolean;
@@ -54,6 +58,7 @@ export function ProgramEditorSheet({ visible, program, onClose, onSaved }: Progr
   const [form, setForm] = useState<FormState>(() => ({
     code: program?.program_code ?? '',
     name: program?.program_name ?? '',
+    coordinatorEmail: program?.coordinator_email ?? '',
     active: program && program.is_active === 0 ? '0' : '1',
   }));
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
@@ -69,6 +74,11 @@ export function ProgramEditorSheet({ visible, program, onClose, onSaved }: Progr
     const errors: FieldErrors = {};
     if (form.name.trim() === '') errors.name = 'A programme name is required.';
     if (form.code.trim() === '') errors.code = 'A programme code is required.';
+    if (form.coordinatorEmail.trim() === '') {
+      errors.coordinatorEmail = 'Coordinator email is required.';
+    } else if (!EMAIL_REGEX.test(form.coordinatorEmail.trim())) {
+      errors.coordinatorEmail = 'A valid coordinator email is required.';
+    }
     return errors;
   }
 
@@ -81,6 +91,7 @@ export function ProgramEditorSheet({ visible, program, onClose, onSaved }: Progr
     const payload = {
       program_name: form.name.trim(),
       program_code: form.code.trim().toUpperCase(),
+      coordinator_email: form.coordinatorEmail.trim().toLowerCase(),
       is_active: form.active === '1' ? 1 : 0,
     };
 
@@ -148,6 +159,18 @@ export function ProgramEditorSheet({ visible, program, onClose, onSaved }: Progr
           autoCapitalize="characters"
           error={fieldErrors.code}
           hint="Unique across the platform. Stored upper-case."
+        />
+
+        <TextField
+          label="Coordinator email"
+          required
+          value={form.coordinatorEmail}
+          onChangeText={(value) => setForm((current) => ({ ...current, coordinatorEmail: value }))}
+          placeholder="e.g. fm.coordinator@hospital.org"
+          autoCapitalize="none"
+          keyboardType="email-address"
+          error={fieldErrors.coordinatorEmail}
+          hint="Mandatory contact email for the Program Coordinator, Director, or Chief Resident."
         />
 
         <ChoiceGroup

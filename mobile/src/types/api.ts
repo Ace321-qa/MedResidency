@@ -90,6 +90,7 @@ export interface Program {
   program_name: string;
   specialty_name: string | null;
   institution_name: string | null;
+  coordinator_email: string | null;
   /** 1 = offered on the sign-in picker, 0 = deactivated. */
   is_active: number;
   /** Actively enrolled residents (`ACTIVE_FULL_TIME` / `ACTIVE_PART_TIME`). */
@@ -102,6 +103,7 @@ export interface Program {
 export interface CreateProgramPayload {
   program_name: string;
   program_code: string;
+  coordinator_email: string;
   specialty_name?: string | null;
   institution_name?: string | null;
   country_code?: string | null;
@@ -112,6 +114,7 @@ export interface CreateProgramPayload {
 export interface UpdateProgramPayload {
   program_name?: string;
   program_code?: string;
+  coordinator_email?: string;
   specialty_name?: string | null;
   institution_name?: string | null;
   is_active?: number;

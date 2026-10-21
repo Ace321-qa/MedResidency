@@ -25,6 +25,7 @@ const FIELD_LIMITS = {
   program_name: 255,
   specialty_name: 255,
   institution_name: 255,
+  coordinator_email: 255,
 };
 
 const FIELD_LABELS = {
@@ -32,7 +33,10 @@ const FIELD_LABELS = {
   program_name: 'Programme name',
   specialty_name: 'Specialty',
   institution_name: 'Institution',
+  coordinator_email: 'Coordinator email',
 };
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 let schemaReady = false;
 
@@ -65,6 +69,7 @@ async function ensureProgramSchema() {
       academic_year_start_month INT UNSIGNED NOT NULL DEFAULT 7,
       default_block_duration_weeks INT UNSIGNED NOT NULL DEFAULT 4,
       standard_shift_hours DECIMAL(4,2) NOT NULL DEFAULT 7.00,
+      coordinator_email VARCHAR(255) NOT NULL DEFAULT 'coordinator@medresidency.org',
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
@@ -82,6 +87,41 @@ async function ensureProgramSchema() {
     } catch (error) {
       console.warn(`[programs] could not relax "${clause}": ${error.message}`);
     }
+  }
+
+  try {
+    const [columns] = await db.query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'programs' AND COLUMN_NAME = 'coordinator_email'`
+    );
+    if (columns.length === 0) {
+      await db.query(
+        "ALTER TABLE programs ADD COLUMN coordinator_email VARCHAR(255) NOT NULL DEFAULT 'coordinator@medresidency.org'"
+      );
+    } else {
+      try {
+        await db.query(
+          "ALTER TABLE programs MODIFY COLUMN coordinator_email VARCHAR(255) NOT NULL DEFAULT 'coordinator@medresidency.org'"
+        );
+      } catch (error) {
+        console.warn(`[programs] could not modify coordinator_email: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    console.warn(`[programs] could not ensure coordinator_email: ${error.message}`);
+  }
+
+  try {
+    await db.query(
+      "UPDATE programs SET coordinator_email = 'fm.coordinator@medresidency.org' WHERE (coordinator_email IS NULL OR coordinator_email = '' OR coordinator_email = 'coordinator@medresidency.org') AND (LOWER(program_name) LIKE '%family%' OR LOWER(program_code) LIKE '%fm%' OR LOWER(specialty_name) LIKE '%family%')"
+    );
+    await db.query(
+      "UPDATE programs SET coordinator_email = 'im.coordinator@medresidency.org' WHERE (coordinator_email IS NULL OR coordinator_email = '' OR coordinator_email = 'coordinator@medresidency.org') AND (LOWER(program_name) LIKE '%internal%' OR LOWER(program_code) LIKE '%im%' OR LOWER(specialty_name) LIKE '%internal%')"
+    );
+    await db.query(
+      "UPDATE programs SET coordinator_email = 'peds.coordinator@medresidency.org' WHERE (coordinator_email IS NULL OR coordinator_email = '' OR coordinator_email = 'coordinator@medresidency.org') AND (LOWER(program_name) LIKE '%pediatric%' OR LOWER(program_code) LIKE '%ped%' OR LOWER(specialty_name) LIKE '%pediatric%')"
+    );
+  } catch (error) {
+    console.warn(`[programs] could not backfill coordinator emails: ${error.message}`);
   }
 
   schemaReady = true;
@@ -104,6 +144,7 @@ const PROGRAM_COLUMNS = `
   p.program_name,
   p.specialty_name,
   p.institution_name,
+  p.coordinator_email,
   p.is_active,
   p.created_at,
   p.updated_at,
@@ -141,24 +182,33 @@ function normalizeProgram(input, options = {}) {
   const values = {};
   const errors = [];
 
-  for (const field of ['program_name', 'program_code', 'specialty_name', 'institution_name']) {
+  for (const field of ['program_name', 'program_code', 'specialty_name', 'institution_name', 'coordinator_email']) {
     const present = Object.prototype.hasOwnProperty.call(input, field) && input[field] !== undefined;
     if (!present) {
-      if (!partial && (field === 'program_name' || field === 'program_code')) {
-        errors.push(`${FIELD_LABELS[field]} is required`);
+      if (!partial && (field === 'program_name' || field === 'program_code' || field === 'coordinator_email')) {
+        errors.push(field === 'coordinator_email' ? 'Coordinator email is required.' : `${FIELD_LABELS[field]} is required`);
       }
       continue;
     }
 
     const text = String(input[field] ?? '').trim();
-    const normalized = field === 'program_code' ? text.toUpperCase() : text;
+    const normalized = field === 'program_code' ? text.toUpperCase() : text.toLowerCase();
 
-    if (text === '' && (field === 'program_name' || field === 'program_code')) {
-      errors.push(`${FIELD_LABELS[field]} is required`);
+    if (text === '' && (field === 'program_name' || field === 'program_code' || field === 'coordinator_email')) {
+      errors.push(field === 'coordinator_email' ? 'Coordinator email is required.' : `${FIELD_LABELS[field]} is required`);
       continue;
     }
     if (text.length > FIELD_LIMITS[field]) {
       errors.push(`${FIELD_LABELS[field]} must be ${FIELD_LIMITS[field]} characters or fewer`);
+      continue;
+    }
+
+    if (field === 'coordinator_email') {
+      if (!EMAIL_REGEX.test(normalized)) {
+        errors.push('A valid coordinator email is required.');
+        continue;
+      }
+      values[field] = normalized;
       continue;
     }
 
@@ -209,8 +259,8 @@ class ProgramController {
 
       const [result] = await db.query(
         `INSERT INTO programs
-           (program_code, program_name, specialty_name, institution_name, country_code, is_active)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (program_code, program_name, specialty_name, institution_name, country_code, is_active, coordinator_email)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           values.program_code,
           values.program_name,
@@ -218,6 +268,7 @@ class ProgramController {
           values.institution_name ?? null,
           normalizeCountry(req.body?.country_code),
           values.is_active ?? 1,
+          values.coordinator_email,
         ],
       );
 
