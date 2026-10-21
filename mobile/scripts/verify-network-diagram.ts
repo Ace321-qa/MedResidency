@@ -5,6 +5,7 @@ import {
   describeNetwork,
   describeNodeTraffic,
   isConnected,
+  nodeHitArea,
   nodeInitials,
   nodeLabel,
   nodeRadius,
@@ -297,6 +298,55 @@ check('a null network is reported as loading', describeNetwork(null), 'Loading t
   check('no focus, no sentence', describeFocus(data, null), null);
 }
 
+/*
+ * The touch layer.
+ *
+ * Nothing inside the SVG may be pressable. `react-native-svg` converts an
+ * element carrying any touchable prop into a responder and, on web, writes
+ * `onResponderGrant`/`onResponderTerminate` and friends onto the raw DOM node —
+ * props React does not recognise, so it warns on every render. Interaction lives
+ * in a view per node instead, and these checks hold that layer to the geometry
+ * the circles are drawn with.
+ */
+function checkHitAreas(): void {
+  const size = 300;
+  const inset = 26;
+  const at = (x: number, y: number) => nodeHitArea({ position: { x, y } }, size, inset);
+  const pct = (value: unknown) => Number.parseFloat(String(value));
+
+  const topLeft = at(0, 0);
+
+  // A node at 0,0 sits at the inset, so its hit area starts before its centre by
+  // the padding: this is what keeps a corner node tappable rather than clipped.
+  checkThat('a corner hit area is a percentage', String(topLeft.left).endsWith('%'));
+  checkThat('a hit area is square', topLeft.width === topLeft.height);
+
+  const leftPct = pct(topLeft.left);
+  const widthPct = pct(topLeft.width);
+  checkThat('a corner hit area reaches past its circle centre', leftPct + widthPct > leftPct);
+
+  const centre = at(50, 50);
+  checkThat('a centred node starts left of the middle', pct(centre.left) < 50);
+
+  // A hit area must be big enough to touch. The smallest node radius is 9, and
+  // with 6 units of padding the target is at least 30 units across on a 300 box.
+  checkThat('the smallest target clears 30 units across', pct(centre.width) >= (30 / size) * 100);
+
+  // Every node gets a target whose centre is the projected point, so a tap lands
+  // on the programme whose circle was drawn there.
+  const drawn = project({ x: 50, y: 50 }, size, inset);
+  const areaCentreX = pct(centre.left) + pct(centre.width) / 2;
+  checkThat(
+    'a hit area is centred on its circle',
+    Math.abs((areaCentreX / 100) * size - drawn.x) < 0.001,
+  );
+
+  // Clamping still applies: an out-of-range coordinate cannot push a target off
+  // the drawing area.
+  const wild = at(999, -999);
+  checkThat('an out-of-range node is clamped inside the box', pct(wild.left) + pct(wild.width) <= 100);
+}
+
 function checkThat(name: string, condition: boolean): void {
   if (condition) {
     passed += 1;
@@ -306,6 +356,8 @@ function checkThat(name: string, condition: boolean): void {
     console.error(`  FAIL ${name}`);
   }
 }
+
+checkHitAreas();
 
 if (failures.length > 0) {
   console.error(`\n${failures.length} check(s) failed:\n  - ${failures.join('\n  - ')}`);

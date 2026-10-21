@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { ArrowLeftRight, Building2, Link2, Network as NetworkIcon } from 'lucide-react-native';
 import Svg, { Circle, G, Line, Text as SvgText } from 'react-native-svg';
 
@@ -26,6 +26,7 @@ import {
   describeFocus,
   describeNetwork,
   describeNodeTraffic,
+  nodeHitArea,
   nodeInitials,
   nodeLabel,
   nodeRadius,
@@ -248,8 +249,22 @@ export default function NetworkScreen() {
  *
  * Drawn with `react-native-svg` so lines and labels scale with the container
  * rather than being positioned with absolute offsets that break at a different
- * width. Interactions are on `Circle`, which carries a hit area independent of
- * the visible stroke, so a thin node is still tappable.
+ * width.
+ *
+ * ## Why nothing inside the SVG is pressable
+ *
+ * The shapes here deliberately carry no `onPress`. Giving one to a `<Circle>`
+ * makes `react-native-svg` register a responder for it, and on web that means
+ * writing `onResponderGrant`/`onResponderTerminate` onto the underlying
+ * `<circle>` — props React does not recognise on a DOM node, so it warns on
+ * every render. The handlers are not even needed there, because on web the
+ * library forwards `onPress` to `onClick` itself.
+ *
+ * Touch therefore lives in a layer of real views above the drawing, one per
+ * node, positioned from the same `project()` calls that place the circles. That
+ * is where a responder belongs, it keeps each node's hit area its own, and the
+ * whole drawing stays a single tap target per programme instead of one giant
+ * rectangle over all of them.
  */
 function NetworkMap({
   network,
@@ -267,7 +282,12 @@ function NetworkMap({
 
   return (
     <View style={styles.diagram}>
-      <Svg width="100%" height="100%" viewBox={`0 0 ${DIAGRAM_SIZE} ${DIAGRAM_SIZE}`}>
+      <Svg
+        width="100%"
+        height="100%"
+        viewBox={`0 0 ${DIAGRAM_SIZE} ${DIAGRAM_SIZE}`}
+        style={styles.svg}
+      >
         {/* Declared partnerships first, so a line never covers a node. */}
         {declared.map((edge) => {
           const from = project(edge.from.position, DIAGRAM_SIZE, NODE_INSET);
@@ -316,7 +336,6 @@ function NetworkMap({
                 fill={isFocus ? colors.primary : colors.surfaceMuted}
                 stroke={isSelected ? colors.primary : colors.border}
                 strokeWidth={isSelected || isFocus ? 3 : 1.5}
-                onPress={() => onSelect(node.id)}
               />
               <SvgText
                 x={point.x}
@@ -325,7 +344,6 @@ function NetworkMap({
                 fontWeight="600"
                 fill={isFocus ? colors.onPrimary : colors.textPrimary}
                 textAnchor="middle"
-                onPress={() => onSelect(node.id)}
               >
                 {nodeInitials(node)}
               </SvgText>
@@ -342,6 +360,21 @@ function NetworkMap({
           );
         })}
       </Svg>
+
+      {/* The touch layer: one view per node, over the drawing rather than in it. */}
+      <View style={styles.hitLayer}>
+        {network.nodes.map((node) => (
+          <Pressable
+            key={`hit-${node.id}`}
+            style={[styles.nodeHit, nodeHitArea(node, DIAGRAM_SIZE, NODE_INSET)]}
+            onPress={() => onSelect(node.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`${node.program_name}, ${node.resident_count} residents`}
+            accessibilityState={{ selected: selectedId === node.id }}
+            accessibilityHint="Shows this programme's detail."
+          />
+        ))}
+      </View>
     </View>
   );
 }
@@ -395,6 +428,16 @@ const styles = StyleSheet.create({
     aspectRatio: 1,
     width: '100%',
     marginTop: spacing.sm,
+  },
+  svg: {
+    // Static geometry only — every touch target is a view in `hitLayer`.
+    pointerEvents: 'none',
+  },
+  hitLayer: {
+    ...StyleSheet.absoluteFill,
+  },
+  nodeHit: {
+    position: 'absolute',
   },
   legend: {
     flexDirection: 'row',

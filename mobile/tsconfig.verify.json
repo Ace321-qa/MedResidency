@@ -36,6 +36,7 @@
     "scripts/verify-capacity.ts",
     "scripts/verify-notice-dispatch.ts",
     "scripts/verify-network-diagram.ts",
+    "scripts/verify-svg-touch-props.ts",
     "../scripts/date-parity-cases.js"
   ]
 }

@@ -4,6 +4,7 @@ import type {
   ProgramConnection,
   ResidencyNetwork,
 } from '../types/api';
+import type { DimensionValue } from 'react-native';
 
 /**
  * Geometry and wording for the residency network map.
@@ -63,6 +64,38 @@ export function nodeRadius(residentCount: number, min = 9, max = 22): number {
   const count = Number.isFinite(residentCount) && residentCount > 0 ? residentCount : 0;
   const scaled = Math.sqrt(count) * 2.2;
   return Math.round(Math.min(max, Math.max(min, min + scaled)) * 10) / 10;
+}
+
+/**
+ * A node's tappable area, positioned over the drawing rather than drawn in it.
+ *
+ * The map is not interactive *inside* the SVG. `react-native-svg` turns any
+ * element carrying `onPress` into a responder target, and on web it does that by
+ * spreading `onResponderGrant`/`onResponderTerminate` and friends onto the raw
+ * DOM node (`<circle>`, `<text>`), which React rejects with an unknown-prop
+ * warning. Those handlers are also redundant on web, where `react-native-svg`
+ * already forwards `onPress` to `onClick`. So the shapes stay inert and the
+ * touch target is a real view laid on top, which is where a responder belongs.
+ *
+ * The geometry is returned as percentages of the container because the SVG is a
+ * square `viewBox` stretched to a square container: an SVG coordinate of `v` in
+ * a box of `size` is at `v / size` of the box, whatever the box's pixel width.
+ */
+export function nodeHitArea(
+  node: Pick<NetworkNode, 'position'>,
+  size: number,
+  inset = 0,
+  padding = 6,
+): { left: DimensionValue; top: DimensionValue; width: DimensionValue; height: DimensionValue } {
+  const point = project(node.position, size, inset);
+  const touchingNodes = nodeRadius(0) + padding;
+  const diameter = touchingNodes * 2;
+  return {
+    left: `${((point.x - touchingNodes) / size) * 100}%`,
+    top: `${((point.y - touchingNodes) / size) * 100}%`,
+    width: `${(diameter / size) * 100}%`,
+    height: `${(diameter / size) * 100}%`,
+  };
 }
 
 /** A short label for a node: the code if it has one, otherwise the name clipped. */
