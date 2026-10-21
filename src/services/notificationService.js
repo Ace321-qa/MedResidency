@@ -336,6 +336,93 @@ class NotificationService {
   }
 
   /**
+   * Notify many residents in a fixed number of statements.
+   *
+   * The per-resident `notifyResidentSafe` costs three round trips each — two to
+   * provision the identity row and one to write the notification — which turns a
+   * whole-block notice run into a hundred-plus round trips and a request that
+   * times out. This does the same work in three statements no matter how many
+   * residents are involved: one upsert for the identity rows, one select to read
+   * their ids back, and one multi-row insert for the notifications.
+   *
+   * Best-effort, exactly like its singular counterpart: a notification that
+   * could not be written must never undo the letters that already committed.
+   * Each entry is `{ resident_id, ...payload }`, and the result keeps the same
+   * `{ notification_id, resident_id, resident_name }` shape the dispatch returns.
+   */
+  static async notifyResidentsSafe(entries, executor = db) {
+    const list = (entries || []).filter((entry) => entry && toPositiveInt(entry.resident_id));
+    if (list.length === 0) return [];
+
+    try {
+      await ensureSchema();
+
+      const residentIds = [...new Set(list.map((entry) => toPositiveInt(entry.resident_id)))];
+
+      // One upsert provisions every missing `users` row. `full_name` is built
+      // from the residents table inside the statement so the identity row reads
+      // the same as the per-resident path would have written.
+      await executor.query(
+        `INSERT INTO users (role, resident_id, full_name, is_active)
+         SELECT 'RESIDENT', r.id, CONCAT(r.first_name, ' ', r.last_name), 1
+         FROM residents r
+         WHERE r.id IN (?)
+         ON DUPLICATE KEY UPDATE full_name = VALUES(full_name);`,
+        [residentIds],
+      );
+
+      const [userRows] = await executor.query(
+        `SELECT id, resident_id FROM users WHERE role = 'RESIDENT' AND resident_id IN (?);`,
+        [residentIds],
+      );
+      const userIdByResident = new Map(
+        userRows.map((row) => [row.resident_id, Number(row.id)]),
+      );
+
+      const placeholders = [];
+      const values = [];
+      const written = [];
+      for (const entry of list) {
+        const userId = userIdByResident.get(toPositiveInt(entry.resident_id));
+        if (!userId) continue;
+        const type = NOTIFICATION_TYPES.includes(entry.type) ? entry.type : 'GENERAL';
+        placeholders.push('(?, ?, ?, ?, ?, ?)');
+        values.push(
+          userId,
+          entry.title,
+          entry.message,
+          type,
+          toPositiveInt(entry.reference_id),
+          entry.reference_type || null,
+        );
+        written.push({ resident_id: entry.resident_id, resident_name: entry.resident_name });
+      }
+
+      if (placeholders.length === 0) return [];
+
+      const [result] = await executor.query(
+        `INSERT INTO notifications
+           (user_id, title, message, type, reference_id, reference_type)
+         VALUES ${placeholders.join(', ')};`,
+        values,
+      );
+
+      const firstId = Number(result.insertId);
+      return written.map((entry, index) => ({
+        notification_id: firstId + index,
+        resident_id: entry.resident_id,
+        resident_name: entry.resident_name,
+      }));
+    } catch (error) {
+      console.error(
+        `[notifications] could not record ${list.length} notification(s):`,
+        error.message,
+      );
+      return [];
+    }
+  }
+
+  /**
    * List a user's notifications, newest first, with the totals the badge needs.
    *
    * Accepts either `user_id` or `resident_id`; the latter is resolved through

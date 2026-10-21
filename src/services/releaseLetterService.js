@@ -890,6 +890,60 @@ class ReleaseLetterService {
       (await this.resolveProgramDirector(officialsProgramId));
     const destinationFaculty = pickName(destination_supervising_faculty, supervising_faculty);
 
+    const merged = this.buildLetterMerge({
+      context,
+      longitudinal,
+      rotation,
+      template,
+      hospitalDept,
+      issueDate,
+      recipientDeptHead: recipient_dept_head,
+      destinationFaculty,
+      coordinatorName,
+      programDirectorName,
+    });
+
+    return {
+      context,
+      anchor,
+      longitudinal,
+      rotation,
+      template,
+      values: merged.values,
+      hospitalDept,
+      issueDate,
+      coordinatorName,
+      programDirectorName,
+      destinationFaculty,
+      body: merged.body,
+      subject: merged.subject,
+      unresolved: merged.unresolved,
+    };
+  }
+
+  /**
+   * The merge fields for one letter, given everything already resolved.
+   *
+   * Split out from `composeLetter` so the bulk dispatch can resolve its shared
+   * inputs once (one context query for every resident, one template for the run)
+   * and still merge each letter through exactly this code. Preview, single
+   * generate and bulk dispatch therefore fill a template identically.
+   */
+  static buildLetterMerge({
+    context,
+    longitudinal,
+    rotation,
+    template,
+    hospitalDept,
+    issueDate,
+    recipientDeptHead,
+    destinationFaculty,
+    coordinatorName,
+    programDirectorName,
+  }) {
+    const assignmentStart = toDateString(longitudinal ? longitudinal.start_date : rotation.start_date);
+    const assignmentEnd = toDateString(longitudinal ? longitudinal.end_date : rotation.end_date);
+
     const values = {
       TODAYS_DATE: formatLetterDate(issueDate),
       COORDINATOR_NAME: coordinatorName,
@@ -905,7 +959,7 @@ class ReleaseLetterService {
       RELEASE_DAY: longitudinal ? longitudinal.day_of_week : null,
       START_TIME: longitudinal ? formatTime(longitudinal.start_time) : null,
       END_TIME: longitudinal ? formatTime(longitudinal.end_time) : null,
-      DEPT_HEAD_NAME: recipient_dept_head || null,
+      DEPT_HEAD_NAME: recipientDeptHead || null,
       SUPERVISING_FACULTY: destinationFaculty,
       SUPERVISOR_NAME: longitudinal ? longitudinal.supervisor_name : null,
       ROTATION_NAME: rotation ? rotation.rotation_name : null,
@@ -923,17 +977,7 @@ class ReleaseLetterService {
     const subject = this.mergeTemplate(subjectTemplate, values);
 
     return {
-      context,
-      anchor,
-      longitudinal,
-      rotation,
-      template,
       values,
-      hospitalDept,
-      issueDate,
-      coordinatorName,
-      programDirectorName,
-      destinationFaculty,
       body,
       subject,
       unresolved: [...new Set([...subject.unresolved, ...body.unresolved])],
@@ -1653,61 +1697,20 @@ class ReleaseLetterService {
     });
 
     const code = template_code || ROTATION_NOTICE_TEMPLATE_CODE;
-    const letters = [];
-    const skipped = [];
-    const recipientsByDepartment = new Map(
-      plan.departments.map((department) => [
-        department.department_name,
-        { has_recipient: department.has_recipient, email: department.recipient_coord_email },
-      ])
-    );
 
-    for (const target of plan.targets) {
-      const recipient = recipientsByDepartment.get(String(target.department_name)) || {};
-      let composed;
-      try {
-        composed = await this.composeLetter({
-          resident_id: target.resident_id,
-          rotation_assignment_id: target.rotation_assignment_id,
-          template_code: code,
-          recipient_dept_head: recipient_dept_head || 'Head of Department',
-          hospital_department_name: target.department_name,
-          coordinator_name,
-          program_director_name,
-        });
-      } catch (error) {
-        // One unmergeable assignment must not abort the run: the rest of the
-        // block still needs its notices, and the coordinator is told which rows
-        // were left out and why.
-        skipped.push({
-          rotation_assignment_id: target.rotation_assignment_id,
-          resident_id: target.resident_id,
-          resident_name: target.resident_name,
-          reason: error.message,
-        });
-        continue;
-      }
+    // Everything below is resolved for the whole run at once. A hundred letters
+    // that each opened their own six round trips took tens of seconds and blew
+    // the request timeout, so the dispatch reads its shared inputs in a handful
+    // of batched queries and merges each letter in memory.
+    const prepared = await this.prepareNoticeLetters(plan, code, {
+      program_id,
+      recipient_dept_head,
+      coordinator_name,
+      program_director_name,
+      regenerate,
+    });
 
-      const existing = await this.findExistingLetter(composed.anchor, composed.template.id);
-      if (existing && !regenerate) {
-        skipped.push({
-          rotation_assignment_id: target.rotation_assignment_id,
-          resident_id: target.resident_id,
-          resident_name: target.resident_name,
-          reason: `A notice already exists for this assignment (letter ${existing.id}).`,
-          existing_letter_id: existing.id,
-        });
-        continue;
-      }
-
-      letters.push({
-        target,
-        composed,
-        existing,
-        recipient_coord_email: recipient.email || null,
-        has_recipient: Boolean(recipient.has_recipient),
-      });
-    }
+    const { letters, skipped } = prepared;
 
     const connection = await db.getConnection();
     const stored = [];
@@ -1716,44 +1719,19 @@ class ReleaseLetterService {
     try {
       await connection.beginTransaction();
 
-      for (const letter of letters) {
+      // One multi-row INSERT for the whole run, then one UPDATE to revoke the
+      // letters this run supersedes. Both inside the single transaction, so a
+      // run either lands entirely or not at all.
+      const insertedIds = await this.insertNoticeLetters(connection, letters, {
+        sent_by_user_id,
+        headName: recipient_dept_head || 'Head of Department',
+      });
+      await this.revokeSupersededLetters(connection, letters);
+
+      letters.forEach((letter, index) => {
         const { target, composed } = letter;
-        const [result] = await connection.query(
-          `INSERT INTO generated_release_letters
-             (rotation_assignment_id, resident_id, template_id,
-              recipient_dept_head, hospital_department_name, supervising_faculty,
-              destination_supervising_faculty, coordinator_name, program_director_name,
-              letter_issue_date, generated_letter_body, sent_status, sent_at,
-              dispatch_type, recipient_coord_email, sent_by_user_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENT', ?, ?, ?, ?);`,
-          [
-            composed.anchor.rotation_assignment_id,
-            target.resident_id,
-            composed.template.id,
-            recipient_dept_head || 'Head of Department',
-            composed.hospitalDept,
-            composed.destinationFaculty,
-            composed.destinationFaculty,
-            composed.coordinatorName,
-            composed.programDirectorName,
-            composed.issueDate,
-            composed.body.merged,
-            new Date(),
-            DISPATCH_TYPE_MASTER_GRID,
-            letter.recipient_coord_email,
-            sent_by_user_id,
-          ]
-        );
-
-        if (letter.existing) {
-          await connection.query(
-            `UPDATE generated_release_letters SET sent_status = 'REVOKED' WHERE id = ?;`,
-            [letter.existing.id]
-          );
-        }
-
         stored.push({
-          letter_id: result.insertId,
+          letter_id: insertedIds[index],
           resident_id: target.resident_id,
           resident_name: target.resident_name,
           pgy_level: target.year_in_program ? `PGY-${target.year_in_program}` : null,
@@ -1770,7 +1748,7 @@ class ReleaseLetterService {
           dispatched_to_coordinator: send_to_coordinators,
           unresolved_placeholders: composed.unresolved,
         });
-      }
+      });
 
       await connection.commit();
     } catch (error) {
@@ -1783,28 +1761,27 @@ class ReleaseLetterService {
     // Resident notifications are deliberately outside the transaction: they are
     // a courtesy to the resident, and a notification that could not be written
     // must never roll back letters a department has already been sent. They go
-    // through `notifyResidentSafe` for the same reason every other trigger does.
-    if (notify_residents) {
-      for (const letter of stored) {
-        const blockLabel = formatBlockLabel(letter.block_number);
-        const notification = await NotificationService.notifyResidentSafe(letter.resident_id, {
-          title: 'New Rotation Schedule Finalized',
-          message:
-            `You have been assigned to ${letter.rotation_name} in ` +
-            `${letter.hospital_department_name} for ${blockLabel} ` +
-            `(${letter.release_start_date} to ${letter.release_end_date}).`,
-          type: 'ROTATION_APPROVAL',
-          reference_id: letter.rotation_assignment_id,
-          reference_type: 'ROTATION_ASSIGNMENT',
-        });
-        if (notification) {
-          notified.push({
-            notification_id: notification.id,
+    // through the bulk safe path so a whole-block run is three round trips, not
+    // three per resident.
+    if (notify_residents && stored.length > 0) {
+      const written = await NotificationService.notifyResidentsSafe(
+        stored.map((letter) => {
+          const blockLabel = formatBlockLabel(letter.block_number);
+          return {
             resident_id: letter.resident_id,
             resident_name: letter.resident_name,
-          });
-        }
-      }
+            title: 'New Rotation Schedule Finalized',
+            message:
+              `You have been assigned to ${letter.rotation_name} in ` +
+              `${letter.hospital_department_name} for ${blockLabel} ` +
+              `(${letter.release_start_date} to ${letter.release_end_date}).`,
+            type: 'ROTATION_APPROVAL',
+            reference_id: letter.rotation_assignment_id,
+            reference_type: 'ROTATION_ASSIGNMENT',
+          };
+        })
+      );
+      notified.push(...written);
     }
 
     return {
@@ -1825,6 +1802,339 @@ class ReleaseLetterService {
       notifications: notified,
       skipped,
     };
+  }
+
+  /**
+   * Resolve and merge every letter in a dispatch without touching the database.
+   *
+   * This is the batched replacement for the old per-target `composeLetter` +
+   * `findExistingLetter` loop: instead of ~6 round trips per letter it reads the
+   * residents, the rotation assignments, the template, the officials and the
+   * existing letters in a fixed number of queries, then merges each letter with
+   * the same `buildLetterMerge` the single-letter path uses.
+   */
+  static async prepareNoticeLetters(plan, templateCode, options = {}) {
+    const {
+      program_id,
+      recipient_dept_head,
+      coordinator_name,
+      program_director_name,
+      regenerate = false,
+    } = options;
+
+    const targets = plan.targets.filter((target) => target.rotation_assignment_id);
+    const recipientsByDepartment = new Map(
+      plan.departments.map((department) => [
+        department.department_name,
+        { has_recipient: department.has_recipient, email: department.recipient_coord_email },
+      ])
+    );
+
+    if (targets.length === 0) return { letters: [], skipped: [] };
+
+    const residentIds = [...new Set(targets.map((target) => target.resident_id))];
+    const rotationAssignmentIds = [...new Set(targets.map((target) => target.rotation_assignment_id))];
+
+    // The programme is the same for every letter in a notice run, so the
+    // template and the two officials resolve once rather than per letter.
+    const template = await this.getTemplate(program_id || null, {
+      template_code: templateCode,
+    });
+    const [coordinatorResolved, directorResolved] = await Promise.all([
+      pickName(coordinator_name, template.coordinator_name)
+        ? Promise.resolve(pickName(coordinator_name, template.coordinator_name))
+        : this.resolveProgramCoordinator(program_id || null),
+      pickName(program_director_name, template.program_director_name)
+        ? Promise.resolve(pickName(program_director_name, template.program_director_name))
+        : this.resolveProgramDirector(program_id || null),
+    ]);
+
+    const [contexts, rotations, existingByAssignment] = await Promise.all([
+      this.loadResidentMergeContexts(residentIds),
+      this.loadRotationAssignments(rotationAssignmentIds),
+      // Existing letters are always loaded: a regenerate run needs them to
+      // revoke the letter it supersedes, exactly as the singular path does.
+      this.findExistingLetters(rotationAssignmentIds, template.id),
+    ]);
+
+    const issueDate = normalizeLetterIssueDate();
+    const headName = recipient_dept_head || 'Head of Department';
+    const letters = [];
+    const skipped = [];
+
+    for (const target of targets) {
+      const context = contexts.get(target.resident_id);
+      if (!context) {
+        skipped.push({
+          rotation_assignment_id: target.rotation_assignment_id,
+          resident_id: target.resident_id,
+          resident_name: target.resident_name,
+          reason: `Resident ${target.resident_id} not found`,
+        });
+        continue;
+      }
+
+      const rotation = rotations.get(target.rotation_assignment_id);
+      if (!rotation) {
+        skipped.push({
+          rotation_assignment_id: target.rotation_assignment_id,
+          resident_id: target.resident_id,
+          resident_name: target.resident_name,
+          reason: `Rotation assignment ${target.rotation_assignment_id} was not found for resident ${target.resident_id}`,
+        });
+        continue;
+      }
+
+      const anchor = {
+        longitudinal_assignment_id: null,
+        rotation_assignment_id: rotation.rotation_assignment_id,
+      };
+      const existing = existingByAssignment.get(target.rotation_assignment_id) || null;
+      if (existing && !regenerate) {
+        skipped.push({
+          rotation_assignment_id: target.rotation_assignment_id,
+          resident_id: target.resident_id,
+          resident_name: target.resident_name,
+          reason: `A notice already exists for this assignment (letter ${existing.id}).`,
+          existing_letter_id: existing.id,
+        });
+        continue;
+      }
+
+      const hospitalDept =
+        target.department_name || rotation.department_name || context.specialty_name || null;
+      // A notice names no destination preceptor. The old per-letter path passed
+      // neither `destination_supervising_faculty` nor `supervising_faculty`, so
+      // both columns were null; the notice asks the department to accept the
+      // resident, it does not name who will teach them.
+      const destinationFaculty = null;
+
+      const merged = this.buildLetterMerge({
+        context,
+        longitudinal: null,
+        rotation,
+        template,
+        hospitalDept,
+        issueDate,
+        recipientDeptHead: headName,
+        destinationFaculty,
+        coordinatorName: coordinatorResolved,
+        programDirectorName: directorResolved,
+      });
+
+      const recipient = recipientsByDepartment.get(String(target.department_name)) || {};
+
+      letters.push({
+        target,
+        existing,
+        recipient_coord_email: recipient.email || null,
+        has_recipient: Boolean(recipient.has_recipient),
+        composed: {
+          anchor,
+          template,
+          hospitalDept,
+          issueDate,
+          coordinatorName: coordinatorResolved,
+          programDirectorName: directorResolved,
+          destinationFaculty,
+          values: merged.values,
+          body: merged.body,
+          subject: merged.subject,
+          unresolved: merged.unresolved,
+        },
+      });
+    }
+
+    return { letters, skipped };
+  }
+
+  /** Every resident's merge context, in one query. */
+  static async loadResidentMergeContexts(residentIds) {
+    const contexts = new Map();
+    if (residentIds.length === 0) return contexts;
+
+    const [rows] = await db.query(
+      `SELECT
+         r.id AS resident_id,
+         r.first_name,
+         r.last_name,
+         re.program_id,
+         re.year_in_program,
+         p.program_name,
+         p.specialty_name,
+         p.institution_name,
+         (
+           SELECT ri.identifier_value FROM resident_identifiers ri
+           WHERE ri.resident_id = r.id AND ri.identifier_type = 'CORPORATE_ID'
+           ORDER BY ri.is_primary DESC, ri.id ASC LIMIT 1
+         ) AS corporate_id,
+         (
+           SELECT ri.identifier_value FROM resident_identifiers ri
+           WHERE ri.resident_id = r.id AND ri.identifier_type = 'EMAIL'
+           ORDER BY ri.is_primary DESC, ri.id ASC LIMIT 1
+         ) AS resident_email,
+         (
+           SELECT ri.identifier_value FROM resident_identifiers ri
+           WHERE ri.resident_id = r.id AND ri.identifier_type = 'MOBILE'
+           ORDER BY ri.is_primary DESC, ri.id ASC LIMIT 1
+         ) AS resident_mobile
+       FROM residents r
+       LEFT JOIN residency_enrollments re ON re.resident_id = r.id
+       LEFT JOIN programs p ON p.id = re.program_id
+       WHERE r.id IN (?)
+       ORDER BY re.created_at DESC;`,
+      [residentIds]
+    );
+
+    for (const row of rows) {
+      // `ORDER BY re.created_at DESC` means the first row seen for a resident is
+      // the most recent enrolment — the same one the single-resident lookup
+      // would have picked.
+      if (contexts.has(row.resident_id)) continue;
+      contexts.set(row.resident_id, {
+        resident_id: row.resident_id,
+        resident_name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        pgy_level: row.year_in_program ? `PGY-${row.year_in_program}` : null,
+        corporate_id: row.corporate_id || null,
+        resident_email: row.resident_email || null,
+        resident_mobile: row.resident_mobile || null,
+        program_id: row.program_id || null,
+        program_name: row.program_name || null,
+        specialty_name: row.specialty_name || null,
+        institution_name: row.institution_name || null,
+      });
+    }
+
+    return contexts;
+  }
+
+  /** Every rotation assignment named by a run, in one query. */
+  static async loadRotationAssignments(rotationAssignmentIds) {
+    const assignments = new Map();
+    if (rotationAssignmentIds.length === 0) return assignments;
+
+    const [rows] = await db.query(
+      `SELECT
+         rra.id AS rotation_assignment_id,
+         rra.resident_id,
+         rra.start_date,
+         rra.end_date,
+         rra.notes,
+         rot.rotation_name,
+         rot.department_name
+       FROM resident_rotation_assignments rra
+       JOIN rotations rot ON rot.id = rra.rotation_id
+       WHERE rra.id IN (?);`,
+      [rotationAssignmentIds]
+    );
+
+    for (const row of rows) assignments.set(row.rotation_assignment_id, row);
+    return assignments;
+  }
+
+  /**
+   * The live letter for each assignment in a run, in one query.
+   *
+   * The single-letter `findExistingLetter` matches on the rotation anchor only
+   * when the letter is anchored to a rotation, which every notice is, so the set
+   * form is the same test asked once for the whole run.
+   */
+  static async findExistingLetters(rotationAssignmentIds, templateId) {
+    const existing = new Map();
+    if (rotationAssignmentIds.length === 0) return existing;
+
+    const [rows] = await db.query(
+      `SELECT id, rotation_assignment_id, sent_status
+       FROM generated_release_letters
+       WHERE rotation_assignment_id IN (?) AND template_id = ?
+         AND sent_status IN (?)
+       ORDER BY id ASC;`,
+      [rotationAssignmentIds, templateId, LIVE_SENT_STATES]
+    );
+
+    for (const row of rows) {
+      if (!existing.has(row.rotation_assignment_id)) existing.set(row.rotation_assignment_id, row);
+    }
+    return existing;
+  }
+
+  /**
+   * Insert every prepared letter in as few statements as possible.
+   *
+   * Chunked rather than one statement per row: MySQL caps a statement's
+   * placeholders, and a run of a few hundred rows would otherwise exceed it.
+   */
+  static async insertNoticeLetters(connection, letters, { sent_by_user_id = null, headName = 'Head of Department' } = {}) {
+    const insertedIds = [];
+    if (letters.length === 0) return insertedIds;
+
+    const COLUMNS = 16;
+    const chunkSize = Math.max(1, Math.floor(60000 / COLUMNS));
+
+    for (let start = 0; start < letters.length; start += chunkSize) {
+      const chunk = letters.slice(start, start + chunkSize);
+      const values = [];
+      const placeholders = [];
+
+      for (const letter of chunk) {
+        const { target, composed, recipient_coord_email } = letter;
+        placeholders.push(`(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENT', ?, ?, ?, ?)`);
+        values.push(
+          composed.anchor.rotation_assignment_id,
+          target.resident_id,
+          composed.template.id,
+          headName,
+          composed.hospitalDept,
+          composed.destinationFaculty,
+          composed.destinationFaculty,
+          composed.coordinatorName,
+          composed.programDirectorName,
+          composed.issueDate,
+          composed.body.merged,
+          new Date(),
+          DISPATCH_TYPE_MASTER_GRID,
+          recipient_coord_email,
+          sent_by_user_id
+        );
+      }
+
+      const [result] = await connection.query(
+        `INSERT INTO generated_release_letters
+           (rotation_assignment_id, resident_id, template_id,
+            recipient_dept_head, hospital_department_name, supervising_faculty,
+            destination_supervising_faculty, coordinator_name, program_director_name,
+            letter_issue_date, generated_letter_body, sent_status, sent_at,
+            dispatch_type, recipient_coord_email, sent_by_user_id)
+         VALUES ${placeholders.join(', ')};`,
+        values
+      );
+
+      // MySQL hands back the first auto-increment id and the count; the chunk is
+      // contiguous, so every id follows from those two numbers.
+      const first = result.insertId;
+      for (let index = 0; index < chunk.length; index += 1) insertedIds.push(first + index);
+    }
+
+    return insertedIds;
+  }
+
+  /**
+   * Revoke the letters this run supersedes, in one statement.
+   *
+   * Superseding is a takeover, not a second live letter: the row being replaced
+   * loses its SENT/DELIVERED state so the department is only ever asked to act
+   * on the newest version.
+   */
+  static async revokeSupersededLetters(connection, letters) {
+    const ids = letters
+      .map((letter) => letter.existing && letter.existing.id)
+      .filter((id) => id !== null && id !== undefined);
+    if (ids.length === 0) return;
+
+    await connection.query(
+      `UPDATE generated_release_letters SET sent_status = 'REVOKED' WHERE id IN (?);`,
+      [ids]
+    );
   }
 
   static async ensureReady() {
