@@ -271,6 +271,7 @@ export interface RotationCatalogueEntry {
   max_capacity: number | null;
   /** 1 when the limit is a hard departmental stop. */
   capacity_locked: number;
+  coordinator_email: string | null;
   created_at: IsoDateString | null;
   updated_at: IsoDateString | null;
 }
@@ -286,6 +287,7 @@ export interface CatalogueRotationPayload {
   max_capacity?: number | null;
   /** Locks the limit so no exception can clear it. */
   capacity_locked?: boolean;
+  coordinator_email?: string | null;
 }
 
 /**

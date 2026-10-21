@@ -22,7 +22,7 @@ const { makeBuffer } = require('./common');
  * is available to assign when it is not.
  */
 
-const HEADERS = ['Full Rotation Name', 'Hospital Department', 'Abbreviation', 'Max Capacity / Seat Limit'];
+const HEADERS = ['Full Rotation Name', 'Hospital Department', 'Abbreviation', 'Max Capacity / Seat Limit', 'Coordinator Email'];
 
 /**
  * Sample rows shipped with the template.
@@ -39,11 +39,11 @@ const HEADERS = ['Full Rotation Name', 'Hospital Department', 'Abbreviation', 'M
  * allowed, or every coordinator reading it will assume a number is required.
  */
 const SAMPLE_ROWS = [
-  ['Continuity Clinic', 'Primary Health Care', 'PHC', 8],
-  ['Inpatient Medicine', 'Internal Medicine', 'MED-INP', 3],
-  ['General Surgery Inpatient', 'Department of Surgery', 'SURG-INP', 4],
-  ['Pediatrics Outpatient', 'Pediatrics', 'PEDS-OPD', ''],
-  ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD', ''],
+  ['Continuity Clinic', 'Primary Health Care', 'PHC', 8, 'coord.phc@hospital.org'],
+  ['Inpatient Medicine', 'Internal Medicine', 'MED-INP', 3, 'coord.med@hospital.org'],
+  ['General Surgery Inpatient', 'Department of Surgery', 'SURG-INP', 4, ''],
+  ['Pediatrics Outpatient', 'Pediatrics', 'PEDS-OPD', '', ''],
+  ['Emergency Department', 'Emergency Medicine', 'EMERG-OPD', '', ''],
 ];
 
 /** Tolerant header aliases, matched against a lower-cased, trimmed header. */
@@ -59,6 +59,7 @@ const HEADER_ALIASES = {
     'seats',
     'max_capacity',
   ],
+  coordinatorEmail: ['coordinator email', 'coordinator_email', 'contact email', 'email'],
 };
 
 const MAX_ABBREVIATION_LENGTH = 50;
@@ -107,6 +108,7 @@ function parseCatalogueFile(buffer) {
     // Optional: a workbook with only the original three columns still parses,
     // and every row simply carries no limit.
     maxCapacity: headerIndex(headers, HEADER_ALIASES.maxCapacity),
+    coordinatorEmail: headerIndex(headers, HEADER_ALIASES.coordinatorEmail),
   };
 
   if (idx.fullName < 0 || idx.department < 0 || idx.abbreviation < 0) {
@@ -131,6 +133,7 @@ function parseCatalogueFile(buffer) {
     const department = cell('department');
     const abbreviation = cell('abbreviation').toUpperCase();
     const capacityText = cell('maxCapacity');
+    const emailText = cell('coordinatorEmail');
 
     const rowErrors = [];
     if (!fullName) rowErrors.push({ row: rowNumber, field: 'Full Rotation Name', message: 'is required' });
@@ -169,6 +172,21 @@ function parseCatalogueFile(buffer) {
       }
     }
 
+    let coordinatorEmail = null;
+    if (emailText !== '') {
+      const email = emailText.trim();
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRe.test(email) || email.length > 255) {
+        rowErrors.push({
+          row: rowNumber,
+          field: 'Coordinator Email',
+          message: 'must be a valid email address',
+        });
+      } else {
+        coordinatorEmail = email;
+      }
+    }
+
     if (rowErrors.length > 0) {
       errors.push(...rowErrors);
       continue;
@@ -187,7 +205,7 @@ function parseCatalogueFile(buffer) {
     }
     seenAbbreviations.set(abbreviation, rowNumber);
 
-    rows.push({ row: rowNumber, full_name: fullName, department, abbreviation, max_capacity: maxCapacity });
+    rows.push({ row: rowNumber, full_name: fullName, department, abbreviation, max_capacity: maxCapacity, coordinator_email: coordinatorEmail });
   }
 
   if (rows.length === 0 && errors.length === 0) {

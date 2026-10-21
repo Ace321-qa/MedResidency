@@ -26,7 +26,7 @@ const {
 
 const VIEW_COLUMNS =
   'id, program_id, full_name, department, abbreviation, is_active, default_duration_weeks, ' +
-  'max_capacity, capacity_locked, created_at, updated_at';
+  'max_capacity, capacity_locked, coordinator_email, created_at, updated_at';
 
 const CREATE_VIEW_SQL = `
   CREATE OR REPLACE VIEW rotations_catalogue AS
@@ -39,6 +39,7 @@ const CREATE_VIEW_SQL = `
          default_duration_weeks,
          max_capacity,
          capacity_locked,
+         coordinator_email,
          created_at,
          updated_at
     FROM rotations`;
@@ -77,6 +78,14 @@ async function ensureCapacityColumns() {
     await db.query(
       'ALTER TABLE rotations ADD COLUMN capacity_locked TINYINT(1) NOT NULL DEFAULT 0 AFTER max_capacity',
     );
+  }
+
+  const [coord] = await db.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rotations' AND COLUMN_NAME = 'coordinator_email'`,
+  );
+  if (coord.length === 0) {
+    await db.query('ALTER TABLE rotations ADD COLUMN coordinator_email VARCHAR(255) NULL');
   }
 
   // The audit trail for every placement made over capacity. One row per
@@ -247,6 +256,10 @@ function normalizeEntry(input, options = {}) {
   Object.assign(values, capacity.values);
   errors.push(...capacity.errors);
 
+  const email = normalizeEmail(input, partial);
+  Object.assign(values, email.values);
+  errors.push(...email.errors);
+
   return { values, errors };
 }
 
@@ -331,8 +344,8 @@ class RotationCatalogueController {
 
       await ensureCatalogueSchema();
       const [result] = await db.query(
-        `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation, max_capacity, capacity_locked)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation, max_capacity, capacity_locked, coordinator_email)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           programId,
           values.full_name,
@@ -340,6 +353,7 @@ class RotationCatalogueController {
           values.abbreviation,
           values.max_capacity ?? null,
           values.capacity_locked ?? 0,
+          values.coordinator_email ?? null,
         ],
       );
 
@@ -575,10 +589,10 @@ class RotationCatalogueController {
         if (alreadyThere.has(row.abbreviation)) updated += 1;
         else created += 1;
         await conn.query(
-          `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation, max_capacity)
-           VALUES (?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE full_name = VALUES(full_name), department = VALUES(department), max_capacity = VALUES(max_capacity)`,
-          [program.id, row.full_name, row.department, row.abbreviation, row.max_capacity ?? null],
+          `INSERT INTO rotations_catalogue (program_id, full_name, department, abbreviation, max_capacity, coordinator_email)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE full_name = VALUES(full_name), department = VALUES(department), max_capacity = VALUES(max_capacity), coordinator_email = VALUES(coordinator_email)`,
+          [program.id, row.full_name, row.department, row.abbreviation, row.max_capacity ?? null, row.coordinator_email ?? null],
         );
       }
 

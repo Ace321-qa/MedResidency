@@ -64,6 +64,7 @@ interface FormState {
   /** Kept as text: an empty field means "no limit", which is not the number 0. */
   maxCapacity: string;
   capacityLocked: boolean;
+  coordinatorEmail: string;
 }
 
 interface FieldErrors {
@@ -71,6 +72,7 @@ interface FieldErrors {
   department?: string;
   abbreviation?: string;
   maxCapacity?: string;
+  coordinatorEmail?: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -79,6 +81,7 @@ const EMPTY_FORM: FormState = {
   abbreviation: '',
   maxCapacity: '',
   capacityLocked: false,
+  coordinatorEmail: '',
 };
 
 const MAX_NAME_LENGTH = 255;
@@ -154,6 +157,7 @@ export default function RotationsCatalogueScreen() {
       abbreviation: entry.abbreviation,
       maxCapacity: entry.max_capacity === null ? '' : String(entry.max_capacity),
       capacityLocked: entry.capacity_locked === 1,
+      coordinatorEmail: entry.coordinator_email ?? '',
     });
     setFieldErrors({});
     setSaveError(null);
@@ -220,6 +224,14 @@ export default function RotationsCatalogueScreen() {
       }
     }
 
+    const email = form.coordinatorEmail.trim();
+    if (email !== '') {
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRe.test(email) || email.length > 255) {
+        errors.coordinatorEmail = 'Coordinator Email must be a valid email address';
+      }
+    }
+
     return errors;
   }
 
@@ -236,6 +248,7 @@ export default function RotationsCatalogueScreen() {
       abbreviation: form.abbreviation.trim().toUpperCase(),
       max_capacity: form.maxCapacity.trim() === '' ? null : Number(form.maxCapacity.trim()),
       capacity_locked: form.capacityLocked,
+      coordinator_email: form.coordinatorEmail.trim() === '' ? null : form.coordinatorEmail.trim(),
     };
 
     setBusy(true);
@@ -523,6 +536,20 @@ export default function RotationsCatalogueScreen() {
             keyboardType="number-pad"
             error={fieldErrors.maxCapacity}
             hint="Maximum approved concurrent residents physically present per week."
+          />
+
+          <TextField
+            label="COORDINATOR CONTACT EMAIL"
+            value={form.coordinatorEmail}
+            onChangeText={(value) => {
+              setForm((current) => ({ ...current, coordinatorEmail: value }));
+              if (fieldErrors.coordinatorEmail) setFieldErrors((e) => ({ ...e, coordinatorEmail: undefined }));
+            }}
+            placeholder="e.g. coordinator.im@hospital.org"
+            keyboardType="email-address"
+            autoCapitalize="none"
+            error={fieldErrors.coordinatorEmail}
+            hint="Receiving department coordinator email address for rotation notice letters."
           />
 
           {/* Locking the limit is only meaningful once there is a limit to lock,
