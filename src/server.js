@@ -74,6 +74,13 @@ const releaseLetterRoutes = require('./routes/releaseLetterRoutes');
 // Mount under /api/v1/letters
 app.use('/api/v1/letters', releaseLetterRoutes);
 
+// Resident messages — the resident's Letters tab: drafts, sent issues and the
+// programme office's inbox of the issues raised against it.
+const residentMessageRoutes = require('./routes/residentMessageRoutes');
+
+// Mount under /api/v1/messages
+app.use('/api/v1/messages', residentMessageRoutes);
+
 // Checkpoint 16 / 17 Health Check Endpoint
 app.get('/api/v1/health', async (req, res) => {
   try {
@@ -131,6 +138,16 @@ if (require.main === module) {
       console.log('[release-letters] schema and default templates ready.');
     } catch (error) {
       console.error('[release-letters] could not ensure schema:', error.message);
+    }
+
+    // Bring the resident-message mailbox up (drafts, sent issues and the
+    // programme office's inbox). Idempotent DDL.
+    try {
+      const ResidentMessageService = require('./services/residentMessageService');
+      await ResidentMessageService.ensureSchema();
+      console.log('[resident-messages] schema ready.');
+    } catch (error) {
+      console.error('[resident-messages] could not ensure schema:', error.message);
     }
 
     // Seed the standard Continuity of Care Clinics (CCC) for every programme so a fresh

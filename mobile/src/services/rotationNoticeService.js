@@ -1,6 +1,4 @@
 import { request } from './client';
-import { ApiListResponse } from '../types/api';
-import { ReleaseLetter } from '../types/api';
 
 /**
  * Auto-ingest visiting resident profiles from coordinator's Inbox letters.
@@ -41,7 +39,7 @@ async function visitingResidentExists(programId, corporateId) {
     );
 
     return !!existing;
-  } catch (error) {
+  } catch {
     // If we can't check, assume it doesn't exist (create will handle it)
     return false;
   }

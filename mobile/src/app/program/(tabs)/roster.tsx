@@ -31,10 +31,8 @@ export default function RosterScreen() {
     email: '',
     home_program_name: '',
   });
-// eslint-disable-line no-unused-vars
   const [saving, setSaving] = useState(false);
-// eslint-disable-line no-unused-vars
-  const [saveError, setSaveError] = useState<string | null>(null); // eslint-disable-line no-unused-vars 
+  const [saveError, setSaveError] = useState<string | null>(null);
   const residents = useApiResource(
     () => fetchResidentList({ programId, limit: 100 }),
     [programId],
@@ -133,7 +131,6 @@ export default function RosterScreen() {
       setSaving(false);
     }
   }
-  /* eslint-enable no-unused-vars */
 
   return (
     <Screen
@@ -154,7 +151,10 @@ export default function RosterScreen() {
             return (
               <Pressable
                 key={tab.value}
-                onPress={() => setShowAddVisitor(true)}
+                onPress={() => {
+                  setSaveError(null);
+                  setShowAddVisitor(true);
+                }}
                 accessibilityRole="radio"
                 accessibilityState={{ selected: active }}
                 accessibilityLabel={`${tab.label}, ${tab.count} ${tab.countLabel}`}
@@ -273,12 +273,25 @@ export default function RosterScreen() {
                     />
                   </View>
                   
+                  {saveError ? <Text style={styles.errorText}>{saveError}</Text> : null}
+
                   <View style={styles.actionButtons}>
-                    <TouchableOpacity style={styles.cancelButton} onPress={() => setShowAddVisitor(false)}>
+                    <TouchableOpacity
+                      style={styles.cancelButton}
+                      onPress={() => setShowAddVisitor(false)}
+                      disabled={saving}
+                    >
                       <Text style={styles.cancelText}>Cancel</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.saveButton} onPress={handleSaveVisitingResident}>
-                      <Text style={styles.saveText}>Save Visiting Resident</Text>
+                    <TouchableOpacity
+                      style={[styles.saveButton, saving ? styles.saveButtonDisabled : null]}
+                      onPress={handleSaveVisitingResident}
+                      disabled={saving}
+                      accessibilityLabel={saving ? 'Saving visiting resident' : 'Save visiting resident'}
+                    >
+                      <Text style={styles.saveText}>
+                        {saving ? 'Saving…' : 'Save Visiting Resident'}
+                      </Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -390,6 +403,15 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     borderRadius: radius.sm,
     alignItems: 'center',
+  },
+  saveButtonDisabled: {
+    opacity: 0.6,
+  },
+  errorText: {
+    width: '100%',
+    marginBottom: spacing.md,
+    color: colors.danger,
+    fontSize: 13,
   },
   cancelText: {
     color: colors.textPrimary,

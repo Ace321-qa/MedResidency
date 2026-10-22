@@ -1570,3 +1570,58 @@ export interface BlockFinalizationResult {
   academic_year: string;
   is_finalized: boolean;
 }
+
+/**
+ * Resident messages — the mailbox behind the resident's Letters tab.
+ *
+ * A message is one row read from two sides: the resident sees it in `DRAFT`
+ * (written, not sent), `SENT` (delivered to the programme office) or `INBOX`
+ * (the programme office wrote back); the programme office reads the same
+ * `SENT` rows as the issues raised against it.
+ */
+export type ResidentMessageFolder = 'INBOX' | 'DRAFT' | 'SENT';
+
+/** The categories the compose form offers. A closed set the API validates. */
+export type ResidentMessageCategory =
+  | 'ROTATION_ISSUE'
+  | 'SCHEDULE_CONFLICT'
+  | 'DUTY_HOURS_INQUIRY'
+  | 'GENERAL';
+
+export interface ResidentMessage {
+  id: number;
+  resident_id: number;
+  /** The programme the message was addressed to — the programme office. */
+  program_id: number;
+  /** The home programme or receiving hospital department it was raised against. */
+  recipient_department: string | null;
+  subject: string;
+  body: string;
+  category: ResidentMessageCategory;
+  folder: ResidentMessageFolder;
+  /** 1 once the resident has opened the message. */
+  is_read: number;
+  /** The resident's name, when the row is read from the programme's side. */
+  resident_name?: string | null;
+  created_at: IsoDateString | null;
+  updated_at: IsoDateString | null;
+}
+
+/** The three boxes, as one payload — the screen reads all of them at once. */
+export interface ResidentMessageBoxes {
+  inbox: ResidentMessage[];
+  drafts: ResidentMessage[];
+  sent: ResidentMessage[];
+}
+
+/** `POST /messages` — the body the compose form submits. */
+export interface CreateResidentMessagePayload {
+  resident_id: number;
+  program_id: number;
+  recipient_department?: string | null;
+  subject: string;
+  body: string;
+  category: ResidentMessageCategory;
+  /** `DRAFT` saves it, `SENT` delivers it to the programme office. */
+  folder: 'DRAFT' | 'SENT';
+}

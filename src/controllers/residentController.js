@@ -163,7 +163,15 @@ async function getExternalResidents(req, res) {
 async function createVisitingResident(req, res) {
   try {
     const { corporate_id, first_name, last_name, mobile, email, home_program_name } = req.body;
-    const program_id = req.query.program_id ? Number(req.query.program_id) : null;
+    // The programme the visitor is placed with can arrive in either place: the
+    // roster screen posts it in the body, while a link with `?program_id=` is
+    // a natural way to address the endpoint by hand. Accepting only the query
+    // string silently dropped the programme and left the visitor unenrolled.
+    const rawProgramId = req.query.program_id ?? req.body?.program_id;
+    const program_id =
+      rawProgramId !== undefined && rawProgramId !== null && rawProgramId !== ''
+        ? Number(rawProgramId)
+        : null;
 
     if (!corporate_id) {
       return res.status(400).json({
@@ -463,6 +471,7 @@ module.exports = {
   onboardResident,
   getAllResidents,
   getExternalResidents,
+  createVisitingResident,
   getResidentById,
   updateResident,
   deleteResident,
