@@ -158,6 +158,106 @@ const FIELD_LABELS = {
   abbreviation: 'Abbreviation',
 };
 
+/**
+ * The spellings the API accepts for each catalogue field.
+ *
+ * The catalogue view speaks `full_name` / `department` / `abbreviation`, while
+ * the `rotations` table underneath it speaks `rotation_name` /
+ * `department_name` / `rotation_code`, and the hosting link is
+ * `target_program_id` on one side and `hosted_by_program_id` on the other.
+ *
+ * Both are in circulation — the app sends the view's names, the Excel import
+ * writes the table's — so each field is read from any of its names rather than
+ * from exactly one. A request is a request, whichever column it happens to
+ * name, and refusing one spelling of a field the other spelling fills is a
+ * failure with no cause the caller can see.
+ */
+const FIELD_ALIASES = {
+  full_name: ['full_name', 'rotation_name'],
+  department: ['department', 'department_name'],
+  abbreviation: ['abbreviation', 'rotation_code'],
+};
+
+/** The hosting link, under either of its names. */
+const TARGET_PROGRAM_ALIASES = ['target_program_id', 'hosted_by_program_id'];
+
+/**
+ * A derived abbreviation is a label, not a word.
+ *
+ * Three characters is the shortest code anyone reads without squinting, and six
+ * is the longest that still fits beside a rotation name on a narrow screen.
+ */
+const MIN_DERIVED_ABBREVIATION_LENGTH = 3;
+const MAX_DERIVED_ABBREVIATION_LENGTH = 6;
+
+/** The coordinator contact address, and the shape one has to have to be one. */
+const MAX_EMAIL_LENGTH = 255;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Read a field from any of the names it is allowed to arrive under.
+ *
+ * @param {object} input
+ * @param {string[]} aliases
+ * @returns {{present: boolean, value: *}}
+ */
+function readAliased(input, aliases) {
+  for (const alias of aliases) {
+    if (Object.prototype.hasOwnProperty.call(input, alias) && input[alias] !== undefined) {
+      return { present: true, value: input[alias] };
+    }
+  }
+  return { present: false, value: undefined };
+}
+
+/**
+ * Derive a short, uppercase code from a rotation name.
+ *
+ * "Primary Health Care" becomes "PHC": the initials of the words, widened one
+ * letter at a time when there are too few of them to be a code ("Surgery" →
+ * "SUR"), and capped at six characters because the column holds a label rather
+ * than a word.
+ *
+ * The mobile form derives the same code from the same name, so a blank
+ * abbreviation field means the same thing on both sides of the request: the
+ * coordinator sees "PHC" offered before they save, and the server writes
+ * "PHC" if they never chose one.
+ *
+ * @param {string} rotationName
+ * @returns {string} The derived code, or an empty string if the name has no
+ *   letters to derive one from.
+ */
+function deriveAbbreviation(rotationName) {
+  const words = String(rotationName ?? '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.replace(/[^A-Za-z0-9]/g, ''))
+    .filter(Boolean);
+
+  if (words.length === 0) return '';
+
+  let code = words.map((word) => word[0].toUpperCase()).join('');
+
+  // Too few initials to be a code: widen, one more letter per word at a time.
+  let depth = 1;
+  while (code.length < MIN_DERIVED_ABBREVIATION_LENGTH && depth < 8) {
+    depth += 1;
+    const extra = words
+      .filter((word) => word.length >= depth)
+      .map((word) => word[depth - 1].toUpperCase())
+      .join('');
+    if (!extra) break;
+    code += extra;
+  }
+
+  // Words of one letter each cannot widen any further; take the flat letters.
+  if (code.length < MIN_DERIVED_ABBREVIATION_LENGTH) {
+    code = words.join('').toUpperCase().slice(0, MIN_DERIVED_ABBREVIATION_LENGTH);
+  }
+
+  return code.slice(0, MAX_DERIVED_ABBREVIATION_LENGTH);
+}
+
 /** The largest seat limit the form will accept, so a typo cannot read as infinite. */
 const MAX_CAPACITY = 999;
 
@@ -227,6 +327,13 @@ function normalizeCapacity(input, partial) {
  * characters cannot fit its column, and a duplicate abbreviation would collide
  * with the `(program_id, rotation_code)` unique key the master grid resolves by.
  *
+ * Two of the three fields can be derived from the name, and a request that
+ * omits them is asking for that derivation rather than for a refusal: a
+ * rotation without a department is one whose department is its own name, and a
+ * rotation without a code is one whose code is the initials of its name. The
+ * fallbacks apply to a create only — a partial update that leaves a field out
+ * is leaving the stored value alone, not asking for it to be overwritten.
+ *
  * @param {object} input
  * @param {{partial?: boolean}} [options] When `partial`, absent fields are
  *   ignored instead of being required — the shape an edit form needs, so
@@ -238,26 +345,54 @@ function normalizeEntry(input, options = {}) {
   const values = {};
   const errors = [];
 
+  // Read every field first, under any of the names it is allowed to arrive
+  // under, so the fallbacks below have a name to fall back *to*.
+  const read = {};
+  for (const field of Object.keys(FIELD_LABELS)) {
+    const found = readAliased(input, FIELD_ALIASES[field]);
+    const raw = found.present ? String(found.value ?? '').trim() : '';
+    read[field] = {
+      present: found.present,
+      value: field === 'abbreviation' ? raw.toUpperCase() : raw,
+      tooLong: false,
+    };
+  }
+
+  // Length limits are checked before the fallbacks, so a name that is itself
+  // too long does not also raise a second "too long" error for the department
+  // it would have been copied into.
   for (const [field, label] of Object.entries(FIELD_LABELS)) {
-    const present = Object.prototype.hasOwnProperty.call(input, field) && input[field] !== undefined;
-    if (!present) {
+    if (!read[field].present) continue;
+    const limit = field === 'abbreviation' ? MAX_ABBREVIATION_LENGTH : MAX_NAME_LENGTH;
+    if (read[field].value.length > limit) {
+      errors.push(`${label} must be ${limit} characters or fewer`);
+      read[field].tooLong = true;
+    }
+  }
+
+  if (!partial && read.full_name.present && !read.full_name.tooLong && read.full_name.value !== '') {
+    if (!read.department.present || read.department.value === '') {
+      read.department = { present: true, value: read.full_name.value, tooLong: false };
+    }
+    if (!read.abbreviation.present || read.abbreviation.value === '') {
+      const derived = deriveAbbreviation(read.full_name.value);
+      if (derived !== '') {
+        read.abbreviation = { present: true, value: derived, tooLong: false };
+      }
+    }
+  }
+
+  for (const [field, label] of Object.entries(FIELD_LABELS)) {
+    if (!read[field].present) {
       if (!partial) errors.push(`${label} is required`);
       continue;
     }
-
-    const text = String(input[field] ?? '').trim();
-    const normalized = field === 'abbreviation' ? text.toUpperCase() : text;
-
-    if (normalized === '') {
+    if (read[field].tooLong) continue;
+    if (read[field].value === '') {
       errors.push(`${label} is required`);
       continue;
     }
-    const limit = field === 'abbreviation' ? MAX_ABBREVIATION_LENGTH : MAX_NAME_LENGTH;
-    if (normalized.length > limit) {
-      errors.push(`${label} must be ${limit} characters or fewer`);
-      continue;
-    }
-    values[field] = normalized;
+    values[field] = read[field].value;
   }
 
   const capacity = normalizeCapacity(input, partial);
@@ -276,6 +411,46 @@ function normalizeEntry(input, options = {}) {
 }
 
 /**
+ * Normalise the optional coordinator contact address.
+ *
+ * The address is optional, but it is not free-form: a rotation is looked up by
+ * its coordinator when a placement question arrives, and an address that
+ * cannot be delivered to turns that lookup into a dead end for whoever is
+ * holding the phone. So the shape is checked here rather than at the point of
+ * sending, where the sender only learns about it after the message is gone.
+ *
+ * A blank field is the absence of an address, which is `NULL` rather than an
+ * empty string — the column is nullable and `NULL` is what it means.
+ *
+ * @param {object} input
+ * @param {boolean} partial - when true, an absent field is left untouched.
+ * @returns {{values: object, errors: string[]}}
+ */
+function normalizeEmail(input, partial) {
+  if (!Object.prototype.hasOwnProperty.call(input, 'coordinator_email') || input.coordinator_email === undefined) {
+    if (partial) return { values: {}, errors: [] };
+    return { values: { coordinator_email: null }, errors: [] };
+  }
+
+  const raw = input.coordinator_email;
+  if (raw === null || String(raw).trim() === '') {
+    return { values: { coordinator_email: null }, errors: [] };
+  }
+
+  const address = String(raw).trim();
+  if (address.length > MAX_EMAIL_LENGTH) {
+    return {
+      values: {},
+      errors: [`Coordinator Email must be ${MAX_EMAIL_LENGTH} characters or fewer`],
+    };
+  }
+  if (!EMAIL_PATTERN.test(address)) {
+    return { values: {}, errors: ['Coordinator Email must be a valid email address'] };
+  }
+  return { values: { coordinator_email: address }, errors: [] };
+}
+
+/**
  * Normalise the optional link to a registered programme account.
  *
  * Kept apart from the text fields because it is an identity, not a label: the
@@ -290,12 +465,13 @@ function normalizeEntry(input, options = {}) {
  * @returns {{values: object, errors: string[]}}
  */
 function normalizeTargetProgram(input, partial) {
-  if (!Object.prototype.hasOwnProperty.call(input, 'target_program_id') || input.target_program_id === undefined) {
+  const found = readAliased(input, TARGET_PROGRAM_ALIASES);
+  if (!found.present) {
     if (partial) return { values: {}, errors: [] };
     return { values: { target_program_id: null }, errors: [] };
   }
 
-  const raw = input.target_program_id;
+  const raw = found.value;
   if (raw === null || raw === '') {
     return { values: { target_program_id: null }, errors: [] };
   }
@@ -340,6 +516,44 @@ async function abbreviationTaken(programId, abbreviation, exceptId = null) {
   return rows.length > 0;
 }
 
+/**
+ * Turn a database refusal into a sentence the coordinator can act on.
+ *
+ * The database reports a duplicate code as `ER_DUP_ENTRY` and a column that
+ * does not exist as `ER_BAD_FIELD_ERROR`. Neither says which rotation or which
+ * field is at fault, and both arrive as the same opaque 500 the coordinator
+ * sees as "Could not save". The raw code is a good key for the log and a
+ * useless thing to show a person, so the known refusals are translated here
+ * and everything else falls through to the 500 that at least reaches the log.
+ *
+ * @param {Error} error
+ * @param {{abbreviation?: string}} [context] The values that were being saved,
+ *   so the message can name them.
+ * @returns {string|null} The sentence to send, or `null` when the failure is
+ *   not one the caller can do anything about.
+ */
+function describeDatabaseFailure(error, context = {}) {
+  switch (error?.code) {
+    case 'ER_DUP_ENTRY':
+      return `Abbreviation '${context.abbreviation ?? ''}' already exists in this programme.`;
+    case 'ER_BAD_FIELD_ERROR':
+    case 'ER_BAD_FIELD_ERROR_UNKNOWN':
+      return `The database rejected an unknown column: ${error.sqlMessage ?? error.message}`;
+    case 'ER_NO_DEFAULT_FOR_FIELD':
+      return `A required column was given no value: ${error.sqlMessage ?? error.message}`;
+    case 'ER_BAD_NULL_ERROR':
+      return `A required column cannot be empty: ${error.sqlMessage ?? error.message}`;
+    case 'ER_TRUNCATED_WRONG_VALUE':
+    case 'ER_DATA_TOO_LONG':
+      return `A value is too long for its column: ${error.sqlMessage ?? error.message}`;
+    case 'ER_WARN_DATA_OUT_OF_RANGE':
+    case 'ER_OUT_OF_RANGE':
+      return `A value is outside the range its column accepts: ${error.sqlMessage ?? error.message}`;
+    default:
+      return null;
+  }
+}
+
 class RotationCatalogueController {
   /** `GET /rotations/catalogue?program_id=X` — every rotation in a programme. */
   static async getCatalogue(req, res) {
@@ -367,6 +581,10 @@ class RotationCatalogueController {
 
   /** `POST /rotations/catalogue` — add one rotation by hand. */
   static async createRotation(req, res) {
+    // Kept outside the `try` so the constraint handler can name the code that
+    // was actually saved — which may be the one derived from the name rather
+    // than the one the request spelled out.
+    let abbreviation = '';
     try {
       const programId = Number(req.body.program_id);
       if (!Number.isInteger(programId) || programId <= 0) {
@@ -377,6 +595,7 @@ class RotationCatalogueController {
       if (errors.length > 0) {
         return res.status(400).json({ success: false, error: errors.join('; ') });
       }
+      abbreviation = values.abbreviation ?? '';
       if (!(await programExists(programId))) {
         return res
           .status(400)
@@ -388,14 +607,20 @@ class RotationCatalogueController {
           error: `Linked programme ${values.target_program_id} does not exist`,
         });
       }
+
+      // The schema is made ready before the catalogue is read, not after: the
+      // duplicate check below queries the `rotations_catalogue` view, and on a
+      // database that has never had one, the check would fail on a missing
+      // view rather than on the duplicate it was asked to find.
+      await ensureCatalogueSchema();
+
       if (await abbreviationTaken(programId, values.abbreviation)) {
-        return res.status(409).json({
+        return res.status(400).json({
           success: false,
-          error: `Abbreviation "${values.abbreviation}" is already used by another rotation in this programme.`,
+          error: `Abbreviation '${values.abbreviation}' already exists in this programme.`,
         });
       }
 
-      await ensureCatalogueSchema();
       const [result] = await db.query(
         `INSERT INTO rotations_catalogue (program_id, target_program_id, full_name, department, abbreviation, max_capacity, capacity_locked, coordinator_email)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -418,11 +643,9 @@ class RotationCatalogueController {
         data: created,
       });
     } catch (error) {
-      if (error.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({
-          success: false,
-          error: `Abbreviation "${req.body.abbreviation ?? ''}" is already used by another rotation in this programme.`,
-        });
+      const failure = describeDatabaseFailure(error, { abbreviation });
+      if (failure) {
+        return res.status(400).json({ success: false, error: failure, code: error.code });
       }
       console.error('Error in createRotation controller:', error.message);
       return res
@@ -469,9 +692,9 @@ class RotationCatalogueController {
 
       const merged = { ...existing, ...values };
       if (await abbreviationTaken(existing.program_id, merged.abbreviation, id)) {
-        return res.status(409).json({
+        return res.status(400).json({
           success: false,
-          error: `Abbreviation "${merged.abbreviation}" is already used by another rotation in this programme.`,
+          error: `Abbreviation '${merged.abbreviation}' already exists in this programme.`,
         });
       }
 
@@ -489,11 +712,11 @@ class RotationCatalogueController {
         data: updated,
       });
     } catch (error) {
-      if (error.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({
-          success: false,
-          error: 'That abbreviation is already used by another rotation in this programme.',
-        });
+      const failure = describeDatabaseFailure(error, {
+        abbreviation: req.body?.abbreviation ?? req.body?.rotation_code,
+      });
+      if (failure) {
+        return res.status(400).json({ success: false, error: failure, code: error.code });
       }
       console.error('Error in updateRotation controller:', error.message);
       return res

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { ClipboardList, Pencil, Plus, Trash2 } from 'lucide-react-native';
 
@@ -18,6 +18,7 @@ import {
   SectionHeader,
   Sheet,
   SkeletonList,
+  StatusBadge,
   Text,
   TextField,
 } from '../../../components';
@@ -46,7 +47,7 @@ import type { RotationCatalogueEntry } from '../../../types/api';
  * surfaced rather than hidden:
  *
  *  - a duplicate abbreviation is caught here (the field's error) *and* by the
- *    server (409), because "PHC" twice is two rotations nobody can tell apart;
+ *    server (400), because "PHC" twice is two rotations nobody can tell apart;
  *  - a deletion that residents depend on comes back as the server's sentence —
  *    "2 resident assignments rely on it" — instead of a generic failure, since
  *    that sentence is the only thing that tells the coordinator what to do next.
@@ -61,7 +62,13 @@ import type { RotationCatalogueEntry } from '../../../types/api';
 
 interface FormState {
   fullName: string;
-  /** Display label derived from the linked programme; refined by hand if needed. */
+  /**
+   * The department this rotation belongs to.
+   *
+   * Filled in from the linked programme — the account is named after its
+   * specialty, the department after the place — and refined by hand when the
+   * ward's own name is more precise than the account's.
+   */
   department: string;
   /**
    * The registered programme account this rotation is hosted by.
@@ -121,6 +128,60 @@ const MAX_ABBREVIATION_LENGTH = 50;
 const MAX_CAPACITY = 999;
 
 /**
+ * A derived abbreviation is a label, not a word.
+ *
+ * Three characters is the shortest code anyone reads without squinting, and six
+ * is the longest that still fits beside a rotation name on a narrow screen.
+ */
+const MIN_DERIVED_ABBREVIATION_LENGTH = 3;
+const MAX_DERIVED_ABBREVIATION_LENGTH = 6;
+
+/**
+ * Derive a short, uppercase code from a rotation name.
+ *
+ * "Primary Health Care" becomes "PHC": the initials of the words, widened one
+ * letter at a time when there are too few of them to be a code ("Surgery" →
+ * "SUR"), and capped at six characters because the column holds a label rather
+ * than a word.
+ *
+ * The API derives the same code from the same name, so a blank abbreviation
+ * field means the same thing on both sides of the request: the coordinator sees
+ * "PHC" offered before they save, and the server writes "PHC" if they never
+ * chose one.
+ */
+function deriveAbbreviation(rotationName: string): string {
+  const words = rotationName
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.replace(/[^A-Za-z0-9]/g, ''))
+    .filter(Boolean);
+
+  if (words.length === 0) return '';
+
+  let code = words.map((word) => word[0].toUpperCase()).join('');
+
+  // Too few initials to be a code: widen, one more letter per word at a time.
+  let depth = 1;
+  while (code.length < MIN_DERIVED_ABBREVIATION_LENGTH && depth < 8) {
+    depth += 1;
+    const extra = words
+      .filter((word) => word.length >= depth)
+      .map((word) => word[depth - 1].toUpperCase())
+      .join('');
+    if (!extra) break;
+    code += extra;
+  }
+
+  // Words of one letter each cannot widen any further; take the flat letters.
+  if (code.length < MIN_DERIVED_ABBREVIATION_LENGTH) {
+    code = words.join('').toUpperCase().slice(0, MIN_DERIVED_ABBREVIATION_LENGTH);
+  }
+
+  return code.slice(0, MAX_DERIVED_ABBREVIATION_LENGTH);
+}
+
+/**
  * Render a rotation's seat limit as a compact tag.
  *
  * `null`/`0` is "no limit" rather than "zero seats", and the two must read
@@ -156,6 +217,17 @@ export default function RotationsCatalogueScreen() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  /**
+   * The department text the picker is allowed to overwrite.
+   *
+   * The department is a field in its own right and the coordinator may refine
+   * it by hand — "Internal Medicine Wards" names a real ward, and the
+   * account's generic label would lose that. So the picker remembers the text
+   * it wrote: if the field still reads exactly that, the picker may refill it;
+   * if it reads anything else, the coordinator wrote it and it is left alone.
+   */
+  const pickerOwnedDepartment = useRef('');
+
   /** A stable reference, so the filters below are not rebuilt every render. */
   const entries = useMemo(() => catalogue.data ?? [], [catalogue.data]);
 
@@ -173,6 +245,7 @@ export default function RotationsCatalogueScreen() {
   function openCreate() {
     setEditingId(null);
     setForm(EMPTY_FORM);
+    pickerOwnedDepartment.current = '';
     setFieldErrors({});
     setSaveError(null);
     setSheetOpen(true);
@@ -194,6 +267,11 @@ export default function RotationsCatalogueScreen() {
       capacityLocked: entry.capacity_locked === 1,
       coordinatorEmail: entry.coordinator_email ?? '',
     });
+    // The stored label is treated as the picker's own, so changing the hosted
+    // programme refills it — until the coordinator edits it by hand, which is
+    // what "the label only follows the picker when the pick itself changes"
+    // means in practice.
+    pickerOwnedDepartment.current = entry.department.trim();
     setFieldErrors({});
     setSaveError(null);
     setSheetOpen(true);
@@ -205,18 +283,31 @@ export default function RotationsCatalogueScreen() {
    * Choosing an account refills the department label from its name, because
    * the label's job is to read as a place and the account's job is to be an
    * identity — picking should leave both consistent without a second edit.
-   * Clearing restores the empty label so a stale place name cannot survive
-   * without an account behind it.
+   * A department the coordinator has refined by hand is not overwritten: the
+   * picker only fills a label it still owns.
+   *
+   * Clearing removes the identity, not the department. The text stays, and the
+   * picker gives up the right to overwrite it, so a stray tap cannot erase a
+   * ward name the coordinator wrote.
    */
   function pickProgram(targetProgramId: number | null) {
     setForm((current) => {
-      if (targetProgramId === null) return { ...current, targetProgramId: null, department: '' };
+      if (targetProgramId === null) {
+        const previous = programOptions.find((option) => option.id === current.targetProgramId);
+        pickerOwnedDepartment.current = previous ? departmentLabelFromProgram(previous.program_name) : '';
+        return { ...current, targetProgramId: null };
+      }
+
       const chosen = programOptions.find((option) => option.id === targetProgramId);
       if (!chosen) return { ...current, targetProgramId };
+
+      const nextLabel = departmentLabelFromProgram(chosen.program_name);
+      const stillOwned = current.department.trim() === pickerOwnedDepartment.current.trim();
+      if (stillOwned) pickerOwnedDepartment.current = nextLabel;
       return {
         ...current,
         targetProgramId,
-        department: departmentLabelFromProgram(chosen.program_name),
+        department: stillOwned ? nextLabel : current.department,
       };
     });
     setFieldErrors((current) => {
@@ -242,18 +333,29 @@ export default function RotationsCatalogueScreen() {
   }
 
   /**
+   * The code the API will derive if the abbreviation field is left blank.
+   *
+   * Shown in the field's hint so the coordinator sees what will be saved
+   * before they save it, rather than discovering it in the list afterwards.
+   */
+  const derivedAbbreviation = useMemo(() => deriveAbbreviation(form.fullName), [form.fullName]);
+
+  /**
    * The same rules the API applies, checked before the request leaves.
    *
    * Re-implementing them here is deliberate: a form that only learns about a
    * blank abbreviation after a round trip makes the coordinator wait to be told
    * what they forgot to type, and the duplicate check names the rotation that
-   * already owns the code — something the 409 from the server cannot do.
+   * already owns the code — something the server's 400 cannot do.
    */
   function validate(): FieldErrors {
     const errors: FieldErrors = {};
     const fullName = form.fullName.trim();
     const department = form.department.trim();
-    const abbreviation = form.abbreviation.trim().toUpperCase();
+    const typedAbbreviation = form.abbreviation.trim().toUpperCase();
+    // A blank abbreviation is not an error: it is a request for the code the
+    // name implies, which is derived here exactly as the API derives it.
+    const abbreviation = typedAbbreviation || deriveAbbreviation(fullName);
 
     if (!fullName) errors.fullName = 'A full rotation name is required.';
     else if (fullName.length > MAX_NAME_LENGTH) {
@@ -273,10 +375,9 @@ export default function RotationsCatalogueScreen() {
       errors.targetProgramId = 'Select the programme that hosts this rotation.';
     }
 
-    if (!abbreviation) errors.abbreviation = 'An abbreviation is required.';
-    else if (abbreviation.length > MAX_ABBREVIATION_LENGTH) {
+    if (typedAbbreviation && typedAbbreviation.length > MAX_ABBREVIATION_LENGTH) {
       errors.abbreviation = `Keep the abbreviation to ${MAX_ABBREVIATION_LENGTH} characters or fewer.`;
-    } else {
+    } else if (abbreviation) {
       const clash = entries.find(
         (entry) => entry.abbreviation.toUpperCase() === abbreviation && entry.id !== editingId,
       );
@@ -313,15 +414,21 @@ export default function RotationsCatalogueScreen() {
     setSaveError(null);
     if (Object.keys(errors).length > 0) return;
 
+    const fullName = form.fullName.trim();
+    // The code the field asked for, or the one its name implies. Sending the
+    // derived code rather than an empty string keeps what the coordinator
+    // was shown in the hint and what the server stores the same thing.
+    const abbreviation = form.abbreviation.trim().toUpperCase() || deriveAbbreviation(fullName);
+
     const payload = {
       program_id: programId,
-      full_name: form.fullName.trim(),
+      full_name: fullName,
       department: form.department.trim(),
       // The identity behind the label: which registered account hosts this
       // rotation. Nothing downstream may read the label as a link — the notice
       // router and the visiting roster both resolve the programme from this id.
       target_program_id: form.targetProgramId,
-      abbreviation: form.abbreviation.trim().toUpperCase(),
+      abbreviation,
       max_capacity: form.maxCapacity.trim() === '' ? null : Number(form.maxCapacity.trim()),
       capacity_locked: form.capacityLocked,
       coordinator_email: form.coordinatorEmail.trim() === '' ? null : form.coordinatorEmail.trim(),
@@ -492,6 +599,17 @@ export default function RotationsCatalogueScreen() {
                         {entry.department}
                       </Text>
                       <View style={styles.capacityRow}>
+                        {/*
+                          A rotation bound to a registered programme is a
+                          different thing from one that is not: the notice
+                          router files its letters into that programme's inbox
+                          and its visiting residents appear on that programme's
+                          grid. The list says so in green rather than leaving
+                          the coordinator to open each row to find out.
+                        */}
+                        {entry.target_program_id != null ? (
+                          <StatusBadge label="Linked" tone="success" />
+                        ) : null}
                         <View
                           style={[
                             styles.capacityBadge,
@@ -579,13 +697,25 @@ export default function RotationsCatalogueScreen() {
           />
 
           {/*
-            The department is no longer typed — it is chosen. A free-text box
-            let three spellings of one ward exist with no identity behind any
-            of them, which is why a notice could not be routed to the department
-            it concerned. The picker binds the rotation to a registered account
-            (`target_program_id`) and derives the stored label from that
-            account's name, so the display text and the link cannot drift apart.
+            The department is a field in its own right, and a typed one: the
+            hosted-by picker below binds the rotation to a registered account
+            and fills this label in, but the account is named after its
+            specialty ("Internal Medicine Residency Program") while the
+            department it hosts is named after the place ("Internal Medicine
+            Wards"). A coordinator who knows the ward's real name writes it
+            here, and the picker will not overwrite it.
           */}
+          <TextField
+            label="Hospital Department"
+            required
+            value={form.department}
+            onChangeText={(value) => setForm((current) => ({ ...current, department: value }))}
+            placeholder="Primary Health Care Corporation"
+            autoCapitalize="words"
+            error={fieldErrors.department}
+            hint="Choosing a programme below fills this in. Edit it if the ward is named more precisely."
+          />
+
           <ProgramPicker
             label="Hosted by Department / Programme"
             required
@@ -593,24 +723,28 @@ export default function RotationsCatalogueScreen() {
             options={programOptions}
             onChange={pickProgram}
             loading={programs.isLoading}
-            error={fieldErrors.targetProgramId ?? fieldErrors.department}
+            error={fieldErrors.targetProgramId}
             accessibilityLabel="Select the registered programme that hosts this rotation"
             hint={
               form.targetProgramId !== null
-                ? `Department label stored as “${form.department.trim()}”`
-                : 'Choosing an account fills the department label it is stored under.'
+                ? `Linked to the registered programme, stored as “${form.department.trim()}”.`
+                : 'Choosing an account links this rotation to it and fills the department label.'
             }
           />
 
           <TextField
-            label="Abbreviation"
+            label="Abbreviation / Code"
             required
             value={form.abbreviation}
             onChangeText={(value) => setForm((current) => ({ ...current, abbreviation: value }))}
             placeholder="SURG-INP"
             autoCapitalize="characters"
             error={fieldErrors.abbreviation}
-            hint="The short code shown on the rota. One per programme."
+            hint={
+              form.abbreviation.trim() === '' && derivedAbbreviation
+                ? `Leave blank to use “${derivedAbbreviation}”. The short code shown on the rota — one per programme.`
+                : 'The short code shown on the rota. One per programme.'
+            }
           />
 
           <TextField
@@ -624,7 +758,7 @@ export default function RotationsCatalogueScreen() {
           />
 
           <TextField
-            label="COORDINATOR CONTACT EMAIL"
+            label="Coordinator Email (Optional)"
             value={form.coordinatorEmail}
             onChangeText={(value) => {
               setForm((current) => ({ ...current, coordinatorEmail: value }));
