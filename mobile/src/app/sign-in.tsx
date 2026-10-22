@@ -87,6 +87,19 @@ export default function SignInScreen() {
   const residents = roster.data ?? (EMPTY_ARRAY as ResidentListItem[]);
   const programList = programs.data ?? (EMPTY_ARRAY as Program[]);
   const visibleResidents = useMemo(() => filterResidents(residents, query), [residents, query]);
+  // The API now returns one row per resident, but a stale cache or a future
+  // query change must not be able to crash React with duplicate keys. Filtering
+  // by id here keeps the picker's identity contract independent of the payload.
+  const uniqueVisibleResidents = useMemo(() => {
+    const seen = new Set<number>();
+    return visibleResidents.filter((resident) => {
+      if (!resident?.resident_id || seen.has(resident.resident_id)) {
+        return false;
+      }
+      seen.add(resident.resident_id);
+      return true;
+    });
+  }, [visibleResidents]);
 
   const handleResident = (residentId: number) => {
     const resident = residents.find((item) => item.resident_id === residentId);
@@ -211,7 +224,7 @@ export default function SignInScreen() {
               </View>
             ) : null}
 
-            {roster.status === 'ready' && visibleResidents.length === 0 ? (
+            {roster.status === 'ready' && uniqueVisibleResidents.length === 0 ? (
               <View style={styles.stateBlock}>
                 <Text variant="body" tone="muted">
                   {query ? `No resident matches “${query}”.` : 'No residents on this roster.'}
@@ -219,13 +232,13 @@ export default function SignInScreen() {
               </View>
             ) : null}
 
-            {visibleResidents.map((resident, index) => (
+            {uniqueVisibleResidents.map((resident, index) => (
               <ListRow
-                key={resident.resident_id}
+                key={`resident-signin-${resident.resident_id}-${index}`}
                 title={residentFullName(resident)}
                 subtitle={residentSubtitle(resident)}
                 meta={resident.program_code ?? undefined}
-                last={index === visibleResidents.length - 1}
+                last={index === uniqueVisibleResidents.length - 1}
                 trailing={<Text variant="caption" tone="primary">Open</Text>}
                 onPress={() => handleResident(resident.resident_id)}
                 disabled={resident.program_id === null}

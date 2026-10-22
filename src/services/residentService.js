@@ -138,7 +138,17 @@ async function getAllResidents({ program_id, limit = 50, offset = 0 } = {}) {
         LIMIT 1
       ) AS mobile
     FROM residents r
-    LEFT JOIN residency_enrollments re ON re.resident_id = r.id
+    LEFT JOIN residency_enrollments re ON re.id = (
+      -- One row per resident, always the home placement. A resident can hold a
+      -- VISITING registry row at a partner programme (Noura at Internal
+      -- Medicine) alongside their home enrolment; joining directly on
+      -- resident_id returned them once per enrolment and produced duplicate
+      -- React keys in the sign-in picker.
+      SELECT re2.id FROM residency_enrollments re2
+      WHERE re2.resident_id = r.id
+      ORDER BY (re2.position_type = 'VISITING') ASC, re2.created_at DESC, re2.id DESC
+      LIMIT 1
+    )
     LEFT JOIN programs p ON p.id = re.program_id
   `;
 
@@ -146,7 +156,7 @@ async function getAllResidents({ program_id, limit = 50, offset = 0 } = {}) {
   if (program_id) {
     // A visitor's `position_type = 'VISITING'` enrolment is a registry row, not
     // a home placement: listing it here would show a partner programme's
-    // resident as one of ours, and could show the same person twice.
+    // resident as one of ours.
     query += ` WHERE re.program_id = ? AND re.position_type <> 'VISITING' `;
     params.push(program_id);
   }
