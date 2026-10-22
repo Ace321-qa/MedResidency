@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const NotificationService = require('../services/notificationService');
 const RotationApprovalService = require('../services/rotationApprovalService');
+const ProgramConnectionService = require('../services/programConnectionService');
 const { DAY_NAMES, normalizeWeekStartDay } = require('../utils/blockDates');
 
 /**
@@ -375,6 +376,23 @@ class RotationRequestController {
               : '.'),
           reference_id: requestId,
           reference_type: 'rotation_requests',
+        });
+      }
+
+      // An approved request can place a resident onto a rotation hosted by a
+      // partner programme. The approval path writes the rota row directly, so it
+      // needs the same receiving-programme notice the assignment endpoint sends
+      // — otherwise an approved cross-program placement is visible on the rota
+      // but never announced to the department hosting it.
+      if (status === 'APPROVED' && assignment) {
+        await ProgramConnectionService.noticifyReceivingProgram({
+          rotation_id: assignment.rotation_id,
+          resident_id: assignment.resident_id,
+          block_id: assignment.rotation_block_id,
+          start_date: assignment.start_date,
+          end_date: assignment.end_date,
+          assignment_id: assignment.assignment_id,
+          sent_by_user_id: null,
         });
       }
 

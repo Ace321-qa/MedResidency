@@ -1089,6 +1089,11 @@ export interface CohortGridCell {
    * nulls, so a client can split sections without a second request.
    */
   is_external?: number | boolean;
+  /**
+   * The same provenance fact under the contract name used by the cross-program
+   * API: 1 when the resident is a visiting / external resident on this grid.
+   */
+  is_visiting?: number | boolean;
   home_program_id?: number | null;
   host_program_id?: number | null;
   home_program_name?: string | null;
@@ -1153,6 +1158,12 @@ export interface CohortGridCell {
   rotation_max_capacity?: number | null;
   rotation_capacity_locked?: number | null;
   rotation_block_occupancy?: number | null;
+  /**
+   * The live release-letter status for this cell's assignment, when a notice
+   * has been generated (`DRAFT`, `SENT` or `DELIVERED`). Null when no letter
+   * exists — the ordinary state before a dispatch, not an error.
+   */
+  release_letter_status?: 'DRAFT' | 'SENT' | 'DELIVERED' | 'REVOKED' | null;
 }
 
 /**

@@ -9,6 +9,7 @@ const {
 } = require('../utils/masterGridCalendar');
 const { academicYearForDate, academicYearMatchValues } = require('../utils/academicYear');
 const { DAY_NAMES, normalizeWeekStartDay } = require('../utils/blockDates');
+const { ensureTargetProgramColumn } = require('../utils/ensureTargetProgram');
 const LongitudinalService = require('./longitudinalService');
 
 /**
@@ -251,12 +252,17 @@ function windowBounds(block, start, end) {
 async function resolveRotation(conn, programId, departmentClinic, rotationId) {
   const wantedId = Number(rotationId);
   if (Number.isInteger(wantedId) && wantedId > 0) {
+    await ensureTargetProgramColumn();
+    // A rotation may be owned by another programme but explicitly hosted by
+    // this one (`target_program_id`). Rejecting it here would make an approved
+    // cross-programme request fail an ownership check that the rotation itself
+    // already answers.
     const [byIdRows] = await conn.query(
       `SELECT id, rotation_code, rotation_name, department_name
          FROM rotations
-        WHERE id = ? AND program_id = ? AND is_active = 1
+        WHERE id = ? AND (program_id = ? OR target_program_id = ?) AND is_active = 1
         LIMIT 1`,
-      [wantedId, programId],
+      [wantedId, programId, programId],
     );
     if (byIdRows[0]) return { ...byIdRows[0], catalogued: false };
   }

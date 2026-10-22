@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const NotificationService = require('./notificationService');
+const ReleaseLetterService = require('./releaseLetterService');
 
 /**
  * Programmes in the city, and how they are connected to one another.
@@ -368,15 +369,20 @@ class ProgramConnectionService {
   }
 
   /**
-   * Tell a receiving programme's coordinator that one of our residents is coming.
+   * Tell a receiving programme's coordinator that one of our residents is coming,
+   * register that resident on the receiving programme's visiting roster, and
+   * file the cross-programme placement notice in its Letters inbox.
    *
-   * Called after an assignment to a rotation owned by another programme commits.
-   * Best-effort by design: the placement is already saved, and a notice that
-   * cannot be delivered must not present itself as a failed assignment.
+   * Called after an assignment commits. Best-effort by design: the placement is
+   * already saved, and a notice that cannot be delivered must not present itself
+   * as a failed assignment. Each side effect is isolated so a failure in one
+   * (say, a missing letter template) cannot swallow the others.
    *
-   * The message names the resident, their home programme, the rotation, the
-   * receiving department and the block window, because a coordinator reading only
-   * the notification has to be able to act on it without opening anything else.
+   * The receiving programme is the rotation's *host* — `target_program_id` when
+   * the rotation names one, otherwise its owning programme. Using the owner
+   * unconditionally was why a Family Medicine catalogue entry linked to
+   * Internal Medicine notified Family Medicine itself and never reached the
+   * department actually hosting the resident.
    */
   static async noticifyReceivingProgram(input) {
     const {
@@ -386,16 +392,18 @@ class ProgramConnectionService {
       start_date = null,
       end_date = null,
       assignment_id = null,
+      sent_by_user_id = null,
     } = input ?? {};
 
     try {
       await ensureSchema();
 
       const [[rotation]] = await db.query(
-        `SELECT rot.id, rot.rotation_name, rot.department_name, rot.program_id AS host_program_id,
+        `SELECT rot.id, rot.rotation_name, rot.department_name,
+                COALESCE(rot.target_program_id, rot.program_id) AS host_program_id,
                 host.program_name AS host_program_name
            FROM rotations rot
-             LEFT JOIN programs host ON host.id = rot.program_id
+             LEFT JOIN programs host ON host.id = COALESCE(rot.target_program_id, rot.program_id)
           WHERE rot.id = ? LIMIT 1;`,
         [toPositiveInt(rotation_id)],
       );
@@ -404,13 +412,15 @@ class ProgramConnectionService {
       }
 
       const [[resident]] = await db.query(
-        `SELECT r.id, TRIM(CONCAT(COALESCE(r.first_name, ''), ' ', COALESCE(r.last_name, ''))) AS resident_name,
-                re.program_id AS home_program_id,
-                home.program_name AS home_program_name,
-                re.year_in_program
+        `SELECT r.id,
+                TRIM(CONCAT(
+                  COALESCE(r.first_name, ''),
+                  ' ',
+                  COALESCE(NULLIF(r.middle_initial, ''), ''),
+                  ' ',
+                  COALESCE(r.last_name, '')
+                )) AS resident_name
            FROM residents r
-             LEFT JOIN residency_enrollments re ON re.resident_id = r.id
-             LEFT JOIN programs home ON home.id = re.program_id
           WHERE r.id = ? LIMIT 1;`,
         [toPositiveInt(resident_id)],
       );
@@ -418,12 +428,25 @@ class ProgramConnectionService {
         return { delivered: false, reason: 'The resident was not found.' };
       }
 
+      // The home enrolment is the resident's real placement. A `VISITING` row
+      // the platform itself wrote is a registry entry, never a home.
+      const [[enrolment]] = await db.query(
+        `SELECT re.program_id AS home_program_id, home.program_name AS home_program_name,
+                re.year_in_program
+           FROM residency_enrollments re
+             LEFT JOIN programs home ON home.id = re.program_id
+          WHERE re.resident_id = ? AND re.position_type <> 'VISITING'
+          ORDER BY re.created_at ASC, re.id ASC
+          LIMIT 1;`,
+        [toPositiveInt(resident_id)],
+      );
+      if (!enrolment || enrolment.home_program_id === null) {
+        return { delivered: false, reason: 'The resident has no home programme.' };
+      }
+
       // A resident rotating inside their own programme is not a cross-programme
       // event, so nothing is sent.
-      if (
-        resident.home_program_id !== null &&
-        Number(resident.home_program_id) === Number(rotation.host_program_id)
-      ) {
+      if (Number(enrolment.home_program_id) === Number(rotation.host_program_id)) {
         return { delivered: false, reason: 'internal', cross_program: false };
       }
 
@@ -436,25 +459,59 @@ class ProgramConnectionService {
           )
         : [[null]];
 
-      const pgy = resident.year_in_program ? `PGY-${resident.year_in_program}` : null;
+      const pgy = enrolment.year_in_program ? `PGY-${enrolment.year_in_program}` : null;
       const window = block
         ? `Block ${block.block_number} (${formatRange(block.start_date, block.end_date)})`
         : formatRange(start_date, end_date);
-      const home = resident.home_program_name ?? 'Another programme';
+      const home = enrolment.home_program_name ?? 'Another programme';
+      const windowStart = block?.start_date ?? start_date;
+      const windowEnd = block?.end_date ?? end_date;
 
+      // 1. The coordinator's notification — the inbox bell and the programme's
+      //    notification feed.
       const notification = await NotificationService.notifyProgramCoordinatorSafe(
         rotation.host_program_id,
         {
           type: 'ROTATION_APPROVAL',
-          title: 'Incoming cross-programme rotation assignment',
+          title: 'Cross-Program Rotation Placement',
           message:
-            `📩 ${home} assigned ${resident.resident_name}` +
-            `${pgy ? ` (${pgy})` : ''} to ${rotation.rotation_name}` +
-            `${rotation.department_name ? ` in ${rotation.department_name}` : ''} for ${window}.`,
+            `📩 Cross-Program Rotation Placement — ${home} assigned ${resident.resident_name}` +
+            `${pgy ? ` (${pgy})` : ''} to ${rotation.rotation_name} for ${window}.`,
           reference_id: toPositiveInt(assignment_id),
-          reference_type: 'program_connections',
+          reference_type: 'cross_program_placement',
         },
       );
+
+      // 2. The visiting roster registry. The receiving programme's Roster sees
+      //    the visitor immediately, even before the grid is reloaded.
+      let visitingEnrollment = null;
+      try {
+        visitingEnrollment = await this.registerVisitingResident({
+          resident_id: toPositiveInt(resident_id),
+          home_program_id: Number(enrolment.home_program_id),
+          host_program_id: Number(rotation.host_program_id),
+          start_date: windowStart,
+          end_date: windowEnd,
+        });
+      } catch (error) {
+        console.error('[program-connections] visiting registry upsert failed:', error.message);
+      }
+
+      // 3. The notice letter itself, filed in the receiving programme's Inbox
+      //    (`/program/letters` → Inbox), so the placement is readable and not
+      //    only a transient notification.
+      let letter = null;
+      try {
+        letter = await ReleaseLetterService.fileCrossProgramInboxLetter({
+          rotation_assignment_id: toPositiveInt(assignment_id),
+          resident_id: toPositiveInt(resident_id),
+          host_program_id: Number(rotation.host_program_id),
+          home_program_id: Number(enrolment.home_program_id),
+          sent_by_user_id,
+        });
+      } catch (error) {
+        console.error('[program-connections] cross-programme letter filing failed:', error.message);
+      }
 
       return {
         delivered: Boolean(notification),
@@ -462,33 +519,132 @@ class ProgramConnectionService {
         host_program_id: Number(rotation.host_program_id),
         host_program_name: rotation.host_program_name,
         notification,
+        visiting_enrollment: visitingEnrollment,
+        letter,
       };
     } catch (error) {
       console.error('[program-connections] cross-programme notice failed:', error.message);
       return { delivered: false, reason: error.message };
     }
   }
+
+  /**
+   * Add (or refresh) the receiving programme's `VISITING` registry row.
+   *
+   * A visiting resident is not enrolled in the host programme — creating a
+   * second, duplicate person would split their record and double them on the
+   * roster. What the registry stores is the *relationship*: the existing
+   * resident id, the host programme, `position_type = 'VISITING'`, and the
+   * window they are expected. Home-roster queries ignore `VISITING` rows, so
+   * this cannot make a visitor look like a local resident.
+   */
+  static async registerVisitingResident({ resident_id, home_program_id, host_program_id, start_date, end_date }) {
+    // A real enrolment in the host programme means they are not visiting it.
+    const [homeRows] = await db.query(
+      `SELECT id FROM residency_enrollments
+        WHERE resident_id = ? AND program_id = ? AND position_type <> 'VISITING'
+        LIMIT 1;`,
+      [resident_id, host_program_id],
+    );
+    if (homeRows.length > 0) {
+      return { updated: false, reason: 'Resident is enrolled in the host programme.' };
+    }
+
+    const [[home]] = await db.query(
+      `SELECT resident_status, year_in_program
+         FROM residency_enrollments
+        WHERE resident_id = ? AND program_id = ?
+        ORDER BY created_at ASC, id ASC LIMIT 1;`,
+      [resident_id, home_program_id],
+    );
+
+    const [existing] = await db.query(
+      `SELECT id, start_date, expected_completion_date FROM residency_enrollments
+        WHERE resident_id = ? AND program_id = ? AND position_type = 'VISITING'
+        ORDER BY id ASC LIMIT 1;`,
+      [resident_id, host_program_id],
+    );
+
+    if (existing.length > 0) {
+      const row = existing[0];
+      const nextStart = earliest(row.start_date, start_date);
+      const nextEnd = latest(row.expected_completion_date, end_date);
+      await db.query(
+        `UPDATE residency_enrollments
+            SET start_date = ?, expected_completion_date = ?, updated_at = NOW()
+          WHERE id = ?;`,
+        [nextStart, nextEnd, row.id],
+      );
+      return { enrollment_id: Number(row.id), updated: true };
+    }
+
+    const [result] = await db.query(
+      `INSERT INTO residency_enrollments
+         (resident_id, program_id, resident_status, position_type, year_in_program,
+          start_date, expected_completion_date, started_program_at_year_one,
+          previous_education_documented, prior_training_years, comments)
+       VALUES (?, ?, ?, 'VISITING', ?, ?, ?, 0, 0, NULL, ?);`,
+      [
+        resident_id,
+        host_program_id,
+        home?.resident_status || 'ACTIVE_FULL_TIME',
+        home?.year_in_program ?? null,
+        start_date || null,
+        end_date || null,
+        'Auto-registered as a visiting resident by a cross-programme rotation assignment.',
+      ],
+    );
+    return { enrollment_id: Number(result.insertId), updated: false };
+  }
+}
+
+/** The earlier of two `YYYY-MM-DD` values, ignoring nulls. */
+function earliest(left, right) {
+  if (!left) return right ?? null;
+  if (!right) return left;
+  return String(left).slice(0, 10) <= String(right).slice(0, 10) ? left : right;
+}
+
+/** The later of two `YYYY-MM-DD` values, ignoring nulls. */
+function latest(left, right) {
+  if (!left) return right ?? null;
+  if (!right) return left;
+  return String(left).slice(0, 10) >= String(right).slice(0, 10) ? left : right;
 }
 
 /** `2026-11-15`–`2026-12-12` → `15 Nov – 12 Dec 2026`, or a single date. */
 function formatRange(start, end) {
-  const from = formatDay(start);
-  const to = formatDay(end);
-  if (from && to) return `${from} – ${to}`;
-  return from || to || 'a date to be confirmed';
+  const from = dateParts(start);
+  const to = dateParts(end);
+  if (from && to) {
+    const fromLabel = `${from.day} ${MONTHS[from.month - 1]}`;
+    const toLabel = `${to.day} ${MONTHS[to.month - 1]}`;
+    return from.year === to.year
+      ? `${fromLabel} – ${toLabel} ${to.year}`
+      : `${fromLabel} ${from.year} – ${toLabel} ${to.year}`;
+  }
+  return formatDay(start) || formatDay(end) || 'a date to be confirmed';
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** `2026-11-15` → `15 Nov 2026`. Returns `null` for anything unparseable. */
-function formatDay(value) {
+/** Split a `YYYY-MM-DD` value into validated parts. */
+function dateParts(value) {
   if (!value) return null;
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
   if (!match) return null;
-  const [, year, month, day] = match;
-  const monthIndex = Number(month) - 1;
-  if (monthIndex < 0 || monthIndex > 11) return null;
-  return `${Number(day)} ${MONTHS[monthIndex]} ${year}`;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12) return null;
+  return { year, month, day };
+}
+
+/** `2026-11-15` → `15 Nov 2026`. Returns `null` for anything unparseable. */
+function formatDay(value) {
+  const parts = dateParts(value);
+  if (!parts) return null;
+  return `${parts.day} ${MONTHS[parts.month - 1]} ${parts.year}`;
 }
 
 module.exports = ProgramConnectionService;

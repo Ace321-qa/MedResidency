@@ -569,10 +569,18 @@ class ReleaseLetterService {
            ORDER BY ri.is_primary DESC, ri.id ASC LIMIT 1
          ) AS resident_mobile
        FROM residents r
-       LEFT JOIN residency_enrollments re ON re.resident_id = r.id
+       LEFT JOIN residency_enrollments re ON re.id = (
+         -- The home placement wins over the receiving programme's VISITING
+         -- registry row: a letter about a visiting resident is still authored
+         -- by the programme that owns them, not the one hosting the block.
+         -- A guest with only a VISITING row still resolves, as the fallback.
+         SELECT re2.id FROM residency_enrollments re2
+         WHERE re2.resident_id = r.id
+         ORDER BY (re2.position_type = 'VISITING') ASC, re2.created_at DESC, re2.id DESC
+         LIMIT 1
+       )
        LEFT JOIN programs p ON p.id = re.program_id
        WHERE r.id = ?
-       ORDER BY re.created_at DESC
        LIMIT 1;`,
       [residentId]
     );
@@ -580,7 +588,7 @@ class ReleaseLetterService {
     if (rows.length === 0) return null;
 
     const row = rows[0];
-    const fullName = [row.first_name, row.last_name].filter(Boolean).join(' ');
+    const fullName = [row.first_name, row.middle_initial, row.last_name].filter(Boolean).join(' ');
 
     return {
       resident_id: row.resident_id,
@@ -1298,7 +1306,9 @@ class ReleaseLetterService {
     return `
       SELECT
         grl.id AS letter_id,
-        CONCAT(r.first_name, ' ', r.last_name) AS resident_name,
+        TRIM(CONCAT(
+          r.first_name, ' ', COALESCE(NULLIF(r.middle_initial, ''), ''), ' ', r.last_name
+        )) AS resident_name,
         grl.longitudinal_assignment_id,
         grl.rotation_assignment_id,
         rla.site_name,
@@ -1646,7 +1656,9 @@ class ReleaseLetterService {
       `SELECT
          rra.id AS rotation_assignment_id,
          rra.resident_id,
-         CONCAT(r.first_name, ' ', r.last_name) AS resident_name,
+         TRIM(CONCAT(
+          r.first_name, ' ', COALESCE(NULLIF(r.middle_initial, ''), ''), ' ', r.last_name
+        )) AS resident_name,
          re.year_in_program,
          rot.id AS rotation_id,
          rot.rotation_name,
@@ -2407,6 +2419,91 @@ class ReleaseLetterService {
    * partner's inbox. This runs before the new dispatch is inserted, so the
    * pair cannot match the rows this run is about to write.
    */
+  /**
+   * File a single cross-programme placement notice in the receiving programme's
+   * Letters Inbox.
+   *
+   * A notification is a ping; the Letters screen reads rows. When a coordinator
+   * assigns a partner's resident to one of our rotations we therefore write the
+   * notice into `generated_release_letters` as an `INBOX` copy owned by the host
+   * programme, merged from the *dispatching* programme's rotation-notice
+   * template, exactly as a full notice run would file it.
+   *
+   * Idempotent: a live copy already filed for this assignment is returned rather
+   * than duplicated, so re-saving an assignment cannot stack letters.
+   */
+  static async fileCrossProgramInboxLetter({
+    rotation_assignment_id,
+    resident_id,
+    host_program_id,
+    home_program_id,
+    sent_by_user_id = null,
+  }) {
+    await ensureSchema();
+
+    const assignmentId = Number(rotation_assignment_id);
+    const hostId = Number(host_program_id);
+    const residentId = Number(resident_id);
+    if (!assignmentId || !hostId || !residentId) return null;
+
+    const [existing] = await db.query(
+      `SELECT id FROM generated_release_letters
+        WHERE rotation_assignment_id = ?
+          AND program_id = ?
+          AND folder = 'INBOX'
+          AND sent_status IN ('SENT', 'DELIVERED')
+        ORDER BY id DESC
+        LIMIT 1;`,
+      [assignmentId, hostId],
+    );
+    if (existing.length > 0) {
+      return { letter_id: Number(existing[0].id), existed: true };
+    }
+
+    const composed = await this.composeLetter({
+      resident_id: residentId,
+      rotation_assignment_id: assignmentId,
+      template_code: ROTATION_NOTICE_TEMPLATE_CODE,
+      recipient_dept_head: 'Head of Department',
+    });
+
+    const [result] = await db.query(
+      `INSERT INTO generated_release_letters
+         (rotation_assignment_id, resident_id, template_id,
+          recipient_dept_head, hospital_department_name, supervising_faculty,
+          destination_supervising_faculty, coordinator_name, program_director_name,
+          letter_issue_date, generated_letter_body, sent_status, sent_at,
+          dispatch_type, recipient_coord_email, sent_by_user_id,
+          program_id, folder)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SENT', NOW(),
+               'CROSS_PROGRAM_ASSIGNMENT', NULL, ?, ?, 'INBOX');`,
+      [
+        assignmentId,
+        residentId,
+        composed.template.id,
+        'Head of Department',
+        composed.hospitalDept,
+        composed.destinationFaculty,
+        composed.destinationFaculty,
+        composed.coordinatorName,
+        composed.programDirectorName,
+        composed.issueDate,
+        composed.body.merged,
+        sent_by_user_id,
+        hostId,
+      ],
+    );
+
+    return {
+      letter_id: Number(result.insertId),
+      existed: false,
+      host_program_id: hostId,
+      home_program_id: home_program_id ? Number(home_program_id) : null,
+      letter_subject: composed.subject.merged,
+      generated_letter_body: composed.body.merged,
+    };
+  }
+
   static async revokeSupersededLetters(connection, letters) {
     const anchors = letters
       .filter((letter) => letter.existing)

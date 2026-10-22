@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { ensureTargetProgramColumn } = require('../utils/ensureTargetProgram');
 
 /**
  * Onboard a new resident with personal info, legal identifiers, and program enrollment
@@ -143,7 +144,10 @@ async function getAllResidents({ program_id, limit = 50, offset = 0 } = {}) {
 
   const params = [];
   if (program_id) {
-    query += ` WHERE re.program_id = ? `;
+    // A visitor's `position_type = 'VISITING'` enrolment is a registry row, not
+    // a home placement: listing it here would show a partner programme's
+    // resident as one of ours, and could show the same person twice.
+    query += ` WHERE re.program_id = ? AND re.position_type <> 'VISITING' `;
     params.push(program_id);
   }
 
@@ -228,20 +232,37 @@ async function getExternalResidents({ program_id, limit = 500, offset = 0 } = {}
       DATE_FORMAT(MAX(rra.end_date), '%Y-%m-%d') AS assignment_end_date
     FROM resident_rotation_assignments rra
     JOIN rotations rot ON rot.id = rra.rotation_id
-    JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id
+    JOIN rotation_blocks asg_rb ON asg_rb.id = rra.rotation_block_id
     JOIN residents r ON r.id = rra.resident_id
     JOIN residency_enrollments re ON re.id = (
       SELECT re2.id FROM residency_enrollments re2
-      WHERE re2.resident_id = r.id AND re2.program_id <> ?
+      WHERE re2.resident_id = r.id
+        AND re2.program_id <> ?
+        AND re2.position_type <> 'VISITING'
       ORDER BY re2.created_at DESC, re2.id DESC
       LIMIT 1
     )
     JOIN programs hp ON hp.id = re.program_id
-    WHERE rb.program_id = ?
-      AND (rot.program_id = ? OR rot.target_program_id = ?)
+    WHERE (rot.program_id = ? OR rot.target_program_id = ?)
       AND NOT EXISTS (
         SELECT 1 FROM residency_enrollments re_int
-        WHERE re_int.resident_id = r.id AND re_int.program_id = ?
+        WHERE re_int.resident_id = r.id
+          AND re_int.program_id = ?
+          AND re_int.position_type <> 'VISITING'
+      )
+      -- Reachable through the inter-programme network, or explicitly hosted
+      -- here by the rotation itself. Either is a declared relationship; a
+      -- rotation merely named "Internal Medicine" in another catalogue is not.
+      AND (
+        rot.target_program_id = ?
+        OR EXISTS (
+          SELECT 1 FROM program_connections pc
+          WHERE pc.is_active = 1
+            AND (
+              (pc.source_program_id = re.program_id AND pc.target_program_id = ?)
+              OR (pc.source_program_id = ? AND pc.target_program_id = re.program_id)
+            )
+        )
       )
     GROUP BY
       r.id, r.first_name, r.middle_initial, r.last_name,
@@ -252,6 +273,8 @@ async function getExternalResidents({ program_id, limit = 500, offset = 0 } = {}
   `;
 
   const [rows] = await pool.query(query, [
+    program_id,
+    program_id,
     program_id,
     program_id,
     program_id,

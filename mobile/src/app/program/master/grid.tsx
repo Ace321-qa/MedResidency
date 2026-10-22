@@ -129,6 +129,34 @@ function cellKey(residentId: number, blockId: number): string {
 }
 
 /**
+ * The short home-programme code a visiting badge names.
+ *
+ * `[Visiting — FM]` is the point: the receiving coordinator should know at a
+ * glance which programme sent the resident, without reading a full programme
+ * name. The home programme's specialty initials are preferred ("Family
+ * Medicine Residency Program" → "FM"); the stored programme code is the
+ * fallback for a name that does not reduce cleanly.
+ */
+function visitingBadgeLabel(resident: {
+  home_program_name?: string | null;
+  home_program_code?: string | null;
+}): string {
+  const stripped = (resident.home_program_name ?? '')
+    .replace(/\b(residency|program|programme)\b/gi, ' ')
+    .trim();
+  const initials = stripped
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word[0])
+    .join('')
+    .toUpperCase();
+  const code = initials.length >= 1 && initials.length <= 4
+    ? initials
+    : (resident.home_program_code ?? '').trim() || 'External';
+  return `[Visiting — ${code}]`;
+}
+
+/**
  * Split matrix rows into this programme's own residents and visiting ones.
  *
  * The two cohorts share one row builder — every cell's logic is identical
@@ -172,7 +200,7 @@ function residentFrozenHeader(resident: GridResident) {
         </Text>
         {academicDay ? <StatusBadge label={academicDay.label} tone={rowAccentTone(dayCode)} /> : null}
         {resident.is_external ? (
-          <StatusBadge label="[Visiting]" tone="info" />
+          <StatusBadge label={visitingBadgeLabel(resident)} tone="info" />
         ) : null}
       </View>
       <Text variant="caption" tone="muted" numberOfLines={1}>
@@ -251,8 +279,20 @@ export default function MasterGridScreen() {
   const [facultyConfirmed, setFacultyConfirmed] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /** A placement opened for details by tapping its cell badge. */
+  const [assignmentDetail, setAssignmentDetail] = useState<{
+    assignment: CohortGridCell;
+    blockNumber: number | null;
+  } | null>(null);
   /** Bumped to re-run the seat-limit check after a failed one. */
   const [capacityAttempt, setCapacityAttempt] = useState(0);
+
+  const openAssignmentDetail = useCallback(
+    (assignment: CohortGridCell, blockNumber: number) => {
+      setAssignmentDetail({ assignment, blockNumber: blockNumber || null });
+    },
+    [],
+  );
 
   // --- Notice dispatch -----------------------------------------------------
   // The block whose notices are being prepared. Defaults to the earliest block
@@ -398,6 +438,7 @@ export default function MasterGridScreen() {
                 blockId: block?.block_id,
                 blockNumber: block?.block_number ?? blockNumber,
               }),
+            openAssignmentDetail,
           );
         }
 
@@ -411,7 +452,7 @@ export default function MasterGridScreen() {
           cells,
         };
       }),
-    [residents, blocksByNumber, cellFor, startDate],
+    [residents, blocksByNumber, cellFor, startDate, openAssignmentDetail],
   );
 
   const rowsWeekly = useMemo<MatrixRowDef[]>(
@@ -438,14 +479,20 @@ export default function MasterGridScreen() {
 
         for (let w = 1; w <= 52; w += 1) {
           const win = weekWindow(w, startDate);
-          cells[`week-${w}`] = weeklyCellNode(resident.resident_id, weekToAssignments.get(w), w, startDate, () =>
-            openAssignSheet({
-              residentId: resident.resident_id,
-              residentName: resident.resident_name,
-              weekNumber: w,
-              startDate: win?.start,
-              endDate: win?.end,
-            }),
+          cells[`week-${w}`] = weeklyCellNode(
+            resident.resident_id,
+            weekToAssignments.get(w),
+            w,
+            startDate,
+            () =>
+              openAssignSheet({
+                residentId: resident.resident_id,
+                residentName: resident.resident_name,
+                weekNumber: w,
+                startDate: win?.start,
+                endDate: win?.end,
+              }),
+            openAssignmentDetail,
           );
         }
 
@@ -459,7 +506,7 @@ export default function MasterGridScreen() {
           cells,
         };
       }),
-    [residents, blocksByNumber, cellFor, startDate],
+    [residents, blocksByNumber, cellFor, startDate, openAssignmentDetail],
   );
 
   // The grid draws two cohorts from one row build: residents enrolled in this
@@ -1036,6 +1083,84 @@ export default function MasterGridScreen() {
       />
 
       <Sheet
+        visible={assignmentDetail !== null}
+        onClose={() => setAssignmentDetail(null)}
+        title="Placement Details"
+        subtitle={
+          assignmentDetail
+            ? `${assignmentDetail.assignment.resident_name}${
+                assignmentDetail.assignment.pgy_level
+                  ? ` · PGY-${assignmentDetail.assignment.pgy_level}`
+                  : ''
+              }`
+            : undefined
+        }
+        footer={
+          assignmentDetail ? (
+            <Button
+              label="Open resident"
+              onPress={() => {
+                const residentId = assignmentDetail.assignment.resident_id;
+                setAssignmentDetail(null);
+                router.push(`/program/resident/${residentId}`);
+              }}
+            />
+          ) : undefined
+        }
+      >
+        {assignmentDetail ? (
+          <>
+            {assignmentDetail.assignment.is_external ? (
+              <StatusBadge label={visitingBadgeLabel(assignmentDetail.assignment)} tone="info" />
+            ) : null}
+            <DetailLine
+              label="Rotation"
+              value={`${assignmentDetail.assignment.rotation_code ?? 'N/A'} — ${
+                assignmentDetail.assignment.rotation_name ?? 'Unnamed rotation'
+              }`}
+            />
+            {assignmentDetail.assignment.department_name ? (
+              <DetailLine label="Department" value={assignmentDetail.assignment.department_name} />
+            ) : null}
+            <DetailLine
+              label="Block"
+              value={
+                assignmentDetail.blockNumber
+                  ? `Block ${assignmentDetail.blockNumber}`
+                  : assignmentDetail.assignment.block_number != null
+                    ? `Block ${assignmentDetail.assignment.block_number}`
+                    : '—'
+              }
+            />
+            <DetailLine
+              label="Dates"
+              value={
+                assignmentDetail.assignment.assignment_start_date_iso &&
+                assignmentDetail.assignment.assignment_end_date_iso
+                  ? `${assignmentDetail.assignment.assignment_start_date_iso} → ${assignmentDetail.assignment.assignment_end_date_iso}`
+                  : '—'
+              }
+            />
+            <DetailLine
+              label="Seat usage"
+              value={
+                assignmentDetail.assignment.rotation_max_capacity != null
+                  ? `${assignmentDetail.assignment.rotation_block_occupancy ?? 0}/${assignmentDetail.assignment.rotation_max_capacity}`
+                  : 'No seat limit'
+              }
+            />
+            <DetailLine
+              label="Release letter"
+              value={releaseStatusLabel(assignmentDetail.assignment.release_letter_status)}
+            />
+            {assignmentDetail.assignment.is_external && assignmentDetail.assignment.home_program_name ? (
+              <DetailLine label="Visiting from" value={assignmentDetail.assignment.home_program_name} />
+            ) : null}
+          </>
+        ) : null}
+      </Sheet>
+
+      <Sheet
         visible={assignSheetOpen}
         onClose={() => setAssignSheetOpen(false)}
         title={`Assign Rotation${selected ? ` — ${selected.residentName}` : ''}`}
@@ -1249,22 +1374,50 @@ function badgeKey(params: {
   return `badge-r${residentId}-${location}-${identity}${suffix}`;
 }
 
-function assignmentBadge(assignment: CohortGridCell, label: string, key: string): React.ReactNode {
+function assignmentBadge(
+  assignment: CohortGridCell,
+  label: string,
+  key: string,
+  onPress?: () => void,
+): React.ReactNode {
   const palette = rotationPalette(assignment.rotation_code, assignment.rotation_id);
+  const description = rotationCellDescription(
+    assignment.rotation_code,
+    assignment.rotation_name,
+    typeof assignment.assigned_weeks === 'number' ? assignment.assigned_weeks : null,
+  );
+  const content = (
+    <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.cellBadgeText, { color: palette.foreground }]}>
+      {label}
+    </Text>
+  );
+
+  // A badge opens the placement's detail sheet rather than being dead weight:
+  // dates, seat usage and the release-letter status all live one tap away,
+  // including for a visiting resident who is not on this programme's roster.
+  if (onPress) {
+    return (
+      <Pressable
+        key={key}
+        onPress={onPress}
+        style={[styles.cellBadge, { backgroundColor: palette.surface, borderColor: palette.border }]}
+        accessible
+        accessibilityRole="button"
+        accessibilityLabel={`${description}. Opens placement details.`}
+      >
+        {content}
+      </Pressable>
+    );
+  }
+
   return (
     <View
       key={key}
       style={[styles.cellBadge, { backgroundColor: palette.surface, borderColor: palette.border }]}
       accessible
-      accessibilityLabel={rotationCellDescription(
-        assignment.rotation_code,
-        assignment.rotation_name,
-        typeof assignment.assigned_weeks === 'number' ? assignment.assigned_weeks : null,
-      )}
+      accessibilityLabel={description}
     >
-      <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.cellBadgeText, { color: palette.foreground }]}>
-        {label}
-      </Text>
+      {content}
     </View>
   );
 }
@@ -1343,6 +1496,53 @@ function capacityNotation(cell: CohortGridCell[] | undefined, key: string): Reac
   );
 }
 
+function releaseNotation(cell: CohortGridCell[] | undefined, key: string): React.ReactNode {
+  const status = cell?.find((item) => item.release_letter_status)?.release_letter_status;
+  if (!status || status === 'REVOKED') return null;
+  const label =
+    status === 'DELIVERED' ? 'Letter delivered' : status === 'DRAFT' ? 'Letter draft' : 'Letter sent';
+
+  return (
+    <View
+      key={key}
+      style={styles.releaseTag}
+      accessible
+      accessibilityLabel={`Release letter status: ${label}`}
+    >
+      <Text numberOfLines={1} style={styles.releaseTagText}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function releaseStatusLabel(status: CohortGridCell['release_letter_status']): string {
+  switch (status) {
+    case 'DELIVERED':
+      return 'Delivered to the department';
+    case 'DRAFT':
+      return 'Draft — not yet sent';
+    case 'SENT':
+      return 'Sent to the department';
+    case 'REVOKED':
+      return 'Revoked';
+    default:
+      return 'Not generated yet';
+  }
+}
+
+/** One label/value line in the placement details sheet. */
+function DetailLine({ label, value }: { label: string; value: string }): React.ReactNode {
+  return (
+    <View style={styles.detailLine}>
+      <Text variant="caption" tone="muted">
+        {label}
+      </Text>
+      <Text variant="body">{value}</Text>
+    </View>
+  );
+}
+
 function unassignedCell(onAdd: () => void): React.ReactNode {  return (
     <Pressable onPress={onAdd} style={styles.unassignedCell} accessibilityLabel="Assign rotation">
       <Plus size={14} color={colors.textMuted} />
@@ -1375,6 +1575,7 @@ function blockCellNode(
   block: GridBlock | undefined,
   gridStart: GridStart = MASTER_GRID_START,
   onAdd: () => void,
+  onOpenAssignment?: (assignment: CohortGridCell, blockNumber: number) => void,
 ): React.ReactNode {
   const assignments = assignedRows(cell);
   if (assignments.length === 0) return unassignedCell(onAdd);
@@ -1404,6 +1605,7 @@ function blockCellNode(
         `${blockNumber}.${slot}: ${rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name)}`,
         // Slot-scoped, resident-aware key supplied by the cell iterator.
         badgeKey({ residentId, assignment, blockId, slot }),
+        onOpenAssignment ? () => onOpenAssignment(assignment, blockNumber) : undefined,
       ),
     );
   }
@@ -1414,6 +1616,7 @@ function blockCellNode(
         rotationBadgeLabel(assignment.rotation_code, assignment.rotation_name),
         // Local index is the final fallback for rows that cannot be slotted.
         badgeKey({ residentId, assignment, blockId, index }),
+        onOpenAssignment ? () => onOpenAssignment(assignment, blockNumber) : undefined,
       ),
     );
   });
@@ -1430,6 +1633,7 @@ function blockCellNode(
       {badges}
       {clinic}
       {capacityNotation(cell, `capacity-${residentId}-${blockId ?? blockNumber}`)}
+      {releaseNotation(cell, `release-${residentId}-${blockId ?? blockNumber}`)}
     </View>
   );
 }
@@ -1445,6 +1649,7 @@ function weeklyCellNode(
   weekNumber: number,
   gridStart: GridStart = MASTER_GRID_START,
   onAdd: () => void,
+  onOpenAssignment?: (assignment: CohortGridCell, blockNumber: number) => void,
 ): React.ReactNode {
   const assignments = assignedRows(cell);
   if (assignments.length === 0) return unassignedCell(onAdd);
@@ -1457,9 +1662,15 @@ function weeklyCellNode(
   // Week-scoped, resident-aware key supplied by the cell iterator.
   return (
     <View style={styles.cellBadges}>
-      {assignmentBadge(assignment, label, badgeKey({ residentId, assignment, weekNumber }))}
+      {assignmentBadge(
+        assignment,
+        label,
+        badgeKey({ residentId, assignment, weekNumber }),
+        onOpenAssignment ? () => onOpenAssignment(assignment, window?.blockNumber ?? 0) : undefined,
+      )}
       {clinicNotation(cell, `clinic-${residentId}-w${weekNumber}`)}
       {capacityNotation(cell, `capacity-${residentId}-w${weekNumber}`)}
+      {releaseNotation(cell, `release-${residentId}-w${weekNumber}`)}
     </View>
   );
 }
@@ -1562,6 +1773,21 @@ const styles = StyleSheet.create({
   capacityTagText: {
     fontSize: 8,
     fontWeight: '700',
+  },
+  releaseTag: {
+    alignSelf: 'flex-start',
+    borderRadius: radius.sm,
+    backgroundColor: colors.infoSurface,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+  },
+  releaseTagText: {
+    fontSize: 8,
+    fontWeight: '700',
+    color: colors.info,
+  },
+  detailLine: {
+    gap: 2,
   },
   addBadge: {
     paddingHorizontal: 4,

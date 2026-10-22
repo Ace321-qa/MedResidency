@@ -122,7 +122,10 @@ const COHORT_GRID_COLUMNS = `
         re.resident_status,
         -- Cross-programme provenance. Derived from the aliases above rather
         -- than hardcoded per query, so both rows answer it the same way.
+        -- is_visiting is the same fact under the name the directive/API
+        -- contract uses; both are carried so no client has to translate.
         (re.program_id <> rb.program_id) AS is_external,
+        (re.program_id <> rb.program_id) AS is_visiting,
         re.program_id AS home_program_id,
         rb.program_id AS host_program_id,
         (
@@ -157,6 +160,17 @@ const COHORT_GRID_COLUMNS = `
         -- has no limit, which is the ordinary case, not a zero.
         rot.max_capacity AS rotation_max_capacity,
         rot.capacity_locked AS rotation_capacity_locked,
+        -- The live release letter for this cell, if one has been dispatched.
+        -- The grid renders the status beside the badge so a coordinator can see
+        -- whether the receiving department has actually been notified.
+        (
+          SELECT grl.sent_status
+          FROM generated_release_letters grl
+          WHERE grl.rotation_assignment_id = rra.id
+            AND grl.sent_status IN ('SENT', 'DELIVERED', 'DRAFT')
+          ORDER BY grl.id DESC
+          LIMIT 1
+        ) AS release_letter_status,
         -- Distinct residents standing in this rotation during this block. Counted
         -- per block rather than per week: it is the figure a cell can show, and
         -- it is the same number the capacity engine reports as the peak when a
@@ -1129,7 +1143,7 @@ class RotationService {
         ${COHORT_GRID_COLUMNS}
       FROM rotation_blocks rb
       JOIN programs p ON p.id = rb.program_id
-      JOIN residency_enrollments re ON re.program_id = rb.program_id
+      JOIN residency_enrollments re ON re.program_id = rb.program_id AND re.position_type <> 'VISITING'
       JOIN residents r ON r.id = re.resident_id
       LEFT JOIN resident_rotation_assignments rra
         ON rra.resident_id = re.resident_id AND rra.rotation_block_id = rb.id
@@ -1153,12 +1167,24 @@ class RotationService {
     // cells where they actually rotate — but projected through the exact same
     // column list, so both row shapes are interchangeable to a client.
     //
-    // A visitor is a resident whose *home* enrolment (their most recent
-    // enrolment outside this programme) points elsewhere, who holds at least
-    // one assignment in a rotation this programme owns, inside a block this
-    // programme owns. Residents who also hold an enrolment in the viewing
-    // programme are excluded — they are already in the cohort above, and
-    // showing them twice would double their rows.
+    // Two corrections matter here:
+    //
+    //  1. The *host* is `COALESCE(target_program_id, program_id)` — the
+    //     programme a rotation is hosted by, not merely the one whose
+    //     catalogue it sits in. An FM catalogue entry linked to IM is hosted
+    //     by IM even though FM owns the row.
+    //  2. The assignment's block belongs to the *sending* programme's calendar
+    //     (Block 6 is block 9 in FM, block 48 in IM). The cell must be drawn
+    //     against the viewing programme's own block of the same number, which
+    //     is what puts the visitor in the column the receiving coordinator is
+    //     looking at. Requiring the assignment block to belong to the viewer
+    //     was what made every visitor invisible.
+    //
+    // A visitor must also be connected to this programme through
+    // `program_connections` (or explicitly hosted here), and must not hold a
+    // real home enrolment here. A `position_type = 'VISITING'` enrolment — the
+    // receiving programme's visiting-registry row — is not a home enrolment,
+    // so it does not exclude them.
     let externalRows = [];
     if (program_id) {
       await ensureTargetProgramColumn();
@@ -1166,27 +1192,44 @@ class RotationService {
         SELECT
           ${COHORT_GRID_COLUMNS}
         FROM resident_rotation_assignments rra
-        JOIN rotations rot ON rot.id = rra.rotation_id AND (rot.program_id = ? OR rot.target_program_id = ?)
-        JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id AND rb.program_id = ?
+        JOIN rotations rot
+          ON rot.id = rra.rotation_id
+         AND (rot.program_id = ? OR rot.target_program_id = ?)
+        JOIN rotation_blocks asg_rb ON asg_rb.id = rra.rotation_block_id
+        JOIN rotation_blocks rb
+          ON rb.program_id = ?
+         AND rb.block_number = asg_rb.block_number
+         AND rb.academic_year IN (${yearInList})
         JOIN programs p ON p.id = rb.program_id
         JOIN residents r ON r.id = rra.resident_id
         JOIN residency_enrollments re ON re.id = (
           SELECT re2.id FROM residency_enrollments re2
-          WHERE re2.resident_id = r.id AND re2.program_id <> rb.program_id
+          WHERE re2.resident_id = r.id
+            AND re2.program_id <> rb.program_id
+            AND re2.position_type <> 'VISITING'
           ORDER BY re2.created_at DESC, re2.id DESC
           LIMIT 1
         )
-        WHERE rb.academic_year IN (${yearInList})
+        WHERE rra.start_date <= rb.end_date
+          AND rra.end_date >= rb.start_date
           AND NOT EXISTS (
             SELECT 1 FROM residency_enrollments re_int
-            WHERE re_int.resident_id = r.id AND re_int.program_id = rb.program_id
+            WHERE re_int.resident_id = r.id
+              AND re_int.program_id = rb.program_id
+              AND re_int.position_type <> 'VISITING'
+          )
+          AND (
+            rot.target_program_id = rb.program_id
+            OR EXISTS (
+              SELECT 1 FROM program_connections pc
+              WHERE pc.is_active = 1
+                AND (
+                  (pc.source_program_id = re.program_id AND pc.target_program_id = rb.program_id)
+                  OR (pc.source_program_id = rb.program_id AND pc.target_program_id = re.program_id)
+                )
+            )
           )
       `;
-      // A rotation counts for this programme when the programme owns it *or*
-      // when another programme has targeted it here (`target_program_id`), so
-      // a Family Medicine ward rotation linked to Internal Medicine lights up
-      // the Internal Medicine grid. The block must still be this programme's
-      // own — cells are drawn against the viewing programme's calendar.
       const externalParams = [program_id, program_id, program_id, ...yearValues];
       // The cohort filter applies to the visitor's *home* PGY level, so a
       // PGY-5 filter surfaces the FM PGY-5 rotating in, not a phantom level.
