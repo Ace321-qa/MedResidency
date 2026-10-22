@@ -31,7 +31,9 @@ export default function RosterScreen() {
     email: '',
     home_program_name: '',
   });
+// eslint-disable-line no-unused-vars
   const [saving, setSaving] = useState(false);
+// eslint-disable-line no-unused-vars
   const [saveError, setSaveError] = useState<string | null>(null); // eslint-disable-line no-unused-vars 
   const residents = useApiResource(
     () => fetchResidentList({ programId, limit: 100 }),
@@ -86,8 +88,7 @@ export default function RosterScreen() {
     [residents.data, visiting.data, faculty.data, showAddVisitor],
   );
 
-  /* eslint-disable no-unused-vars */
-  async function handleSaveVisitingResident() {
+    async function handleSaveVisitingResident() {
     const { corporate_id, first_name, last_name, mobile, email, home_program_name } = newVisitor;
 
     if (!corporate_id || corporate_id.trim() === '') {

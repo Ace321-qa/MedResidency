@@ -11,11 +11,11 @@ import { ReleaseLetter } from '../types/api';
  * profile so they instantly appear under the Visiting roster tab.
  *
  * Letter payload expected fields (from ReleaseLetter type):
- * - resident_name: string
- * - corporate_id: string (from merge values or identifiers)
- * - resident_email: string
- * - resident_mobile: string
- * - home_program_name: string (the dispatching programme name)
+ * - resident_name
+ * - corporate_id (from merge values or identifiers)
+ * - resident_email
+ * - resident_mobile
+ * - home_program_name (the dispatching programme name)
  *
  * The service checks if a resident with the given corporate_id already exists
  * in the visiting residents list. If missing, it creates a new visiting resident
@@ -27,8 +27,7 @@ import { ReleaseLetter } from '../types/api';
  * Check if a visiting resident with the given corporate_id already exists
  * in the program's visiting resident list.
  */
-// eslint-disable no-unused-vars
-async function visitingResidentExists(programId: number, corporateId: string): Promise<boolean> {
+async function visitingResidentExists(programId, corporateId) {
   try {
     const visitors = await request({
       method: 'GET',
@@ -38,7 +37,7 @@ async function visitingResidentExists(programId: number, corporateId: string): P
     });
 
     const existing = visitors.data?.find(
-      (v: { corporate_id: string }) => v.corporate_id === corporateId
+      (v) => v.corporate_id === corporateId
     );
 
     return !!existing;
@@ -52,20 +51,18 @@ async function visitingResidentExists(programId: number, corporateId: string): P
  * Create a new visiting resident profile via the API.
  */
 async function createVisitingResident(
-  programId: number,
-  corporateId: string,
-  firstName: string,
-  lastName: string,
-  mobile: string,
-  email: string,
-  homeProgramName: string
-): Promise<{ success: boolean; residentId?: number; error?: string }> {
+  programId,
+  corporateId,
+  firstName,
+  lastName,
+  mobile,
+  email,
+  homeProgramName
+) {
   try {
-    const response = await request<{
-      success: boolean;
-      data: { resident_id: number; corporate_id: string; first_name: string; last_name: string; status: string };
-    }>('/residents/visiting', {
+    const response = await request({
       method: 'POST',
+      url: '/residents/visiting',
       data: {
         corporate_id: corporateId,
         first_name: firstName,
@@ -82,7 +79,7 @@ async function createVisitingResident(
     }
 
     return { success: false, error: response.error || 'Unknown error' };
-  } catch (error: any) {
+  } catch (error) {
     return { success: false, error: error.detail || error.message };
   }
 }
@@ -95,13 +92,13 @@ async function createVisitingResident(
  * @returns Object with created, alreadyExists, and errors counts
  */
 export async function autoIngestVisitingFromInbox(
-  programId: number,
-  letters: ReleaseLetter[]
-): Promise<{ created: number; alreadyExists: number; errors: string[] }> {
+  programId,
+  letters,
+) {
   const results = {
     created: 0,
     alreadyExists: 0,
-    errors: [] as string[],
+    errors: [],
   };
 
   for (const letter of letters) {
@@ -117,7 +114,7 @@ export async function autoIngestVisitingFromInbox(
     // Skip if no corporate_id is provided - we need at least the mandatory field
     if (!corporate_id) {
       results.errors.push(
-        `Letter ${letter.letter_id}: No corporate_id found in letter payload, skipping auto-ingest.`
+        'Letter ' + letter.letter_id + ': No corporate_id found in letter payload, skipping auto-ingest.'
       );
       continue;
     }
@@ -135,17 +132,17 @@ export async function autoIngestVisitingFromInbox(
       programId,
       corporate_id,
       resident_name || '',
-      lastName || '',
+      '' ,
       resident_mobile || '',
       resident_email || '',
-      home_program_name || ''
+      home_program_name || '',
     );
 
     if (createResult.success && createResult.residentId) {
       results.created += 1;
     } else {
       results.errors.push(
-        `Letter ${letter.letter_id}: Failed to create visiting resident - ${createResult.error || 'Unknown error'}`
+        'Letter ' + letter.letter_id + ': Failed to create visiting resident - ' + (createResult.error || 'Unknown error')
       );
     }
   }
@@ -158,17 +155,23 @@ export async function autoIngestVisitingFromInbox(
  * Convenience function for use in coordinator screens.
  */
 export async function fetchAndAutoIngestInbox(
-  programId: number
-): Promise<{ letters: ReleaseLetter[]; ingestResults: Awaited<ReturnType<typeof autoIngestVisitingFromInbox>> }> {
+  programId,
+) {
   // Fetch received letters (inbox)
-  const inboxResponse = await request<ApiListResponse<ReleaseLetter>>(
-    `/letters?program_id=${programId}&box=received`
-  );
+  const inboxResponse = await request({
+    method: 'GET',
+    url: '/letters',
+    params: {
+      program_id: programId,
+      box: 'received',
+    },
+  });
 
-  const ingestResults = await autoIngestVisitingFromInbox(programId, inboxResponse.data ?? []);
+  const letters = (inboxResponse.data || []);
+  const ingestResults = await autoIngestVisitingFromInbox(programId, letters);
 
   return {
-    letters: inboxResponse.data ?? [],
-    ingestResults,
+    letters: letters,
+    ingestResults: ingestResults,
   };
 }
