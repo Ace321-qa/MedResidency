@@ -501,14 +501,49 @@ export default function GenerateReleaseLetterScreen() {
 
                 <Divider />
 
-                <MetaRow label="To" value={`${preview.recipient_dept_head ?? 'Department head'} — ${preview.hospital_department_name ?? 'Department'}`} />
+                <MetaRow
+                  label="To"
+                  value={[
+                    preview.recipient_dept_head ?? 'Head of Department',
+                    preview.hospital_department_name,
+                    preview.merge_values.HOST_PROGRAM_NAME
+                      ? `(${preview.merge_values.HOST_PROGRAM_NAME})`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                />
                 <MetaRow
                   label="Issued"
                   value={formatDate(preview.letter_issue_date)}
                 />
                 <MetaRow
-                  label="From"
-                  value={`${preview.merge_values.PROGRAM_NAME ?? 'Residency programme'}${preview.merge_values.INSTITUTION_NAME ? ` · ${preview.merge_values.INSTITUTION_NAME}` : ''}`}
+                  label="From (sponsoring programme)"
+                  value={
+                    preview.merge_values.HOME_PROGRAM_NAME ??
+                    preview.merge_values.PROGRAM_NAME ??
+                    'Residency programme'
+                  }
+                />
+                <MetaRow
+                  label="Sending institution"
+                  value={
+                    preview.merge_values.HOME_INSTITUTION_NAME ??
+                    preview.merge_values.INSTITUTION_NAME ??
+                    'Not recorded'
+                  }
+                />
+                <MetaRow
+                  label="Receiving programme"
+                  value={
+                    preview.merge_values.HOST_PROGRAM_NAME ??
+                    preview.merge_values.RECEIVING_PROGRAM_NAME ??
+                    'Same programme'
+                  }
+                />
+                <MetaRow
+                  label="Receiving department"
+                  value={preview.hospital_department_name ?? 'Not recorded'}
                 />
                 <MetaRow
                   label="Program director"
@@ -516,7 +551,11 @@ export default function GenerateReleaseLetterScreen() {
                 />
                 <MetaRow
                   label="Coordinator"
-                  value={preview.coordinator_name ?? 'Not recorded'}
+                  value={
+                    preview.merge_values.DISPATCHING_COORDINATOR_TITLE
+                      ? `${preview.coordinator_name ?? 'Not recorded'} · ${preview.merge_values.DISPATCHING_COORDINATOR_TITLE}`
+                      : (preview.coordinator_name ?? 'Not recorded')
+                  }
                 />
                 <MetaRow
                   label="Resident"

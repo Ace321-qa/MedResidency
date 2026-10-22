@@ -180,20 +180,28 @@ export function LetterPreviewSheet({
           <Divider />
 
           <View style={styles.metaList}>
+            <MetaLine label="Date issued" value={formatDate(letter.letter_issue_date ?? letter.created_at)} />
             <MetaLine
-              label="Date issued"
-              value={formatDate(letter.letter_issue_date ?? letter.created_at)}
+              label="To"
+              value={[
+                letter.recipient_dept_head,
+                letter.hospital_department_name,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
             />
-            <MetaLine label="To" value={letter.recipient_dept_head} />
             <MetaLine
-              label="Department"
-              value={letter.hospital_department_name ?? 'Not recorded'}
+              label="Receiving programme"
+              value={letter.host_program_name ?? letter.program_name ?? 'Not recorded'}
             />
             <MetaLine label="Resident" value={letter.resident_name} />
             <MetaLine
-              label="From"
+              label="From (sponsoring programme)"
               value={letter.program_name ?? letter.specialty_name ?? 'Residency program'}
             />
+            {letter.institution_name ? (
+              <MetaLine label="Sending institution" value={letter.institution_name} />
+            ) : null}
             {letter.program_director_name ? (
               <MetaLine label="Program director" value={letter.program_director_name} />
             ) : null}

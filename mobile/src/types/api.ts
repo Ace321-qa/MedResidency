@@ -668,6 +668,8 @@ export interface ReleaseLetter {
   rotation_name: string | null;
   year_in_program: number | null;
   program_name: string | null;
+  /** Code of the resident's home (sponsoring) programme. */
+  program_code?: string | null;
   specialty_name: string | null;
   institution_name: string | null;
   template_id: number;
@@ -682,9 +684,14 @@ export interface ReleaseLetter {
   dispatching_program_id?: number | null;
   dispatching_program_name?: string | null;
   dispatching_program_code?: string | null;
+  dispatching_program_institution_name?: string | null;
   /** The programme owning the rotation this letter is anchored to (the host). */
   host_program_id?: number | null;
-  /** The resident's home programme from their latest enrolment. */
+  /** Name/code/institution of the host (receiving) programme. */
+  host_program_name?: string | null;
+  host_program_code?: string | null;
+  host_institution_name?: string | null;
+  /** The resident's home programme from their latest non-visiting enrolment. */
   resident_program_id?: number | null;
   /**
    * The dual-inbox mailbox this row is filed in. `mailbox_program_id` is the

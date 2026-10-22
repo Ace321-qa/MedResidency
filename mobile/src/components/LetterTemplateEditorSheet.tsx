@@ -45,6 +45,7 @@ import type { LetterTemplate } from '../types/api';
 const PLACEHOLDER_TOKENS: string[] = [
   'TODAYS_DATE',
   'COORDINATOR_NAME',
+  'DISPATCHING_COORDINATOR_TITLE',
   'PROGRAM_DIRECTOR_NAME',
   'SUPERVISING_FACULTY',
   'RESIDENT_NAME',
@@ -61,6 +62,13 @@ const PLACEHOLDER_TOKENS: string[] = [
   'END_TIME',
   'SUPERVISOR_NAME',
   'ROTATION_NAME',
+  'HOME_PROGRAM_NAME',
+  'HOME_PROGRAM_CODE',
+  'HOME_INSTITUTION_NAME',
+  'HOST_PROGRAM_NAME',
+  'RECEIVING_PROGRAM_NAME',
+  'HOST_PROGRAM_CODE',
+  'HOST_INSTITUTION_NAME',
   'PROGRAM_NAME',
   'SPECIALTY_NAME',
   'INSTITUTION_NAME',
@@ -78,8 +86,20 @@ const PLACEHOLDER_TOKENS: string[] = [
 const PLACEHOLDER_HINTS: Record<string, string> = {
   TODAYS_DATE: 'Inserts the actual date the letter is generated/sent.',
   COORDINATOR_NAME: "Inserts the dispatching coordinator's name.",
+  DISPATCHING_COORDINATOR_TITLE:
+    'Inserts the sending coordinator\'s full title, e.g. "Family Medicine Residency Program Coordinator".',
   PROGRAM_DIRECTOR_NAME: "Inserts the dispatching program director's name.",
   SUPERVISING_FACULTY: 'Inserts the supervisor assigned at the destination hospital.',
+  HOME_PROGRAM_NAME: "Inserts the resident's sponsoring (home) programme — the sender.",
+  HOME_PROGRAM_CODE: 'Inserts the code of the resident\'s home programme.',
+  HOME_INSTITUTION_NAME: "Inserts the institution hosting the resident's home programme.",
+  HOST_PROGRAM_NAME: 'Inserts the programme that receives the resident for this rotation.',
+  RECEIVING_PROGRAM_NAME: 'Alias of HOST_PROGRAM_NAME — the receiving programme.',
+  HOST_PROGRAM_CODE: 'Inserts the code of the receiving programme.',
+  HOST_INSTITUTION_NAME: 'Inserts the institution hosting the receiving programme.',
+  HOSPITAL_DEPT: 'Inserts the receiving department for this rotation.',
+  PROGRAM_NAME: 'Legacy alias of HOME_PROGRAM_NAME (the sponsoring programme).',
+  INSTITUTION_NAME: 'Legacy alias of HOME_INSTITUTION_NAME.',
 };
 
 const FACULTY_TOKEN = 'SUPERVISING_FACULTY';

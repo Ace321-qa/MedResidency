@@ -17,15 +17,65 @@ const DEFAULT_TEMPLATE_CODE = 'STANDARD-RELEASE';
 const ROTATION_NOTICE_TEMPLATE_CODE = 'STANDARD-ROTATION-NOTICE';
 
 const ROTATION_NOTICE_SUBJECT =
-  'Rotation Placement Notice: {{RESIDENT_NAME}} ({{PGY_LEVEL}}) — {{HOSPITAL_DEPT}}';
+  'Official Rotation Placement Notice: Dr. {{RESIDENT_NAME}} ({{PGY_LEVEL}}) — {{HOSPITAL_DEPT}}';
 
 /**
- * Deliberately written against the tokens `composeLetter` already resolves, so
- * nothing here needs a new merge value. Every token appears at least once, which
- * is what lets the merge's `unresolved` report stand as a real check: a token
- * that is missing from the body can never be reported as missing.
+ * The body every programme's `STANDARD-ROTATION-NOTICE` is seeded with.
+ *
+ * It is written in the voice of the *home sponsoring programme*: the From line,
+ * the coordinator title and the signature block all name the programme that
+ * owns the resident, while the host programme appears only as the receiving
+ * side (`{{HOST_PROGRAM_NAME}}`). That separation is the whole point of the
+ * `HOME_*` / `HOST_*` token pairs — a letter dispatched by Family Medicine
+ * about a block inside Internal Medicine must never open with
+ * "From: internal medicine residency program".
+ *
+ * The legacy `PROGRAM_NAME` / `INSTITUTION_NAME` tokens remain resolvable, so a
+ * coordinator's customised template that still uses them keeps working, but the
+ * seeded body uses the explicit tokens exclusively.
  */
-const ROTATION_NOTICE_BODY = `Dear {{DEPT_HEAD_NAME}},
+const ROTATION_NOTICE_BODY = `{{HOME_INSTITUTION_NAME}}
+{{HOME_PROGRAM_NAME}}
+Date Issued: {{TODAYS_DATE}}
+
+MEMORANDUM / ROTATION PLACEMENT NOTICE
+
+TO: Head of Department, {{HOSPITAL_DEPT}} ({{HOST_PROGRAM_NAME}})
+FROM: {{HOME_PROGRAM_NAME}} Office
+DISPATCHING COORDINATOR: {{COORDINATOR_NAME}} ({{DISPATCHING_COORDINATOR_TITLE}})
+PROGRAM DIRECTOR: {{PROGRAM_DIRECTOR_NAME}}
+
+SUBJECT: Official Cross-Program Rotation Placement Notice for Dr. {{RESIDENT_NAME}}
+
+Dear Head of Department,
+
+This letter confirms that Dr. {{RESIDENT_NAME}} ({{PGY_LEVEL}}, Corporate ID: {{CORPORATE_ID}}), an enrolled resident in the {{HOME_PROGRAM_NAME}} at {{HOME_INSTITUTION_NAME}}, has been scheduled to complete a clinical rotation in your department.
+
+Rotation Assignment Summary:
+- Resident Name: Dr. {{RESIDENT_NAME}}
+- PGY Level: {{PGY_LEVEL}}
+- Corporate ID: {{CORPORATE_ID}}
+- Home Program: {{HOME_PROGRAM_NAME}}
+- Receiving Department: {{HOSPITAL_DEPT}} ({{HOST_PROGRAM_NAME}})
+- Rotation Period: {{RELEASE_START_DATE}} to {{RELEASE_END_DATE}}
+- Destination Supervising Faculty: {{SUPERVISING_FACULTY}}
+
+For any administrative inquiries regarding this placement, please contact {{COORDINATOR_NAME}} ({{HOME_PROGRAM_NAME}} Coordinator).
+
+Sincerely,
+
+{{COORDINATOR_NAME}}
+{{DISPATCHING_COORDINATOR_TITLE}}
+{{HOME_PROGRAM_NAME}}
+{{HOME_INSTITUTION_NAME}}`;
+
+/**
+ * The seeded body that shipped before the home/host split. Used only by the
+ * seeder's migration step: a template whose body still matches this text has
+ * never been edited by a coordinator, so it is safe to replace with
+ * `ROTATION_NOTICE_BODY`. A customised body is left untouched.
+ */
+const ROTATION_NOTICE_LEGACY_BODY = `Dear {{DEPT_HEAD_NAME}},
 
 This letter confirms that Dr. {{RESIDENT_NAME}} ({{PGY_LEVEL}}), Corporate ID {{CORPORATE_ID}}, of the {{PROGRAM_NAME}} at {{INSTITUTION_NAME}}, has been scheduled to rotate in your department.
 
@@ -481,6 +531,9 @@ const SEEDED_TEMPLATES = [
     name: 'Standard Rotation Placement Notice Letter',
     subject: ROTATION_NOTICE_SUBJECT,
     body: ROTATION_NOTICE_BODY,
+    // Bodies that are known to be an untouched previous default. Only these are
+    // migrated in place; anything else is a coordinator's own wording.
+    previousBodies: [ROTATION_NOTICE_LEGACY_BODY],
   },
 ];
 
@@ -490,17 +543,43 @@ async function ensureDefaultTemplates() {
 
   const codes = SEEDED_TEMPLATES.map((template) => template.code);
   const [existing] = await db.query(
-    `SELECT program_id, template_code FROM release_letter_templates WHERE template_code IN (?);`,
+    `SELECT id, program_id, template_code, letter_body
+       FROM release_letter_templates WHERE template_code IN (?);`,
     [codes]
   );
   const covered = new Set(
     existing.map((row) => `${row.program_id}:${row.template_code}`)
   );
+  const rowsByTemplate = new Map();
+  for (const row of existing) {
+    const key = `${row.program_id}:${row.template_code}`;
+    const list = rowsByTemplate.get(key) || [];
+    list.push(row);
+    rowsByTemplate.set(key, list);
+  }
   let seeded = 0;
 
   for (const program of programs) {
     for (const template of SEEDED_TEMPLATES) {
-      if (covered.has(`${program.id}:${template.code}`)) continue;
+      const key = `${program.id}:${template.code}`;
+      if (covered.has(key)) {
+        const previousBodies = template.previousBodies || [];
+        for (const row of rowsByTemplate.get(key) || []) {
+          const stored = String(row.letter_body ?? '').trim();
+          const untouchedDefault = previousBodies.some(
+            (body) => String(body).trim() === stored
+          );
+          if (!untouchedDefault) continue;
+          await db.query(
+            `UPDATE release_letter_templates
+                SET template_name = ?, subject_line = ?, letter_body = ?
+              WHERE id = ?;`,
+            [template.name, template.subject, template.body, row.id]
+          );
+          seeded += 1;
+        }
+        continue;
+      }
       await db.query(
         `INSERT INTO release_letter_templates
            (program_id, template_code, template_name, subject_line, letter_body, is_active)
@@ -550,6 +629,7 @@ class ReleaseLetterService {
          r.last_name,
          re.program_id,
          re.year_in_program,
+         p.program_code,
          p.program_name,
          p.specialty_name,
          p.institution_name,
@@ -598,6 +678,7 @@ class ReleaseLetterService {
       resident_email: row.resident_email || null,
       resident_mobile: row.resident_mobile || null,
       program_id: row.program_id || null,
+      program_code: row.program_code || null,
       program_name: row.program_name || null,
       specialty_name: row.specialty_name || null,
       institution_name: row.institution_name || null,
@@ -680,9 +761,17 @@ class ReleaseLetterService {
          rra.end_date,
          rra.notes,
          rot.rotation_name,
-         rot.department_name
+         rot.department_name,
+         -- The receiving programme for this placement. A rotation may name one
+         -- explicitly (target_program_id); otherwise its owning programme is the
+         -- host, which is what every pre-link row means.
+         COALESCE(rot.target_program_id, rot.program_id) AS host_program_id,
+         hp.program_name AS host_program_name,
+         hp.program_code AS host_program_code,
+         hp.institution_name AS host_institution_name
        FROM resident_rotation_assignments rra
        JOIN rotations rot ON rot.id = rra.rotation_id
+       LEFT JOIN programs hp ON hp.id = COALESCE(rot.target_program_id, rot.program_id)
        WHERE rra.id = ? AND rra.resident_id = ?
        LIMIT 1;`,
       [rotationAssignmentId, residentId]
@@ -1017,6 +1106,21 @@ class ReleaseLetterService {
     const assignmentStart = toDateString(longitudinal ? longitudinal.start_date : rotation.start_date);
     const assignmentEnd = toDateString(longitudinal ? longitudinal.end_date : rotation.end_date);
 
+    // Home = the programme that sponsors the resident (from the non-VISITING
+    // enrolment). Host = the programme that receives them for this block. A
+    // same-programme rotation has no separate host, so its host fields fall back
+    // to the home identity rather than rendering as blanks.
+    const homeProgramName = context.program_name || null;
+    const homeProgramCode = context.program_code || null;
+    const homeInstitutionName = context.institution_name || null;
+    const hostProgramName = (rotation && rotation.host_program_name) || homeProgramName;
+    const hostProgramCode = (rotation && rotation.host_program_code) || homeProgramCode;
+    const hostInstitutionName =
+      (rotation && rotation.host_institution_name) || homeInstitutionName;
+    const dispatchingCoordinatorTitle = homeProgramName
+      ? `${homeProgramName} Coordinator`
+      : null;
+
     const values = {
       TODAYS_DATE: formatLetterDate(issueDate),
       COORDINATOR_NAME: coordinatorName,
@@ -1036,9 +1140,22 @@ class ReleaseLetterService {
       SUPERVISING_FACULTY: destinationFaculty,
       SUPERVISOR_NAME: longitudinal ? longitudinal.supervisor_name : null,
       ROTATION_NAME: rotation ? rotation.rotation_name : null,
-      PROGRAM_NAME: context.program_name,
+      // Home sponsoring programme — the sender of every notice.
+      HOME_PROGRAM_NAME: homeProgramName,
+      HOME_PROGRAM_CODE: homeProgramCode,
+      HOME_INSTITUTION_NAME: homeInstitutionName,
+      // Host receiving programme — where the rotation takes place.
+      HOST_PROGRAM_NAME: hostProgramName,
+      RECEIVING_PROGRAM_NAME: hostProgramName,
+      HOST_PROGRAM_CODE: hostProgramCode,
+      HOST_INSTITUTION_NAME: hostInstitutionName,
+      DISPATCHING_COORDINATOR_TITLE: dispatchingCoordinatorTitle,
+      // Legacy tokens: kept resolving so customised templates in the field do
+      // not break. They mean the home programme, which is what they always
+      // meant before the explicit pairs existed.
+      PROGRAM_NAME: homeProgramName,
       SPECIALTY_NAME: context.specialty_name,
-      INSTITUTION_NAME: context.institution_name,
+      INSTITUTION_NAME: homeInstitutionName,
       RELEASE_START_DATE: assignmentStart,
       RELEASE_END_DATE: assignmentEnd,
     };
@@ -1271,6 +1388,12 @@ class ReleaseLetterService {
    * preview highlights rather than hiding.
    */
   static buildMergeValues(row) {
+    const homeProgramName = row.program_name ?? null;
+    const homeProgramCode = row.program_code ?? null;
+    const homeInstitutionName = row.institution_name ?? null;
+    const hostProgramName = row.host_program_name ?? homeProgramName;
+    const dispatchingProgramName = row.dispatching_program_name ?? homeProgramName;
+
     return {
       TODAYS_DATE:
         formatLetterDate(row.letter_issue_date) ??
@@ -1293,9 +1416,23 @@ class ReleaseLetterService {
       SUPERVISING_FACULTY: row.destination_supervising_faculty ?? row.supervising_faculty ?? null,
       SUPERVISOR_NAME: row.supervisor_name,
       ROTATION_NAME: row.rotation_name ?? null,
-      PROGRAM_NAME: row.program_name,
+      // Explicit home/host pairs, mirrored from buildLetterMerge so a letter
+      // re-read from the database resolves the same tokens it was generated
+      // with — including on a receiving programme's inbox copy.
+      HOME_PROGRAM_NAME: homeProgramName,
+      HOME_PROGRAM_CODE: homeProgramCode,
+      HOME_INSTITUTION_NAME: homeInstitutionName,
+      HOST_PROGRAM_NAME: hostProgramName,
+      RECEIVING_PROGRAM_NAME: hostProgramName,
+      HOST_PROGRAM_CODE: row.host_program_code ?? null,
+      HOST_INSTITUTION_NAME: row.host_institution_name ?? null,
+      DISPATCHING_COORDINATOR_TITLE: dispatchingProgramName
+        ? `${dispatchingProgramName} Coordinator`
+        : null,
+      // Legacy tokens keep their pre-split meaning (the home programme).
+      PROGRAM_NAME: homeProgramName,
       SPECIALTY_NAME: row.specialty_name,
-      INSTITUTION_NAME: row.institution_name,
+      INSTITUTION_NAME: homeInstitutionName,
       RELEASE_START_DATE: row.release_start_date,
       RELEASE_END_DATE: row.release_end_date,
     };
@@ -1319,6 +1456,7 @@ class ReleaseLetterService {
         lct.clinic_name,
         rot.rotation_name,
         re.year_in_program,
+        p.program_code,
         p.program_name,
         p.specialty_name,
         p.institution_name,
@@ -1333,6 +1471,7 @@ class ReleaseLetterService {
         rlt.program_id AS dispatching_program_id,
         (SELECT dp.program_name FROM programs dp WHERE dp.id = rlt.program_id) AS dispatching_program_name,
         (SELECT dp.program_code FROM programs dp WHERE dp.id = rlt.program_id) AS dispatching_program_code,
+        (SELECT dp.institution_name FROM programs dp WHERE dp.id = rlt.program_id) AS dispatching_program_institution_name,
         -- The mailbox this row is filed in. program_id + folder are the two
         -- columns the dual-inbox split reads: a programme's Sent tab is its
         -- own rows filed 'SENT', its Inbox is the copies filed 'INBOX' under
@@ -1346,6 +1485,12 @@ class ReleaseLetterService {
         -- the rotation's owning programme is the host, which is what every
         -- pre-link row means.
         COALESCE(rot.target_program_id, rot.program_id) AS host_program_id,
+        (SELECT hp.program_name FROM programs hp
+          WHERE hp.id = COALESCE(rot.target_program_id, rot.program_id)) AS host_program_name,
+        (SELECT hp.program_code FROM programs hp
+          WHERE hp.id = COALESCE(rot.target_program_id, rot.program_id)) AS host_program_code,
+        (SELECT hp.institution_name FROM programs hp
+          WHERE hp.id = COALESCE(rot.target_program_id, rot.program_id)) AS host_institution_name,
         re.program_id AS resident_program_id,
         grl.dispatch_type,
         grl.recipient_coord_email,
@@ -1381,7 +1526,7 @@ class ReleaseLetterService {
       LEFT JOIN residency_enrollments re ON re.id = (
         SELECT re2.id FROM residency_enrollments re2
         WHERE re2.resident_id = r.id
-        ORDER BY re2.created_at DESC
+        ORDER BY (re2.position_type = 'VISITING') ASC, re2.created_at DESC, re2.id DESC
         LIMIT 1
       )
       LEFT JOIN programs p ON p.id = re.program_id
@@ -1674,7 +1819,15 @@ class ReleaseLetterService {
        JOIN rotations rot ON rot.id = rra.rotation_id
        JOIN rotation_blocks rb ON rb.id = rra.rotation_block_id
        JOIN residents r ON r.id = rra.resident_id
-       LEFT JOIN residency_enrollments re ON re.resident_id = rra.resident_id
+       LEFT JOIN residency_enrollments re ON re.id = (
+         -- The home enrolment, never a VISITING registry row: a visitor has one
+         -- row per programme, and a direct resident_id join both duplicated
+         -- them in the run and could read their PGY from the wrong programme.
+         SELECT re2.id FROM residency_enrollments re2
+         WHERE re2.resident_id = rra.resident_id
+         ORDER BY (re2.position_type = 'VISITING') ASC, re2.created_at DESC, re2.id DESC
+         LIMIT 1
+       )
        WHERE rb.program_id = ?
          AND rot.department_name IS NOT NULL
          AND rot.department_name <> ''
@@ -2187,9 +2340,11 @@ class ReleaseLetterService {
       `SELECT
          r.id AS resident_id,
          r.first_name,
+         r.middle_initial,
          r.last_name,
          re.program_id,
          re.year_in_program,
+         p.program_code,
          p.program_name,
          p.specialty_name,
          p.institution_name,
@@ -2209,26 +2364,36 @@ class ReleaseLetterService {
            ORDER BY ri.is_primary DESC, ri.id ASC LIMIT 1
          ) AS resident_mobile
        FROM residents r
-       LEFT JOIN residency_enrollments re ON re.resident_id = r.id
+       LEFT JOIN residency_enrollments re ON re.id = (
+         -- Same home-placement rule as the single-resident lookup: the VISITING
+         -- registry row a guest accrues at the host programme must never become
+         -- the letter's "From". Joining directly on resident_id multiplied a
+         -- visitor across both enrolments and let the newest row win.
+         SELECT re2.id FROM residency_enrollments re2
+         WHERE re2.resident_id = r.id
+         ORDER BY (re2.position_type = 'VISITING') ASC, re2.created_at DESC, re2.id DESC
+         LIMIT 1
+       )
        LEFT JOIN programs p ON p.id = re.program_id
-       WHERE r.id IN (?)
-       ORDER BY re.created_at DESC;`,
+       WHERE r.id IN (?);`,
       [residentIds]
     );
 
     for (const row of rows) {
-      // `ORDER BY re.created_at DESC` means the first row seen for a resident is
-      // the most recent enrolment — the same one the single-resident lookup
-      // would have picked.
+      // The join is already deduplicated by the correlated subquery, so every
+      // resident appears once.
       if (contexts.has(row.resident_id)) continue;
       contexts.set(row.resident_id, {
         resident_id: row.resident_id,
-        resident_name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        resident_name: [row.first_name, row.middle_initial, row.last_name]
+          .filter(Boolean)
+          .join(' '),
         pgy_level: row.year_in_program ? `PGY-${row.year_in_program}` : null,
         corporate_id: row.corporate_id || null,
         resident_email: row.resident_email || null,
         resident_mobile: row.resident_mobile || null,
         program_id: row.program_id || null,
+        program_code: row.program_code || null,
         program_name: row.program_name || null,
         specialty_name: row.specialty_name || null,
         institution_name: row.institution_name || null,
@@ -2258,10 +2423,12 @@ class ReleaseLetterService {
          -- it to decide whether a letter crosses a programme boundary and so
          -- deserves a second row in the receiving programme's inbox.
          COALESCE(rot.target_program_id, rot.program_id) AS host_program_id,
-         (SELECT hp.program_name FROM programs hp
-           WHERE hp.id = COALESCE(rot.target_program_id, rot.program_id)) AS host_program_name
+         hp.program_name AS host_program_name,
+         hp.program_code AS host_program_code,
+         hp.institution_name AS host_institution_name
        FROM resident_rotation_assignments rra
        JOIN rotations rot ON rot.id = rra.rotation_id
+       LEFT JOIN programs hp ON hp.id = COALESCE(rot.target_program_id, rot.program_id)
        WHERE rra.id IN (?);`,
       [rotationAssignmentIds]
     );
