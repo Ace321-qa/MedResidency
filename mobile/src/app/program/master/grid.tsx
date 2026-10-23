@@ -535,16 +535,32 @@ export default function MasterGridScreen() {
    * Pulled out so the capacity preview and the write compute it once: a preview
    * that checked a different window than the write would be worse than no
    * preview at all.
+   *
+   * The block's *stored* dates win over grid arithmetic. The columns are drawn
+   * as four weeks from `MASTER_GRID_START`, which happens to match the live
+   * blocks for most of the year but not for every one — Block 1, in the current
+   * academic year, starts a week after the grid's arithmetic says it does. A
+   * window derived from the columns would then run past the block the server
+   * will actually enforce against, and the preview and the write would disagree
+   * by a week. The grid already reads each block's stored dates into
+   * `blocksByNumber`, so they are used when present and the arithmetic remains
+   * only as the fallback for a block the grid has no rows for.
    */
   const targetWindow = useMemo(() => {
     if (!selected) return null;
+    const stored = selected.blockNumber ? blocksByNumber.get(selected.blockNumber) : undefined;
+    const storedStart = stored?.startDateIso ?? null;
+    const storedEnd = stored?.endDateIso ?? null;
     const start =
+      storedStart ??
       selected.startDate ??
       (selected.blockNumber ? blockWindowStart(selected.blockNumber, startDate) : MASTER_GRID_START);
     const end =
-      selected.endDate ?? (selected.blockNumber ? blockWindowEnd(selected.blockNumber, startDate) : null);
-    return { start, end: end ?? start };
-  }, [selected, startDate]);
+      storedEnd ??
+      selected.endDate ??
+      (selected.blockNumber ? blockWindowEnd(selected.blockNumber, startDate) : null);
+    return { start, end: end ?? start, blockId: stored?.block_id ?? selected.blockId ?? null };
+  }, [selected, startDate, blocksByNumber]);
 
   function openAssignSheet(opts: {
     residentId: number;
@@ -590,6 +606,10 @@ export default function MasterGridScreen() {
       // existing rows as other people, so the banner would report a phantom
       // overcapacity the seat tag beside it disagrees with.
       resident_id: selected?.residentId ?? undefined,
+      // The block being placed into, so occupancy is scoped to that block's
+      // date window. Without it, prior-block assignments leak into this block's
+      // count (Block 5 residents inflating Block 6's occupancy).
+      rotation_block_id: targetWindow.blockId ?? undefined,
       start_date: targetWindow.start,
       end_date: targetWindow.end,
     })

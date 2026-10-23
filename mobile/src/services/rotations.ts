@@ -135,6 +135,8 @@ export async function checkAssignmentCapacity(payload: {
   /** The resident being placed, so their own existing rows do not count against them. */
   resident_id?: number;
   exclude_assignment_id?: number;
+  /** The block being placed into, so occupancy is scoped to that block's date window. */
+  rotation_block_id?: number;
 }): Promise<CapacityVerdict> {
   const response = await request<ApiResponse<CapacityVerdict>>(
     '/rotations/assignments/check-capacity',

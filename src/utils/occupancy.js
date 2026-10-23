@@ -200,6 +200,42 @@ function isFiniteCapacity(capacity) {
 }
 
 /**
+ * True when `[rowStart, rowEnd]` shares at least one day with `window`.
+ *
+ * Both sides must be readable `YYYY-MM-DD` dates: an unreadable pair is treated
+ * as *not* overlapping, which is the same thing the week loop below does with
+ * it (an unreadable window contributes no weeks, and so no residents). Keeping
+ * the two decisions in one place stops a row being counted by the window test
+ * while contributing nothing to the weeks — or the reverse.
+ */
+function overlapsWindow(rowStart, rowEnd, window) {
+  const from = parseDate(rowStart);
+  const to = parseDate(rowEnd);
+  const start = parseDate(window?.start_date);
+  const end = parseDate(window?.end_date);
+  if (!from || !to || !start || !end) return false;
+  return from.getTime() <= end.getTime() && to.getTime() >= start.getTime();
+}
+
+/**
+ * Read an optional block window, or `null`.
+ *
+ * Accepts `{start_date, end_date}` (the shape the service and the API speak) or
+ * `{start, end}`; anything unreadable becomes `null`, which means "no block
+ * known" and leaves the engine exactly as it behaved before blocks were part of
+ * the contract. A caller that cannot name a block must not be punished for it —
+ * the proposal's own window still bounds the decision.
+ */
+function normalizeBlockWindow(block) {
+  if (!block || typeof block !== 'object') return null;
+  const start = block.start_date ?? block.start ?? null;
+  const end = block.end_date ?? block.end ?? null;
+  if (!parseDate(start) || !parseDate(end)) return null;
+  if (parseDate(end).getTime() < parseDate(start).getTime()) return null;
+  return { start_date: isoDate(parseDate(start)), end_date: isoDate(parseDate(end)) };
+}
+
+/**
  * Evaluate a proposed assignment's weekly occupancy against a rotation's limit.
  *
  * @param {object} input
@@ -216,6 +252,14 @@ function isFiniteCapacity(capacity) {
  *   re-saved, so it is not counted against itself.
  * @param {number|string} [input.residentId] - the resident being placed. Used
  *   instead of `proposal.resident_id` when both are present.
+ * @param {{start_date:string, end_date:string}} [input.block_window] - the block
+ *   being placed into, when the caller knows it. Supplying it tightens the count
+ *   in two ways: an existing assignment whose window does not overlap the block
+ *   at all is dropped before counting (a Block 5 posting cannot make a Block 6
+ *   week look full), and only the block's own weeks are evaluated rather than
+ *   every week the proposal happens to touch. Omitting it — or passing anything
+ *   unreadable — leaves the engine exactly as it was: the proposal's own window
+ *   bounds the decision.
  * @param {Map<string, number>} [input.existingById] - id → count, for the above.
  * @returns {{
  *   status: string,
@@ -245,13 +289,25 @@ function evaluateOccupancy(input = {}) {
     // matters when they already hold a row in this rotation — without it their
     // own existing row would be counted as a second, different person.
     residentId = null,
+    // The block being placed into, when the caller knows it. See the doc above:
+    // an unreadable block falls back to "no block known" and the engine counts
+    // exactly what it counted before blocks were part of the contract.
+    block_window = null,
   } = input;
+  const blockWindow = normalizeBlockWindow(block_window);
 
   const proposalWeeks = weeksForWindow(
     proposal?.start_date,
     proposal?.end_date,
     week_start_day,
-  );
+  ).filter((weekStart) => {
+    // With a block in hand, only the block's own weeks are judged. A proposal
+    // drawn a few days long on either side of the block — the picker's window
+    // is derived from grid columns and can run past the stored dates by a day
+    // or two — must not turn a neighbouring block's week into the deciding one.
+    if (!blockWindow) return true;
+    return overlapsWindow(weekStart, weekStart, blockWindow);
+  });
 
   if (proposalWeeks.length === 0) {
     return {
@@ -297,6 +353,15 @@ function evaluateOccupancy(input = {}) {
       assignment?.assignment_id !== undefined &&
       Number(assignment.assignment_id) === Number(excludeAssignmentId)
     ) {
+      continue;
+    }
+    // With a block in hand, a row that does not overlap the block at all belongs
+    // to a different block and cannot fill this one's weeks. This is what stops
+    // a resident sitting in Block 5 from making Block 6 look full — the week
+    // sets below would not overlap anyway when the dates are clean, but grid
+    // windows and stored blocks can be a few days out of step, so the test is
+    // made explicit rather than left to the arithmetic.
+    if (blockWindow && !overlapsWindow(assignment?.start_date, assignment?.end_date, blockWindow)) {
       continue;
     }
     const weeks = weeksForWindow(

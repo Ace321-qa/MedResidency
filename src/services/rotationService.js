@@ -172,11 +172,34 @@ const COHORT_GRID_COLUMNS = `
           LIMIT 1
         ) AS release_letter_status,
         -- Distinct residents standing in this rotation during this block. Counted
-        -- per block rather than per week: it is the figure a cell can show, and
-        -- it is the same number the capacity engine reports as the peak when a
-        -- block is fully held by one rotation. A partial block shows the whole
-        -- block's occupancy, which is deliberate — the tag answers "how full is
-        -- this department" at the granularity the grid draws.
+        -- per block rather than per week: it is the figure a cell can show, and it
+        -- is the same number the capacity engine reports as the peak when a block
+        -- is fully held by one rotation. A partial block shows the whole block's
+        -- occupancy, which is deliberate — the tag answers "how full is this
+        -- rotation" at the granularity the grid draws.
+        --
+        -- COUNTING RULE (do not "simplify" this):
+        --   * DATE OVERLAP is the only scope:
+        --     `occ_rra.start_date <= rb.end_date AND occ_rra.end_date >= rb.start_date`
+        --     A resident counts when their assignment touches the viewed block's
+        --     window, no matter which programme's block the row belongs to. Block
+        --     6 of one programme can overlap Block 5 of another, and the host still
+        --     has everyone physically present in those dates.
+        --   * NO block_number and NO academic_year matching. Matching either drops
+        --     cross-programme visitors and mis-counts offset calendars.
+        --     academic_year is data hygiene only, never a filter here.
+        --   * COUNT(DISTINCT occ_rra.resident_id) collapses duplicate / multi-segment
+        --     rows for the same resident in the window — one person, one seat.
+        --   * The CAPACITY POOL is `rotation_id`, matching `rotations.max_capacity`
+        --     and the write path (`loadConcurrentAssignments`:
+        --     `WHERE rotation_id = ? AND start_date <= ? AND end_date >= ?`). Read
+        --     and write MUST agree.
+        --   * There is NO shared department/service capacity pool in the schema, so
+        --     we do NOT group by `department_name` / `rotation_name` — that would
+        --     invent a pool the write path does not enforce. Reported as a schema
+        --     limitation, not worked around.
+        --   * Visiting residents from other programmes count here because they are
+        --     physically present in the host rotation during those dates.
         (
           SELECT COUNT(DISTINCT occ_rra.resident_id)
           FROM resident_rotation_assignments occ_rra
@@ -720,6 +743,15 @@ class RotationService {
         // are the same person, not fellow occupants, so the count is a headcount.
         resident_id,
         proposal: { start_date, end_date },
+        // The block being placed into, from the row read above — never from the
+        // client. Its stored dates scope both the rows read and the weeks
+        // judged, so a resident sitting in an adjacent block cannot make this
+        // one look full (and the master grid's counters, which run the same
+        // engine, agree with what this write enforces).
+        block:
+          block?.start_date_iso && block?.end_date_iso
+            ? { start_date: block.start_date_iso, end_date: block.end_date_iso }
+            : null,
         // Serialise concurrent placements into this rotation: the lock is held
         // until the commit below, so a second coordinator's count includes this
         // one's insert and the limit cannot be exceeded by a race.

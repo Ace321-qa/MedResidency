@@ -215,12 +215,23 @@ class RotationController {
    */
   static async checkCapacity(req, res) {
     try {
-      const { rotation_id, start_date, end_date, program_id, resident_id, exclude_assignment_id } = req.body ?? {};
+      const { rotation_id, start_date, end_date, program_id, resident_id, exclude_assignment_id, rotation_block_id } = req.body ?? {};
       if (!rotation_id || !start_date || !end_date) {
         return res.status(400).json({
           success: false,
           error: 'Missing required fields: rotation_id, start_date, end_date',
         });
+      }
+      // The block the picker is placing into, when it names one. Only its id
+      // crosses the wire: the window is read here, by id, so a client cannot
+      // widen the count by lying about the dates. The write path reads the same
+      // row the same way, so the preview and the enforcement cannot drift.
+      let block = null;
+      if (rotation_block_id) {
+        const loaded = await RotationService.getBlockById(rotation_block_id);
+        if (loaded?.start_date_iso && loaded?.end_date_iso) {
+          block = { start_date: loaded.start_date_iso, end_date: loaded.end_date_iso };
+        }
       }
       const outcome = await RotationCapacityService.checkPlacement(db, {
         rotation_id,
@@ -230,6 +241,7 @@ class RotationController {
         resident_id: resident_id ?? null,
         proposal: { start_date, end_date },
         excludeAssignmentId: exclude_assignment_id ?? null,
+        block,
       });
       if (!outcome.rotation) {
         return res.status(404).json({ success: false, error: `Rotation ${rotation_id} was not found` });

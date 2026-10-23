@@ -72,11 +72,19 @@ async function loadRotation(conn, rotationId, forUpdate = false) {
 /**
  * Every assignment already standing in a rotation, as windows.
  *
- * Scoped by rotation rather than by block on purpose: a resident on the previous
+ * Scoped by rotation rather than by block by default: a resident on the previous
  * block's last week and a resident on this block's first week are in the same
  * department at the same time, and a block-scoped count would miss it. The
  * engine ignores whatever falls outside the proposal's weeks, so reading the
  * whole rotation is both correct and simple.
+ *
+ * When the caller passes a `block` window — the rotation block being placed
+ * into, read server-side by id — the query instead takes the spec's literal
+ * rule, `start_date <= block.end_date AND end_date >= block.start_date`: every
+ * row that overlaps the block at all, and nothing from blocks that do not. The
+ * window may be wider or narrower than the proposal (a proposal drawn from grid
+ * columns can run a day or two past the stored block dates), which is the point:
+ * the block, not the picker's arithmetic, decides who is in the room.
  *
  * When `forUpdate` is set the rows are also locked, and — more importantly —
  * read as a *current* read. Under REPEATABLE READ a plain `SELECT` answers from
@@ -87,7 +95,9 @@ async function loadRotation(conn, rotationId, forUpdate = false) {
  * accept two residents. `FOR UPDATE` here forces the lower-locked read to see
  * the latest committed rows.
  */
-async function loadConcurrentAssignments(conn, rotationId, proposal, forUpdate = false) {
+async function loadConcurrentAssignments(conn, rotationId, proposal, forUpdate = false, block = null) {
+  const window =
+    block && block.start_date && block.end_date ? block : (proposal ?? {});
   const [rows] = await conn.query(
     `SELECT id AS assignment_id,
             resident_id,
@@ -97,7 +107,7 @@ async function loadConcurrentAssignments(conn, rotationId, proposal, forUpdate =
       WHERE rotation_id = ?
         AND start_date <= ?
         AND end_date >= ?${forUpdate ? ' FOR UPDATE' : ''}`,
-    [rotationId, proposal.end_date, proposal.start_date],
+    [rotationId, window.end_date, window.start_date],
   );
   return rows;
 }
@@ -123,6 +133,11 @@ async function loadWeekStartDay(conn, programId) {
  * @param {number} [input.excludeAssignmentId] - the assignment being re-saved.
  * @param {boolean} [input.forUpdate] - lock the rotation row for the caller's
  *   transaction, so a concurrent placement cannot pass the same check.
+ * @param {{start_date:string, end_date:string}} [input.block] - the rotation
+ *   block being placed into, when the caller knows it (see
+ *   `loadConcurrentAssignments` for what that changes). Callers read the block
+ *   by id server-side and pass its stored dates; a client-supplied window is
+ *   never trusted here.
  * @returns {Promise<{rotation:object|null, result:object}>}
  */
 async function checkPlacement(conn, input) {
@@ -137,6 +152,7 @@ async function checkPlacement(conn, input) {
     input.rotation_id,
     input.proposal,
     input.forUpdate === true,
+    input.block ?? null,
   );
 
   const result = evaluateOccupancy({
@@ -151,6 +167,9 @@ async function checkPlacement(conn, input) {
     // but wrong when the caller knows who they are placing — the resident's own
     // existing rows would then be counted against them.
     residentId: input.resident_id ?? input.proposal?.resident_id ?? null,
+    // The block, when known, so the engine's week arithmetic agrees with the
+    // query's row filter rather than trusting the proposal's drawn window alone.
+    block_window: input.block ?? null,
   });
 
   return { rotation, result };
